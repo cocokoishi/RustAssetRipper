@@ -140,7 +140,15 @@ fn project_export_matches_source_for_a_generated_legacy_prefab() {
         .expect("frozen source fixture records the PathIdMap output")
         .split('|')
         .collect::<Vec<_>>();
-    assert_eq!(path_id_map.len().to_string(), expected_path_id_map[0]);
+    // The frozen source ran on Windows and records CRLF bytes. Normalize the host
+    // newline length to that reference while preserving all other serialized bytes.
+    let line_feed_count = path_id_map.iter().filter(|byte| **byte == b'\n').count();
+    let crlf_count = path_id_map
+        .windows(2)
+        .filter(|pair| pair[0] == b'\r' && pair[1] == b'\n')
+        .count();
+    let frozen_windows_length = path_id_map.len() + line_feed_count - crlf_count;
+    assert_eq!(frozen_windows_length.to_string(), expected_path_id_map[0]);
     let expected_empty_map = crate::export::path_id_map::serialize_path_id_map(
         &crate::export::path_id_map::SerializedGameInfo {
             files: vec![crate::export::path_id_map::SerializedFileInfo {

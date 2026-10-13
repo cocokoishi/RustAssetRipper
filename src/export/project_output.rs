@@ -755,15 +755,29 @@ mod tests {
     #[test]
     fn meta_sidecar_rejects_traversal_absolute_device_and_invalid_paths_before_writing() {
         let root = TestOutputRoot::new();
-        for path in [
-            "../outside.asset",
-            "Assets/../outside.asset",
-            "C:\\outside.asset",
-            "\\\\server\\share\\outside.asset",
-            "Assets/NUL.txt",
-            "Assets/Bad?.asset",
-            "Assets//duplicate-separator.asset",
-        ] {
+        let invalid_paths = {
+            let native_paths = vec![
+                "../outside.asset",
+                "Assets/../outside.asset",
+                "Assets//duplicate-separator.asset",
+            ];
+            #[cfg(windows)]
+            {
+                let mut paths = native_paths;
+                paths.extend([
+                    "C:\\outside.asset",
+                    "\\\\server\\share\\outside.asset",
+                    "Assets/NUL.txt",
+                    "Assets/Bad?.asset",
+                ]);
+                paths
+            }
+            #[cfg(not(windows))]
+            {
+                native_paths
+            }
+        };
+        for path in invalid_paths {
             assert!(
                 matches!(
                     write_unity_meta_sidecar(
@@ -779,6 +793,25 @@ mod tests {
             );
         }
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn windows_path_validation_rejects_windows_only_components_on_every_host() {
+        for path in [
+            "C:\\outside.asset",
+            "\\\\server\\share\\outside.asset",
+            "Assets/NUL.txt",
+            "Assets/Bad?.asset",
+        ] {
+            assert!(matches!(
+                validated_path_components_for_platform(
+                    path,
+                    UnityProjectOutputLimits::default(),
+                    HostPathPlatform::Windows,
+                ),
+                Err(UnityProjectOutputError::InvalidRelativePath { .. })
+            ));
+        }
     }
 
     #[test]
