@@ -49,6 +49,51 @@ pub(super) fn webdata_fixture(entries: &[(&str, &[u8])]) -> Vec<u8> {
     input
 }
 
+pub(super) fn unityraw_fixture(path: &str, payload: &[u8]) -> Vec<u8> {
+    assert!(!path.as_bytes().contains(&0));
+    let payload_size = i32::try_from(payload.len()).unwrap();
+    let mut data = Vec::new();
+    data.extend_from_slice(&1_i32.to_be_bytes());
+    data.extend_from_slice(path.as_bytes());
+    data.push(0);
+    let offset_position = data.len();
+    data.extend_from_slice(&0_i32.to_be_bytes());
+    data.extend_from_slice(&payload_size.to_be_bytes());
+    while !data.len().is_multiple_of(4) {
+        data.push(0);
+    }
+    let payload_offset = i32::try_from(data.len()).unwrap();
+    data[offset_position..offset_position + 4].copy_from_slice(&payload_offset.to_be_bytes());
+    let metadata_size = u32::try_from(data.len()).unwrap();
+    data.extend_from_slice(payload);
+
+    let mut input = b"UnityRaw\0".to_vec();
+    input.extend_from_slice(&4_i32.to_be_bytes());
+    input.extend_from_slice(b"5.0.0\0");
+    input.extend_from_slice(b"5.0.0f1\0");
+    input.extend_from_slice(&[0x42; 16]);
+    input.extend_from_slice(&0x1234_5678_u32.to_be_bytes());
+    input.extend_from_slice(&0x1000_u32.to_be_bytes());
+    let header_size_position = input.len();
+    input.extend_from_slice(&0_i32.to_be_bytes());
+    input.extend_from_slice(&0_i32.to_be_bytes());
+    input.extend_from_slice(&0_i32.to_be_bytes());
+    let complete_size_position = input.len();
+    input.extend_from_slice(&0_u32.to_be_bytes());
+    input.extend_from_slice(&metadata_size.to_be_bytes());
+    while !input.len().is_multiple_of(4) {
+        input.push(0);
+    }
+    let header_size = i32::try_from(input.len()).unwrap();
+    input[header_size_position..header_size_position + 4]
+        .copy_from_slice(&header_size.to_be_bytes());
+    input.extend_from_slice(&data);
+    let complete_size = u32::try_from(input.len()).unwrap();
+    input[complete_size_position..complete_size_position + 4]
+        .copy_from_slice(&complete_size.to_be_bytes());
+    input
+}
+
 pub(super) fn serialized_file_header_fixture() -> Vec<u8> {
     // Scheme detection only needs a valid legacy header envelope; this deliberately minimal
     // payload is not passed to the SerializedFile parser.

@@ -646,6 +646,109 @@ fn source_unityraw_nested_unityfs_mounts_file_backed_through_both_path_apis() {
     std::fs::remove_dir(&directory).expect("remove source bundle directory");
 }
 
+#[test]
+fn unityraw_nested_webdata_mounts_file_backed_through_both_path_apis() {
+    let webdata = webdata_fixture(&[("inner.bin", b"web!"), ("sub/deep.bin", b"deep")]);
+    let input = unityraw_fixture("nested.webdata", &webdata);
+    let expected_entries = [
+        ("inner.bin", b"web!".as_slice()),
+        ("sub/deep.bin", b"deep".as_slice()),
+    ];
+
+    let directory = unique_temp_file_path("dir");
+    std::fs::create_dir(&directory).expect("create nested-container fixture directory");
+    let path = directory.join("raw_nested_webdata.bin");
+    std::fs::write(&path, input).expect("write generated UnityRaw and WebData containers");
+
+    let mut path_filesystem = VirtualFileSystem::new();
+    let path_report = SchemeReader::mount_path(
+        &path,
+        &mut path_filesystem,
+        Some("/raw-webdata-path"),
+        SchemeReaderLimits::default(),
+        ContainerMountLimits::default(),
+    )
+    .expect("mount generated UnityRaw with nested WebData by path");
+    assert_eq!(path_report.mounted_entries, expected_entries.len());
+    assert!(path_report.failed_entries.is_empty());
+    assert_eq!(
+        path_report.container_scopes,
+        ["/raw-webdata-path", "/raw-webdata-path/nested.webdata"]
+    );
+    assert_eq!(path_report.container_bundles.len(), 2);
+    assert_eq!(
+        path_report.container_bundles[1].parent_bundle_index,
+        Some(0)
+    );
+    assert_eq!(path_report.container_bundles[1].parent_entry_index, Some(0));
+    assert_eq!(path_report.resource_files.len(), expected_entries.len());
+    for (index, (name, expected_bytes)) in expected_entries.iter().enumerate() {
+        let resource = &path_report.resource_files[index];
+        assert_eq!(resource.name, *name);
+        assert_eq!(resource.container_bundle_index, 1);
+        assert_eq!(resource.resource_index, index);
+        let output = format!("/raw-webdata-path/nested.webdata/{name}");
+        assert_eq!(resource.virtual_path, output);
+        assert_eq!(
+            path_filesystem.open_file(&output).unwrap().stream_type(),
+            crate::io::stream::SmartStreamType::File
+        );
+        assert_eq!(
+            path_filesystem
+                .read_all_bytes(&output, expected_bytes.len())
+                .unwrap(),
+            *expected_bytes
+        );
+    }
+
+    let mut batch_filesystem = VirtualFileSystem::new();
+    let inputs = [PathMountInput {
+        path: path.clone(),
+        destination_root: Some("/raw-webdata-batch".to_owned()),
+    }];
+    let batch_report = SchemeReader::mount_paths(
+        &inputs,
+        &mut batch_filesystem,
+        SchemeReaderLimits::default(),
+        ContainerMountLimits::default(),
+        BatchMountLimits::default(),
+    )
+    .expect("mount generated UnityRaw with nested WebData by batch path");
+    assert_eq!(batch_report.completed_inputs, 1);
+    assert_eq!(batch_report.mounted_entries, expected_entries.len());
+    assert_eq!(batch_report.container_trees.len(), 1);
+    let batch_tree = &batch_report.container_trees[0];
+    assert!(batch_tree.failed_entries.is_empty());
+    assert_eq!(
+        batch_tree.container_scopes,
+        ["/raw-webdata-batch", "/raw-webdata-batch/nested.webdata"]
+    );
+    assert_eq!(batch_tree.resource_files.len(), expected_entries.len());
+    for (index, (name, expected_bytes)) in expected_entries.iter().enumerate() {
+        let resource = &batch_tree.resource_files[index];
+        assert_eq!(resource.name, *name);
+        assert_eq!(resource.container_bundle_index, 1);
+        assert_eq!(resource.resource_index, index);
+        let output = format!("/raw-webdata-batch/nested.webdata/{name}");
+        assert_eq!(resource.virtual_path, output);
+        assert_eq!(
+            batch_filesystem.open_file(&output).unwrap().stream_type(),
+            crate::io::stream::SmartStreamType::File
+        );
+        assert_eq!(
+            batch_filesystem
+                .read_all_bytes(&output, expected_bytes.len())
+                .unwrap(),
+            *expected_bytes
+        );
+    }
+
+    drop(batch_filesystem);
+    drop(path_filesystem);
+    std::fs::remove_file(&path).expect("release nested-container source before cleanup");
+    std::fs::remove_dir(&directory).expect("remove nested-container fixture directory");
+}
+
 /// Single-path import against reference-written bytes.
 ///
 /// The WebData containers below were written by the frozen
