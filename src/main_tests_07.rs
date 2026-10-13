@@ -445,6 +445,103 @@
     }
 
     #[test]
+    fn export_project_material_maps_multiple_texture_pointers_to_their_own_exported_guids() {
+        let directory = TestInputDirectory::new_root();
+        let assets_directory = directory.join("assets");
+        fs::create_dir(&assets_directory).unwrap();
+        let output_root = directory.join("project");
+        fs::create_dir(&output_root).unwrap();
+        let material_path = assets_directory.join("material.assets");
+        let shader_path = assets_directory.join("shader.assets");
+        let texture_a_path = assets_directory.join("texture_a.assets");
+        let texture_b_path = assets_directory.join("texture_b.assets");
+        fs::write(
+            &material_path,
+            make_material_file_with_reference_2019_4_tpk_and_two_texture_references(),
+        )
+        .unwrap();
+        fs::write(
+            &shader_path,
+            make_shader_file_with_non_modifiable_texture_null(),
+        )
+        .unwrap();
+        fs::write(&texture_a_path, make_minimal_texture_file("TextureA", 88)).unwrap();
+        fs::write(&texture_b_path, make_minimal_texture_file("TextureB", 89)).unwrap();
+        let mut input = TestInputDirectory {
+            directory,
+            files: vec![
+                material_path.clone(),
+                shader_path.clone(),
+                texture_a_path.clone(),
+                texture_b_path.clone(),
+            ],
+            subdirectories: vec![
+                assets_directory,
+                output_root.clone(),
+                output_root.join("Assets"),
+                output_root.join("Assets/Material"),
+                output_root.join("Assets/Shader"),
+                output_root.join("Assets/Texture2D"),
+                output_root.join("ProjectSettings"),
+                output_root.join("Packages"),
+            ],
+        };
+
+        super::export_project_to(
+            &[material_path, shader_path, texture_a_path, texture_b_path],
+            &output_root,
+            false,
+            &default_export_settings(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+
+        let texture_a_meta =
+            fs::read_to_string(output_root.join("Assets/Texture2D/TextureA.texture2D.meta"))
+                .unwrap();
+        let texture_a_guid = texture_a_meta
+            .lines()
+            .find_map(|line| line.strip_prefix("guid: "))
+            .expect("first exported Texture2D sidecar has a GUID");
+        let texture_b_meta =
+            fs::read_to_string(output_root.join("Assets/Texture2D/TextureB.texture2D.meta"))
+                .unwrap();
+        let texture_b_guid = texture_b_meta
+            .lines()
+            .find_map(|line| line.strip_prefix("guid: "))
+            .expect("second exported Texture2D sidecar has a GUID");
+        assert_ne!(texture_a_guid, texture_b_guid);
+
+        let material_yaml =
+            fs::read_to_string(output_root.join("Assets/Material/MaterialFixture.mat")).unwrap();
+        let main_texture_pointer = format!(
+            "      _MainTex:\n        m_Texture: {{fileID: 2800000, guid: {texture_a_guid}, type: 2}}"
+        );
+        let additional_texture_pointer = format!(
+            "      _ATexture:\n        m_Texture: {{fileID: 2800000, guid: {texture_b_guid}, type: 2}}"
+        );
+        assert!(material_yaml.contains(&main_texture_pointer));
+        assert!(material_yaml.contains(&additional_texture_pointer));
+        assert!(
+            material_yaml.find("_MainTex:").unwrap() < material_yaml.find("_ATexture:").unwrap(),
+            "Material texture properties preserve serialized order"
+        );
+        assert!(output_root
+            .join("Assets/Texture2D/TextureA.texture2D")
+            .is_file());
+        assert!(output_root
+            .join("Assets/Texture2D/TextureB.texture2D")
+            .is_file());
+
+        input.files.extend(
+            project_tree(&output_root)
+                .iter()
+                .map(|path| output_root.join(path)),
+        );
+        drop(input);
+    }
+
+    #[test]
     fn export_project_material_yaml_matches_the_reference_2017_4_project_probe() {
         let directory = TestInputDirectory::new_root();
         let assets_directory = directory.join("assets");

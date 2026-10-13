@@ -1214,13 +1214,26 @@
     }
 
     fn make_material_file_with_reference_2019_4_tpk_and_texture_reference() -> Vec<u8> {
-        make_material_file_with_reference_tpk_and_properties_and_texture_pointer(
+        make_material_file_with_reference_tpk_and_properties_and_texture_pointers(
             b"2019.4.40f1\0",
             material_2019_4_tpk_release_tree(),
             1,
             false,
             Some((2, 88)),
+            None,
             &["shader.assets", "texture.assets"],
+        )
+    }
+
+    fn make_material_file_with_reference_2019_4_tpk_and_two_texture_references() -> Vec<u8> {
+        make_material_file_with_reference_tpk_and_properties_and_texture_pointers(
+            b"2019.4.40f1\0",
+            material_2019_4_tpk_release_tree(),
+            2,
+            false,
+            Some((2, 88)),
+            Some((3, 89)),
+            &["shader.assets", "texture_a.assets", "texture_b.assets"],
         )
     }
 
@@ -1239,22 +1252,24 @@
         saved_property_count: usize,
         duplicate_keys: bool,
     ) -> Vec<u8> {
-        make_material_file_with_reference_tpk_and_properties_and_texture_pointer(
+        make_material_file_with_reference_tpk_and_properties_and_texture_pointers(
             version,
             type_tree,
             saved_property_count,
             duplicate_keys,
             None,
+            None,
             &["shader.assets"],
         )
     }
 
-    fn make_material_file_with_reference_tpk_and_properties_and_texture_pointer(
+    fn make_material_file_with_reference_tpk_and_properties_and_texture_pointers(
         version: &[u8],
         type_tree: assetripper::serialized_file::metadata::TypeTree,
         saved_property_count: usize,
         duplicate_keys: bool,
         texture_pointer: Option<(i32, i64)>,
+        second_texture_pointer: Option<(i32, i64)>,
         external_names: &[&str],
     ) -> Vec<u8> {
         let has_split_keywords = type_tree
@@ -1315,8 +1330,10 @@
                         "_ATexture"
                     },
                 );
-                put_i32_le(&mut payload, 0);
-                put_i64_le(&mut payload, 0);
+                let (texture_file_id, texture_path_id) =
+                    second_texture_pointer.unwrap_or_default();
+                put_i32_le(&mut payload, texture_file_id);
+                put_i64_le(&mut payload, texture_path_id);
                 put_f32_le(&mut payload, 2.0);
                 put_f32_le(&mut payload, 0.5);
                 put_f32_le(&mut payload, -0.25);
