@@ -32,8 +32,24 @@
         let first_object = yaml.find("--- !u!189 &77").unwrap();
         let second_object = yaml.find("--- !u!189 &78").unwrap();
         assert!(first_object < second_object);
-        assert!(yaml.contains("m_ImageData_C189: 3132"));
-        assert!(yaml.contains("m_ImageData_C189: 3637"));
+        let first_object_yaml = &yaml[first_object..second_object];
+        let second_object_yaml = &yaml[second_object..];
+        assert!(
+            first_object_yaml.contains("m_ImageData_C189: 2"),
+            "first streamed texture writes its byte count"
+        );
+        assert!(
+            first_object_yaml.contains("_typelessdata: 3132"),
+            "first streamed texture writes its inline bytes"
+        );
+        assert!(
+            second_object_yaml.contains("m_ImageData_C189: 2"),
+            "second streamed texture writes its byte count"
+        );
+        assert!(
+            second_object_yaml.contains("_typelessdata: 3637"),
+            "second streamed texture writes its inline bytes"
+        );
         assert!(!yaml.contains("texture.resS"));
         assert_eq!(fs::read(&serialized_path).unwrap(), serialized_bytes);
         assert_eq!(fs::read(&resource_path).unwrap(), b"0123456789");
@@ -703,8 +719,15 @@
             normalized_lines(&expected_yaml),
             "the only source difference is rebasing the sliced sidecar offset to zero"
         );
-        assert!(actual_yaml.contains("m_Source: Assets\\AudioClip\\AudioFixture.audioclip.resS"));
-        assert!(actual_yaml.contains("m_Offset: 0\n    m_Size: 3"));
+        assert!(normalized_lines(&actual_yaml).contains(
+            normalized_lines("m_Source: Assets\\AudioClip\\AudioFixture.audioclip.resS")
+                .trim_end()
+        ));
+        assert!(
+            normalized_lines(&actual_yaml).contains(
+                normalized_lines("m_Offset: 0\n    m_Size: 3").trim_end()
+            )
+        );
         assert_eq!(fs::read(&audio_sidecar_path).unwrap(), source_sidecar);
         assert_eq!(
             normalized_meta(&fs::read_to_string(&audio_meta_path).unwrap()).as_bytes(),

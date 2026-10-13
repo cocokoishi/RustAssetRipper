@@ -692,10 +692,17 @@
         let meta_path = output_root.join("Assets/Texture2D/Texture2D.texture2D.meta");
         let yaml = fs::read_to_string(&asset_path).unwrap();
         assert!(yaml.contains("--- !u!28 &2800000"));
-        assert!(yaml.contains("image data: 323334"), "{yaml}");
-        assert!(yaml.contains("offset: 0"), "{yaml}");
-        assert!(yaml.contains("size: 0"), "{yaml}");
-        assert!(!yaml.contains("texture.resS"), "{yaml}");
+        assert!(
+            yaml.contains("image data: 3"),
+            "Texture2D writes its byte count"
+        );
+        assert!(
+            yaml.contains("_typelessdata: 323334"),
+            "Texture2D writes its inline bytes"
+        );
+        assert!(yaml.contains("offset: 0"));
+        assert!(yaml.contains("size: 0"));
+        assert!(!yaml.contains("texture.resS"));
         assert!(fs::read_to_string(&meta_path)
             .unwrap()
             .contains("NativeFormatImporter:"));
@@ -787,11 +794,18 @@
             line == "SOURCE_STREAMED_YAML|class=28|data=323334|offset=0|size=0|path_empty=true"
         }));
         let yaml = fs::read_to_string(&asset_path).unwrap();
-        assert!(yaml.contains("--- !u!28 &2800000"), "{yaml}");
-        assert!(yaml.contains("image data: 323334"), "{yaml}");
-        assert!(yaml.contains("offset: 0"), "{yaml}");
-        assert!(yaml.contains("size: 0"), "{yaml}");
-        assert!(!yaml.contains("texture.resS"), "{yaml}");
+        assert!(yaml.contains("--- !u!28 &2800000"));
+        assert!(
+            yaml.contains("image data: 3"),
+            "Texture2D writes its byte count"
+        );
+        assert!(
+            yaml.contains("_typelessdata: 323334"),
+            "Texture2D writes its inline bytes"
+        );
+        assert!(yaml.contains("offset: 0"));
+        assert!(yaml.contains("size: 0"));
+        assert!(!yaml.contains("texture.resS"));
         assert!(fs::read_to_string(&meta_path)
             .unwrap()
             .contains("NativeFormatImporter:"));

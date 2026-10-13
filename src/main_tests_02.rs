@@ -418,7 +418,14 @@
         .unwrap();
         let yaml = fs::read_to_string(&output_path).unwrap();
         assert!(yaml.contains("--- !u!189 &1"));
-        assert!(yaml.contains("m_ImageData_C189: 323334"));
+        assert!(
+            yaml.contains("m_ImageData_C189: 3"),
+            "streamed texture writes its byte count"
+        );
+        assert!(
+            yaml.contains("_typelessdata: 323334"),
+            "streamed texture writes its inline bytes"
+        );
         assert!(yaml.contains("offset: 0"));
         assert!(yaml.contains("size: 0"));
         assert!(!yaml.contains("texture.resS"));
