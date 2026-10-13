@@ -2,18 +2,18 @@
 
 ## Identity
 
-- Reference path: `C:\Users\koishi\Desktop\RustAssetripper\AssetRipper`.
+- Reference path: `本地路径已隐去`.
 - The reference directory has no `.git` metadata. Commit, branch, tag, and submodule revisions therefore cannot be recovered from this copy.
 - `Source/Directory.Build.props` declares version prefix `2.0.0`, target framework `net10.0`, nullable analysis, latest C# language version, AOT compatibility, and checked integer arithmetic.
 - The upstream README claims Unity support from `3.5.0` through `6000.4.X`; it also cautions that support quality varies by version. This is a source claim, not independent compatibility evidence.
 - `AssetRipper.slnx` lists 51 projects: 8 test projects and 6 source-generator projects, alongside core libraries, GUI/web components, export modules, developer tools, and assembly processing tools.
 - `baseline-projects.csv` records every solution project, project references, directly declared NuGet packages, project kind, and output type as found in the local snapshot. Transitive dependency and license analysis remain open.
 - The local snapshot contains 1,449 files in 188 directories, totaling 23,247,459 bytes at the initial inventory.
-- The root license is GNU GPL version 3; an identical copy is retained as `LICENSE.md` in the Rust repository (SHA-256 `81cbae84a29ce7e770bf2bc7b178e50bda0ce8de6067aba661b0bc7b05b562f8`). Third-party notices are present under `Source/Licenses`; dependency-by-dependency license and migration analysis remains open.
+- The root license is GNU GPL version 3; an identical copy is retained as `LICENSE.md` in the Rust repository (SHA-256 `SHA256_REDACTED`). Third-party notices are present under `Source/Licenses`; dependency-by-dependency license and migration analysis remains open.
 
 ## Reproducible identity for this non-Git snapshot
 
-`baseline-files.sha256` contains a SHA-256 checksum and relative path for every file under the reference directory at the initial freeze. It has 1,449 entries. Its own SHA-256 is `29d1fd27f66b974c43750f30aa99117eb423cb318f3062daf05e1489f10f08f9`.
+`baseline-files.sha256` contains a SHA-256 checksum and relative path for every file under the reference directory at the initial freeze. It has 1,449 entries. Its own SHA-256 is `SHA256_REDACTED`.
 
 The reference source was read only. No build, export, or test output was written into it. The checksum manifest is stored in this Rust repository under `docs/`.
 

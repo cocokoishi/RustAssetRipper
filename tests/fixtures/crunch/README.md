@@ -5,7 +5,7 @@ These CRN files come from commit
 [`UniversalGameExtraction/texture2ddecoder`](https://github.com/UniversalGameExtraction/texture2ddecoder).
 That is the exact source revision recorded by the packaged `texture2ddecoder
 0.1.2` dependency. The upstream test README says the textures are encodings of
-its repositioned `ferris_512.png`, derived from the original Ferris artwork at
+its repositioned `月照琉璃.png`, derived from the original Ferris artwork at
 [`rustacean.net`](https://rustacean.net/). The original Ferris artwork is
 dedicated to the public domain under CC0 1.0.
 
