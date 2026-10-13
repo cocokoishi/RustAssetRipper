@@ -1782,7 +1782,7 @@ mod tests {
 
         apply_sprite_sheet_metadata_to_importer(&mut importer, &sprites, &decision).unwrap();
 
-        let entries = field(&field(&importer, "spriteSheet"), "sprites");
+        let entries = field(field(&importer, "spriteSheet"), "sprites");
         let UnityYamlNodeKind::Sequence { items, .. } = &entries.kind else {
             panic!("SpriteSheet.sprites must be a sequence");
         };
@@ -1798,7 +1798,7 @@ mod tests {
                 if name == "second"
         ));
         assert!(matches!(
-            &field(&field(&items[0], "rect"), "width").kind,
+            &field(field(&items[0], "rect"), "width").kind,
             crate::export::unity_yaml::UnityYamlNodeKind::Scalar(UnityYamlScalar::Float32(width))
                 if *width == 16.0
         ));
