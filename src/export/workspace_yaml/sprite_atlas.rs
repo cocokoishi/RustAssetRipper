@@ -174,6 +174,7 @@ pub(super) fn workspace_sprite_atlas_yaml_overlay(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn copy_atlas_render_data_fields(
     atlas_data: &SerializedValue,
     atlas_data_path: &str,
@@ -256,6 +257,7 @@ fn copy_atlas_render_data_fields(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn normalize_atlas_pointers(
     source: &SerializedValue,
     target: &mut SerializedValue,
@@ -676,20 +678,15 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn copied_atlas_pointer_is_resolved_in_atlas_scope_then_rebased_for_sprite_yaml() {
-        let source = SerializedValue::Struct(vec![SerializedFieldValue {
-            name: "secondaryTextures".to_owned(),
-            value: SerializedValue::Array(vec![SerializedValue::Struct(vec![
-                SerializedFieldValue {
-                    name: "texture".to_owned(),
-                    value: SerializedValue::PPtr {
-                        file_id: 2,
-                        path_id: 45,
-                    },
+        let source =
+            SerializedValue::Array(vec![SerializedValue::Struct(vec![SerializedFieldValue {
+                name: "texture".to_owned(),
+                value: SerializedValue::PPtr {
+                    file_id: 2,
+                    path_id: 45,
                 },
-            ])]),
-        }]);
+            }])]);
         let mut target = source.clone();
         let target_identity = ExportAssetIdentity {
             collection: ExportAssetCollectionIdentity::SerializedFile { file_index: 7 },
@@ -723,10 +720,7 @@ mod tests {
             overlays[0].target,
             ProjectPointerRequest::ResolvedAsset(target_identity)
         );
-        let SerializedValue::Struct(fields) = target else {
-            panic!("copied render data is not a struct");
-        };
-        let SerializedValue::Array(entries) = &fields[0].value else {
+        let SerializedValue::Array(entries) = target else {
             panic!("copied secondary textures is not an array");
         };
         assert_eq!(
