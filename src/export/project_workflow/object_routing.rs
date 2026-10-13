@@ -599,6 +599,12 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
     let scene_lighting_subasset_directories = context.scene_lighting_subasset_directories;
     let bundle_container_original_directories = context.bundle_container_original_directories;
     let mut used_guids = context.existing_guids.clone();
+    let sprite_texture_associations =
+        crate::export::importer_fields::SpriteTextureAssociationIndex::build(
+            workspace,
+            objects,
+            reference_graph,
+        )?;
     let mut next_guid_sequence = 0u64;
     let mut next_collection_index = 0usize;
     let mut routed = Vec::new();
@@ -1070,10 +1076,11 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                     // texture pointer overwrite the default sprite importer fields.
                     // Cubemap, texture-array, Texture3D, and lightmap routes keep their existing fields.
                     let sprite_facts =
-                        crate::export::importer_fields::collect_sprite_facts_for_texture(
+                        crate::export::importer_fields::collect_sprite_facts_for_texture_with_associations(
                             workspace,
                             objects,
                             reference_graph,
+                            &sprite_texture_associations,
                             file_index,
                             object_index,
                             &object.factory.name,

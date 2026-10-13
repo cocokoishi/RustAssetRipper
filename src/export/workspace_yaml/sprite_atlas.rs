@@ -1,3 +1,7 @@
+use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+
 use crate::export::pointer_map::{ProjectPointerRequest, UnresolvedProjectPointer};
 use crate::export::scene_collection::{ExportAssetCollectionIdentity, ExportAssetIdentity};
 use crate::serialized_file::object::{SerializedFieldValue, SerializedValue};
@@ -6,16 +10,16 @@ use crate::serialized_file::reference_graph::{
     MultiFileObjectReference, MultiFilePPtrResolution, MultiFileReferenceGraph,
 };
 
-pub(super) struct WorkspaceSpriteAtlasYamlOverlay {
-    pub(super) source: ExportAssetIdentity,
-    pub(super) root: SerializedValue,
-    pub(super) pointers: Vec<WorkspaceSpriteAtlasPointer>,
+pub(crate) struct WorkspaceSpriteAtlasYamlOverlay {
+    pub(crate) source: ExportAssetIdentity,
+    pub(crate) root: SerializedValue,
+    pub(crate) pointers: Vec<WorkspaceSpriteAtlasPointer>,
 }
 
-pub(super) struct WorkspaceSpriteAtlasPointer {
-    pub(super) field_path: String,
-    pub(super) path_id: i64,
-    pub(super) target: ProjectPointerRequest,
+pub(crate) struct WorkspaceSpriteAtlasPointer {
+    pub(crate) field_path: String,
+    pub(crate) path_id: i64,
+    pub(crate) target: ProjectPointerRequest,
 }
 
 /// Rebuild the render data copied by AssetRipper's SpriteProcessor for an atlas-backed Sprite.
@@ -23,11 +27,21 @@ pub(super) struct WorkspaceSpriteAtlasPointer {
 /// The atlas map and all pointer edges are resolved in the atlas object's own file scope. The
 /// copied Sprite values use fileID zero only as a temporary YAML-walker token; each non-null
 /// pointer is paired with its graph-resolved target and replaced through the export pointer map.
-pub(super) fn workspace_sprite_atlas_yaml_overlay(
+pub(crate) fn workspace_sprite_atlas_yaml_overlay(
     objects: &ObjectWorkspace,
     reference_graph: &MultiFileReferenceGraph<'_>,
     sprite: &WorkspaceObject,
     source: ExportAssetIdentity,
+) -> Result<Option<WorkspaceSpriteAtlasYamlOverlay>, String> {
+    workspace_sprite_atlas_yaml_overlay_with_index(objects, reference_graph, sprite, source, None)
+}
+
+pub(crate) fn workspace_sprite_atlas_yaml_overlay_with_index(
+    objects: &ObjectWorkspace,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+    sprite: &WorkspaceObject,
+    source: ExportAssetIdentity,
+    render_data_index: Option<&SpriteAtlasRenderDataIndex<'_>>,
 ) -> Result<Option<WorkspaceSpriteAtlasYamlOverlay>, String> {
     if source.class_id != 213 || sprite.factory.class_id != 213 {
         return Err(format!(
@@ -98,22 +112,19 @@ pub(super) fn workspace_sprite_atlas_yaml_overlay(
         .payload
         .as_ref()
         .map_err(|error| format!("SpriteAtlas payload could not be decoded: {error}"))?;
-    let render_data_key = sprite_payload
-        .root
-        .unique_field_in_base_chain("m_RenderDataKey")
-        .map_err(|error| format!("could not inspect Sprite.m_RenderDataKey: {error}"))?
-        .ok_or_else(|| "atlas-backed Sprite has no m_RenderDataKey".to_owned())?;
-    let render_data_map = atlas_payload
-        .root
-        .unique_field_in_base_chain("m_RenderDataMap")
-        .map_err(|error| format!("could not inspect SpriteAtlas.m_RenderDataMap: {error}"))?
-        .ok_or_else(|| "SpriteAtlas has no m_RenderDataMap".to_owned())?;
-    let render_data_map_path = field_path_in_base_chain(&atlas_payload.root, "m_RenderDataMap")?
-        .ok_or_else(|| "SpriteAtlas.m_RenderDataMap has no serialized field path".to_owned())?;
-    let entries = map_entries(render_data_map)?;
-    let (entry_index, atlas_render_data, data_name) =
-        find_render_data_entry(entries, render_data_key)?;
-    let atlas_data_path = format!("{render_data_map_path}[{entry_index}].{data_name}");
+    let atlas_render_data = match render_data_index {
+        Some(index) if index.belongs_to(&atlas_payload.root) => index.find(&sprite_payload.root)?,
+        Some(_) => {
+            return Err(
+                "SpriteAtlas render-data index belongs to a different Atlas object".to_owned(),
+            );
+        }
+        None => sprite_atlas_render_data_for_key(&atlas_payload.root, &sprite_payload.root)?,
+    }
+    .ok_or_else(|| {
+        "SpriteAtlas.m_RenderDataMap has no entry for Sprite.m_RenderDataKey".to_owned()
+    })?;
+    let atlas_data_path = atlas_render_data.path;
     let sprite_render_data = sprite_payload
         .root
         .unique_field_in_base_chain("m_RD")
@@ -125,7 +136,7 @@ pub(super) fn workspace_sprite_atlas_yaml_overlay(
     let mut pointers = Vec::new();
     let mut rebuilt_render_data = sprite_render_data.clone();
     copy_atlas_render_data_fields(
-        atlas_render_data,
+        atlas_render_data.data,
         &atlas_data_path,
         &mut rebuilt_render_data,
         &sprite_render_data_path,
@@ -172,6 +183,337 @@ pub(super) fn workspace_sprite_atlas_yaml_overlay(
         root,
         pointers,
     }))
+}
+
+pub(crate) struct SpriteAtlasRenderData<'a> {
+    pub(crate) data: &'a SerializedValue,
+    pub(crate) path: String,
+}
+
+/// One Atlas map index reused for every entry in `PackedSprites`.
+pub(crate) struct SpriteAtlasRenderDataIndex<'a> {
+    atlas_root: &'a SerializedValue,
+    entries: &'a [SerializedValue],
+    map_path: String,
+    key_indexes: HashMap<u64, Vec<usize>>,
+}
+
+impl<'a> SpriteAtlasRenderDataIndex<'a> {
+    pub(crate) fn new(atlas_root: &'a SerializedValue) -> Result<Self, String> {
+        let map = atlas_root
+            .unique_field_in_base_chain("m_RenderDataMap")
+            .map_err(|error| format!("could not inspect SpriteAtlas.m_RenderDataMap: {error}"))?
+            .ok_or_else(|| "SpriteAtlas has no m_RenderDataMap".to_owned())?;
+        let entries = map_entries(map)?;
+        let map_path = field_path_in_base_chain(atlas_root, "m_RenderDataMap")?
+            .ok_or_else(|| "SpriteAtlas.m_RenderDataMap has no serialized field path".to_owned())?;
+        let mut key_indexes: HashMap<u64, Vec<usize>> = HashMap::new();
+        key_indexes
+            .try_reserve(entries.len())
+            .map_err(|_| "could not allocate SpriteAtlas render-data key index".to_owned())?;
+        for (index, entry) in entries.iter().enumerate() {
+            let (key, _, _) = map_pair(entry)?;
+            let fingerprint = serialized_value_fingerprint(key)?;
+            if let Some(indexes) = key_indexes.get_mut(&fingerprint) {
+                indexes
+                    .try_reserve(1)
+                    .map_err(|_| "could not grow SpriteAtlas render-data key index".to_owned())?;
+                indexes.push(index);
+            } else {
+                let mut indexes = Vec::new();
+                indexes.try_reserve(1).map_err(|_| {
+                    "could not allocate SpriteAtlas render-data key bucket".to_owned()
+                })?;
+                indexes.push(index);
+                key_indexes.insert(fingerprint, indexes);
+            }
+        }
+        Ok(Self {
+            atlas_root,
+            entries,
+            map_path,
+            key_indexes,
+        })
+    }
+
+    pub(crate) fn belongs_to(&self, atlas_root: &SerializedValue) -> bool {
+        std::ptr::eq(self.atlas_root, atlas_root)
+    }
+
+    pub(crate) fn find(
+        &self,
+        sprite_root: &SerializedValue,
+    ) -> Result<Option<SpriteAtlasRenderData<'a>>, String> {
+        let key = sprite_root
+            .unique_field_in_base_chain("m_RenderDataKey")
+            .map_err(|error| format!("could not inspect Sprite.m_RenderDataKey: {error}"))?;
+        let Some(key) = key else {
+            return Ok(None);
+        };
+        let fingerprint = serialized_value_fingerprint(key)?;
+        let Some(indexes) = self.key_indexes.get(&fingerprint) else {
+            return Ok(None);
+        };
+        let mut found = None;
+        for &index in indexes {
+            let (candidate_key, data, data_name) = map_pair(&self.entries[index])?;
+            if candidate_key == key {
+                if found.is_some() {
+                    return Err(format!(
+                        "SpriteAtlas.m_RenderDataMap has multiple entries for Sprite.m_RenderDataKey {key:?}"
+                    ));
+                }
+                found = Some(SpriteAtlasRenderData {
+                    data,
+                    path: format!("{}[{index}].{data_name}", self.map_path),
+                });
+            }
+        }
+        Ok(found)
+    }
+}
+
+fn serialized_value_fingerprint(value: &SerializedValue) -> Result<u64, String> {
+    let mut hasher = DefaultHasher::new();
+    hash_serialized_value(value, &mut hasher)?;
+    Ok(hasher.finish())
+}
+
+fn hash_serialized_value(value: &SerializedValue, hasher: &mut impl Hasher) -> Result<(), String> {
+    match value {
+        SerializedValue::Bool(value) => {
+            0_u8.hash(hasher);
+            value.hash(hasher);
+        }
+        SerializedValue::I8(value) => {
+            1_u8.hash(hasher);
+            value.hash(hasher);
+        }
+        SerializedValue::U8(value) => {
+            2_u8.hash(hasher);
+            value.hash(hasher);
+        }
+        SerializedValue::I16(value) => {
+            3_u8.hash(hasher);
+            value.hash(hasher);
+        }
+        SerializedValue::U16(value) => {
+            4_u8.hash(hasher);
+            value.hash(hasher);
+        }
+        SerializedValue::Char(value) => {
+            5_u8.hash(hasher);
+            value.hash(hasher);
+        }
+        SerializedValue::I32(value) => {
+            6_u8.hash(hasher);
+            value.hash(hasher);
+        }
+        SerializedValue::U32(value) => {
+            7_u8.hash(hasher);
+            value.hash(hasher);
+        }
+        SerializedValue::I64(value) => {
+            8_u8.hash(hasher);
+            value.hash(hasher);
+        }
+        SerializedValue::U64(value) => {
+            9_u8.hash(hasher);
+            value.hash(hasher);
+        }
+        SerializedValue::F32(_) => {
+            return Err("SpriteAtlas render-data key contains a floating-point value".to_owned());
+        }
+        SerializedValue::F64(_) => {
+            return Err("SpriteAtlas render-data key contains a floating-point value".to_owned());
+        }
+        SerializedValue::StringBytes(value) => {
+            12_u8.hash(hasher);
+            value.hash(hasher);
+        }
+        SerializedValue::Bytes(value) => {
+            13_u8.hash(hasher);
+            value.hash(hasher);
+        }
+        SerializedValue::Array(values) => {
+            14_u8.hash(hasher);
+            values.len().hash(hasher);
+            for value in values {
+                hash_serialized_value(value, hasher)?;
+            }
+        }
+        SerializedValue::Struct(fields) => {
+            15_u8.hash(hasher);
+            fields.len().hash(hasher);
+            for field in fields {
+                field.name.hash(hasher);
+                hash_serialized_value(&field.value, hasher)?;
+            }
+        }
+        SerializedValue::PPtr { file_id, path_id } => {
+            16_u8.hash(hasher);
+            file_id.hash(hasher);
+            path_id.hash(hasher);
+        }
+        SerializedValue::ManagedReferenceId {
+            reference_id,
+            indexed,
+        } => {
+            17_u8.hash(hasher);
+            reference_id.hash(hasher);
+            indexed.hash(hasher);
+        }
+        SerializedValue::ManagedReferenceRegistry(_) => {
+            return Err(
+                "SpriteAtlas render-data key contains a managed reference registry".to_owned(),
+            );
+        }
+        SerializedValue::Raw { type_name, bytes } => {
+            18_u8.hash(hasher);
+            type_name.hash(hasher);
+            bytes.hash(hasher);
+        }
+    }
+    Ok(())
+}
+
+/// Resolve one Sprite key in an Atlas map. A missing key has the source's lookup-miss shape;
+/// malformed or duplicate entries remain explicit errors.
+pub(crate) fn sprite_atlas_render_data_for_key<'a>(
+    atlas_root: &'a SerializedValue,
+    sprite_root: &SerializedValue,
+) -> Result<Option<SpriteAtlasRenderData<'a>>, String> {
+    let key = sprite_root
+        .unique_field_in_base_chain("m_RenderDataKey")
+        .map_err(|error| format!("could not inspect Sprite.m_RenderDataKey: {error}"))?;
+    let Some(key) = key else {
+        return Ok(None);
+    };
+    let map = atlas_root
+        .unique_field_in_base_chain("m_RenderDataMap")
+        .map_err(|error| format!("could not inspect SpriteAtlas.m_RenderDataMap: {error}"))?
+        .ok_or_else(|| "SpriteAtlas has no m_RenderDataMap".to_owned())?;
+    let map_path = field_path_in_base_chain(atlas_root, "m_RenderDataMap")?
+        .ok_or_else(|| "SpriteAtlas.m_RenderDataMap has no serialized field path".to_owned())?;
+    let Some((index, data, data_name)) = find_render_data_entry_optional(map_entries(map)?, key)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(SpriteAtlasRenderData {
+        data,
+        path: format!("{map_path}[{index}].{data_name}"),
+    }))
+}
+
+/// Resolve the Texture2D selected by one SpriteAtlas map entry in the Atlas object's file scope.
+/// This is shared by project reconstruction and TextureImporter SpriteInformation grouping.
+pub(crate) fn sprite_atlas_data_texture_target(
+    objects: &ObjectWorkspace,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+    atlas_file_index: usize,
+    atlas_object_index: usize,
+    sprite: &WorkspaceObject,
+    render_data_index: &SpriteAtlasRenderDataIndex<'_>,
+) -> Result<Option<(usize, usize)>, String> {
+    if reference_graph.object_scan_is_complete(atlas_file_index, atlas_object_index) != Some(true) {
+        return Err(format!(
+            "SpriteAtlas file {atlas_file_index} object {atlas_object_index} has an incomplete reference scan"
+        ));
+    }
+    let atlas = objects
+        .get(atlas_file_index, atlas_object_index)
+        .ok_or_else(|| {
+            format!(
+                "SpriteAtlas file {atlas_file_index} object {atlas_object_index} is absent from the decoded object workspace"
+            )
+        })?;
+    if reference_graph.object_class_id(atlas_file_index, atlas_object_index) != Some(687_078_895) {
+        return Err(format!(
+            "object {atlas_object_index} in file {atlas_file_index} is not a SpriteAtlas"
+        ));
+    }
+    let atlas_payload = atlas
+        .payload
+        .as_ref()
+        .map_err(|error| format!("SpriteAtlas payload could not be decoded: {error}"))?;
+    if !render_data_index.belongs_to(&atlas_payload.root) {
+        return Err("SpriteAtlas render-data index belongs to a different Atlas object".to_owned());
+    }
+    let sprite_payload = sprite
+        .payload
+        .as_ref()
+        .map_err(|error| format!("Sprite payload could not be decoded: {error}"))?;
+    let Some(render_data) = render_data_index.find(&sprite_payload.root)? else {
+        return Ok(None);
+    };
+    let texture = render_data
+        .data
+        .unique_field_in_base_chain("texture")
+        .map_err(|error| format!("could not inspect SpriteAtlasData.texture: {error}"))?
+        .ok_or_else(|| "SpriteAtlasData has no texture field".to_owned())?;
+    let SerializedValue::PPtr { file_id, path_id } = texture else {
+        return Err(format!(
+            "SpriteAtlasData.texture has value {texture:?}, expected a PPtr"
+        ));
+    };
+    if *path_id == 0 {
+        return Ok(None);
+    }
+    let texture_field_path = field_path_in_base_chain(render_data.data, "texture")?
+        .ok_or_else(|| "SpriteAtlasData.texture has no serialized field path".to_owned())?;
+    let reference = unique_reference_for_field(
+        reference_graph,
+        atlas_file_index,
+        atlas_object_index,
+        &join_field_path(&render_data.path, &texture_field_path),
+        *file_id,
+        *path_id,
+    )?;
+    let target_class_id = match &reference.resolution {
+        MultiFilePPtrResolution::Object {
+            target_file_index,
+            target_object_index,
+        } => reference_graph.object_class_id(*target_file_index, *target_object_index),
+        _ => None,
+    };
+    typed_reference_target(&reference.resolution, target_class_id, 28).map_err(|error| {
+        format!(
+            "SpriteAtlasData.texture at {:?} did not resolve to a Texture2D: {error}",
+            reference.field_path
+        )
+    })
+}
+
+/// Classify a non-null typed PPtr. Unresolved or wrong-type references remain errors so the
+/// caller cannot silently omit importer metadata; valid predefined engine assets have no
+/// workspace object identity and therefore cannot form a texture association.
+pub(crate) fn typed_reference_target(
+    resolution: &MultiFilePPtrResolution,
+    target_class_id: Option<i32>,
+    expected_class_id: i32,
+) -> Result<Option<(usize, usize)>, String> {
+    match resolution {
+        MultiFilePPtrResolution::Object {
+            target_file_index,
+            target_object_index,
+        } => match target_class_id {
+            Some(class_id) if class_id == expected_class_id => {
+                Ok(Some((*target_file_index, *target_object_index)))
+            }
+            Some(class_id) => Err(format!(
+                "resolved object has class {class_id}, expected {expected_class_id}"
+            )),
+            None => Err("resolved object has no class ID".to_owned()),
+        },
+        MultiFilePPtrResolution::PredefinedEngineAsset { class_id, .. }
+            if *class_id == expected_class_id =>
+        {
+            Ok(None)
+        }
+        resolution => Err(format!(
+            "non-null PPtr is unresolved or has the wrong type: {resolution:?}"
+        )),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -391,7 +733,7 @@ where
     }
 }
 
-fn unique_reference_for_field<'graph, 'data>(
+pub(crate) fn unique_reference_for_field<'graph, 'data>(
     reference_graph: &'graph MultiFileReferenceGraph<'data>,
     file_index: usize,
     object_index: usize,
@@ -479,10 +821,20 @@ fn map_entries(value: &SerializedValue) -> Result<&[SerializedValue], String> {
     }
 }
 
+#[cfg(test)]
 fn find_render_data_entry<'a>(
     entries: &'a [SerializedValue],
     wanted_key: &SerializedValue,
 ) -> Result<(usize, &'a SerializedValue, String), String> {
+    find_render_data_entry_optional(entries, wanted_key)?.ok_or_else(|| {
+        "SpriteAtlas.m_RenderDataMap has no entry for Sprite.m_RenderDataKey".to_owned()
+    })
+}
+
+fn find_render_data_entry_optional<'a>(
+    entries: &'a [SerializedValue],
+    wanted_key: &SerializedValue,
+) -> Result<Option<(usize, &'a SerializedValue, String)>, String> {
     let mut found = None;
     for (index, entry) in entries.iter().enumerate() {
         let (key, data, data_name) = map_pair(entry)?;
@@ -495,9 +847,7 @@ fn find_render_data_entry<'a>(
             found = Some((index, data, data_name));
         }
     }
-    found.ok_or_else(|| {
-        "SpriteAtlas.m_RenderDataMap has no entry for Sprite.m_RenderDataKey".to_owned()
-    })
+    Ok(found)
 }
 
 fn map_pair(
@@ -540,7 +890,10 @@ fn one_pair_member<'a>(
     Ok(first)
 }
 
-fn field_path_in_base_chain(value: &SerializedValue, name: &str) -> Result<Option<String>, String> {
+pub(crate) fn field_path_in_base_chain(
+    value: &SerializedValue,
+    name: &str,
+) -> Result<Option<String>, String> {
     let mut scope = value;
     let mut base_depth = 0usize;
     loop {
@@ -662,6 +1015,99 @@ mod tests {
         ]);
         assert!(find_render_data_entry(map_entries(&duplicate).unwrap(), &render_key()).is_err());
         assert!(find_render_data_entry(values, &SerializedValue::I64(0)).is_err());
+    }
+
+    #[test]
+    fn typed_sprite_references_reject_unresolved_and_wrong_class_targets() {
+        let resolved = MultiFilePPtrResolution::Object {
+            target_file_index: 2,
+            target_object_index: 7,
+        };
+        assert_eq!(
+            typed_reference_target(&resolved, Some(28), 28).unwrap(),
+            Some((2, 7))
+        );
+        assert!(typed_reference_target(&resolved, Some(213), 28).is_err());
+
+        let predefined_texture = MultiFilePPtrResolution::PredefinedEngineAsset {
+            external_index: 0,
+            resource: crate::serialized_file::reference_graph::PredefinedEngineResourceKind::DefaultResources,
+            path_id: 4,
+            class_id: 28,
+        };
+        assert_eq!(
+            typed_reference_target(&predefined_texture, None, 28).unwrap(),
+            None
+        );
+
+        let missing = MultiFilePPtrResolution::MissingDependency {
+            external_index: 1,
+            path_id: 45,
+        };
+        assert!(typed_reference_target(&missing, None, 28).is_err());
+        assert!(typed_reference_target(&MultiFilePPtrResolution::Null, None, 28).is_err());
+    }
+
+    #[test]
+    fn shared_sprite_atlas_key_resolver_returns_data_and_source_path() {
+        let data = SerializedValue::Struct(vec![SerializedFieldValue {
+            name: "texture".to_owned(),
+            value: SerializedValue::PPtr {
+                file_id: 0,
+                path_id: 45,
+            },
+        }]);
+        let other_key = SerializedValue::Struct(vec![
+            SerializedFieldValue {
+                name: "first".to_owned(),
+                value: SerializedValue::U64(0x1234),
+            },
+            SerializedFieldValue {
+                name: "second".to_owned(),
+                value: SerializedValue::I64(90),
+            },
+        ]);
+        let atlas_root = SerializedValue::Struct(vec![SerializedFieldValue {
+            name: "m_RenderDataMap".to_owned(),
+            value: SerializedValue::Array(vec![
+                pair(other_key.clone(), SerializedValue::I32(3)),
+                pair(render_key(), data.clone()),
+            ]),
+        }]);
+        let sprite_root = SerializedValue::Struct(vec![SerializedFieldValue {
+            name: "m_RenderDataKey".to_owned(),
+            value: render_key(),
+        }]);
+
+        let resolved = sprite_atlas_render_data_for_key(&atlas_root, &sprite_root)
+            .unwrap()
+            .expect("matching key");
+        assert_eq!(resolved.data, &data);
+        assert_eq!(resolved.path, "m_RenderDataMap[1].second");
+        let indexed = SpriteAtlasRenderDataIndex::new(&atlas_root)
+            .unwrap()
+            .find(&sprite_root)
+            .unwrap()
+            .expect("indexed matching key");
+        assert_eq!(indexed.data, &data);
+        assert_eq!(indexed.path, "m_RenderDataMap[1].second");
+
+        let nonmatching_sprite = SerializedValue::Struct(vec![SerializedFieldValue {
+            name: "m_RenderDataKey".to_owned(),
+            value: other_key,
+        }]);
+        assert!(SpriteAtlasRenderDataIndex::new(&atlas_root)
+            .unwrap()
+            .find(&nonmatching_sprite)
+            .unwrap()
+            .is_none());
+
+        let missing_sprite = SerializedValue::Struct(Vec::new());
+        assert!(
+            sprite_atlas_render_data_for_key(&atlas_root, &missing_sprite)
+                .unwrap()
+                .is_none()
+        );
     }
 
     fn render_key() -> SerializedValue {

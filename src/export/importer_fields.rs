@@ -31,11 +31,18 @@
 //! `Has_*` version gates stays open: the member lists and the gate thresholds live in the
 //! generated package, and porting them from memory would be guessing.
 
+use std::collections::HashMap;
 use std::error::Error;
 use std::io;
 
 use crate::export::ids::get_main_export_id;
+use crate::export::scene_collection::{ExportAssetCollectionIdentity, ExportAssetIdentity};
 use crate::export::unity_yaml::{UnityYamlNode, UnityYamlNodeKind, UnityYamlScalar};
+use crate::export::workspace_yaml::sprite_atlas::{
+    field_path_in_base_chain, sprite_atlas_data_texture_target, typed_reference_target,
+    unique_reference_for_field, workspace_sprite_atlas_yaml_overlay_with_index,
+    SpriteAtlasRenderDataIndex,
+};
 use crate::numerics::BoneWeight4;
 use crate::resources::mesh::{MeshVertexBytesSource, MeshView};
 use crate::resources::sprite::{
@@ -118,6 +125,8 @@ pub struct SpriteFacts {
     pub export_id: Option<i64>,
     /// The sprite `Rect` (`[x, y, width, height]`).
     pub rect: [f32; 4],
+    /// Rect recomputed by `FillSpriteMetaData`, which may apply the dictionary's Atlas again.
+    pub sprite_sheet_rect: [f32; 4],
     /// The processed Sprite `Rect` size used by `SetBoneGeometry` after `SpriteProcessor`.
     pub source_rect_size: [f32; 2],
     /// The sprite render-data texture rect in the same layout.
@@ -132,10 +141,14 @@ pub struct SpriteFacts {
     pub has_pivot: bool,
     /// The sprite pivot.
     pub pivot: [f32; 2],
+    /// Pivot written into per-sprite metadata after the source `FillSpriteMetaData` pass.
+    pub sprite_sheet_pivot: [f32; 2],
     /// Whether the sprite exposes a border.
     pub has_border: bool,
     /// The sprite border.
     pub border: [f32; 4],
+    /// Border written into per-sprite metadata after the source `FillSpriteMetaData` pass.
+    pub sprite_sheet_border: [f32; 4],
     /// The sprite `PixelsToUnits`.
     pub pixels_to_units: f32,
     /// Generated outlines after the source PPU, pivot, and packing transforms.
@@ -281,21 +294,53 @@ pub fn select_prefab_importer(is_prefab_marker: bool) -> PrefabImporterBranch {
 /// Class ID of Sprite objects whose render data can point at a texture.
 const SPRITE_OBJECT_CLASS_ID: i32 = 213;
 
-/// Collect `AddSprites` caller facts for workspace sprites whose render-data texture
-/// resolves to one texture object.
+/// Collect `AddSprites` caller facts for workspace sprites associated with one texture.
 ///
-/// This mirrors the `SpriteProcessor` association (`sprite.RD.Texture.TryGetAsset`) for the
-/// importer path only; asset grouping stays open. Facts follow workspace file/object encounter
-/// order, matching the source `SpriteInformationObject` insertion sequence. Source file version
+/// The source first encounters ordinary Sprites in collection order, then adds each
+/// SpriteAtlas.PackedSprites entry when it encounters that Atlas. The first insertion into a
+/// texture's SpriteInformation dictionary controls order; a later duplicate can supply the Atlas
+/// association when the earlier Sprite entry had none. This preserves those ordering and merge
+/// rules while resolving AtlasData.texture in the Atlas object's file scope. Source file version
 /// and endianness select the render-data geometry decoder. When sprite-sheet export is enabled,
 /// malformed outline, physics-shape, or bone geometry is an error rather than a silently omitted
-/// field. Bone geometry decodes inline vertex bytes or the resolved external stream selected by
+/// field. Bone geometry decodes inline bytes or the resolved stream selected by
 /// `SpriteRenderData.m_StreamData`.
 #[allow(clippy::too_many_arguments)]
 pub fn collect_sprite_facts_for_texture(
     workspace: &SerializedFileWorkspace,
     objects: &ObjectWorkspace,
     graph: &MultiFileReferenceGraph<'_>,
+    texture_file_index: usize,
+    texture_object_index: usize,
+    texture_name: &str,
+    build_sprite_sheet: bool,
+    resolve_stream_vertex_bytes: impl FnMut(
+        usize,
+        i64,
+        &SerializedValue,
+        UnityVersion,
+        EndianType,
+    ) -> Result<Option<Vec<u8>>, Box<dyn Error>>,
+) -> Result<Vec<SpriteFacts>, Box<dyn Error>> {
+    let associations = SpriteTextureAssociationIndex::build(workspace, objects, graph)?;
+    collect_sprite_facts_for_texture_with_associations(
+        workspace,
+        objects,
+        graph,
+        &associations,
+        texture_file_index,
+        texture_object_index,
+        texture_name,
+        build_sprite_sheet,
+        resolve_stream_vertex_bytes,
+    )
+}
+
+pub(crate) fn collect_sprite_facts_for_texture_with_associations(
+    workspace: &SerializedFileWorkspace,
+    objects: &ObjectWorkspace,
+    graph: &MultiFileReferenceGraph<'_>,
+    associations: &SpriteTextureAssociationIndex<'_>,
     texture_file_index: usize,
     texture_object_index: usize,
     texture_name: &str,
@@ -309,13 +354,20 @@ pub fn collect_sprite_facts_for_texture(
     ) -> Result<Option<Vec<u8>>, Box<dyn Error>>,
 ) -> Result<Vec<SpriteFacts>, Box<dyn Error>> {
     let mut facts = Vec::new();
-    for sprite in objects
-        .objects()
-        .iter()
-        .filter(|object| object.factory.class_id == SPRITE_OBJECT_CLASS_ID)
-    {
+    for association in associations.for_texture(texture_file_index, texture_object_index) {
+        let sprite = objects
+            .get(association.file_index, association.object_index)
+            .ok_or_else(|| {
+                invalid_sprite_data(format!(
+                    "Sprite object {} in file {} is absent from the decoded object workspace",
+                    association.object_index, association.file_index
+                ))
+            })?;
         let Ok(payload) = &sprite.payload else {
-            continue;
+            return Err(invalid_sprite_data(format!(
+                "Sprite object {} could not be decoded for TextureImporter metadata",
+                sprite.object_index
+            )));
         };
         let Some(source_file) = workspace.files().get(sprite.file_index) else {
             return Err(invalid_sprite_data(format!(
@@ -329,35 +381,98 @@ pub fn collect_sprite_facts_for_texture(
             .unity_version_text
             .as_deref()
             .and_then(UnityVersion::parse);
-        let Some(mut link) =
-            read_sprite_texture_link(&payload.root, source_version.as_ref(), texture_name)
+        let mut processed_root = payload.root.clone();
+        if let Some((atlas_file_index, atlas_object_index)) = association.sprite_atlas {
+            let render_data_index = associations
+                .render_data_index(atlas_file_index, atlas_object_index)
+                .ok_or_else(|| {
+                    invalid_sprite_data(format!(
+                        "Sprite object {} has no cached RenderDataMap for SpriteAtlas object {atlas_object_index} in file {atlas_file_index}",
+                        sprite.object_index
+                    ))
+                })?;
+            if render_data_index
+                .find(&payload.root)
+                .map_err(invalid_sprite_data)?
+                .is_some()
+            {
+                let identity = graph
+                    .object_identity(sprite.file_index, sprite.object_index)
+                    .zip(graph.object_class_id(sprite.file_index, sprite.object_index))
+                    .map(|(identity, class_id)| ExportAssetIdentity {
+                        collection: ExportAssetCollectionIdentity::SerializedFile {
+                            file_index: sprite.file_index,
+                        },
+                        object_index: sprite.object_index,
+                        path_id: identity.path_id,
+                        class_id,
+                    })
+                    .ok_or_else(|| {
+                        invalid_sprite_data(format!(
+                            "Sprite object {} has no graph identity for Atlas reconstruction",
+                            sprite.object_index
+                        ))
+                    })?;
+                let overlay = workspace_sprite_atlas_yaml_overlay_with_index(
+                    objects,
+                    graph,
+                    sprite,
+                    identity,
+                    Some(render_data_index),
+                )
+                .map_err(|error| {
+                    invalid_sprite_data(format!(
+                        "Sprite object {} Atlas render data could not be reconstructed: {error}",
+                        sprite.object_index
+                    ))
+                })?;
+                if let Some(overlay) = overlay {
+                    if overlay.source.object_index != sprite.object_index
+                        || overlay.source.collection
+                            != (ExportAssetCollectionIdentity::SerializedFile {
+                                file_index: sprite.file_index,
+                            })
+                    {
+                        return Err(invalid_sprite_data(format!(
+                            "Sprite object {} received an Atlas overlay for another source object",
+                            sprite.object_index
+                        )));
+                    }
+                    processed_root = overlay.root;
+                }
+            }
+        }
+        let mut link =
+            read_sprite_texture_link(&processed_root, source_version.as_ref(), texture_name)
                 .map_err(|error| {
                     invalid_sprite_data(format!(
                         "Sprite object {} texture metadata could not be read: {error}",
                         sprite.object_index
                     ))
-                })?
-        else {
-            continue;
+                })?;
+        let atlas_render_data = if let Some((atlas_file_index, atlas_object_index)) =
+            association.association_atlas
+        {
+            let render_data_index = associations
+                .render_data_index(atlas_file_index, atlas_object_index)
+                .ok_or_else(|| {
+                    invalid_sprite_data(format!(
+                        "SpriteInformation has no cached RenderDataMap for SpriteAtlas object {atlas_object_index} in file {atlas_file_index}"
+                    ))
+                })?;
+            render_data_index
+                .find(&payload.root)
+                .map_err(invalid_sprite_data)?
+                .map(|render_data| render_data.data)
+        } else {
+            None
         };
-        let target = graph
-            .references_from_object(sprite.file_index, sprite.object_index)
-            .find(|edge| {
-                edge.file_id == link.texture_file_id && edge.path_id == link.texture_path_id
-            });
-        let Some(edge) = target else {
-            continue;
-        };
-        let MultiFilePPtrResolution::Object {
-            target_file_index,
-            target_object_index,
-        } = edge.resolution
-        else {
-            continue;
-        };
-        if target_file_index != texture_file_index || target_object_index != texture_object_index {
-            continue;
-        }
+        let (sprite_sheet_coordinates, sprite_sheet_transform) =
+            sprite_sheet_metadata_coordinates(&link, atlas_render_data)?;
+        link.facts.sprite_sheet_rect = sprite_sheet_coordinates.rect;
+        link.facts.sprite_sheet_pivot = sprite_sheet_coordinates.pivot;
+        link.facts.sprite_sheet_border = sprite_sheet_coordinates.border;
+        link.outline_transform = sprite_sheet_transform;
         if build_sprite_sheet {
             let source_version = source_version.ok_or_else(|| {
                 invalid_sprite_data(format!(
@@ -435,6 +550,392 @@ pub fn collect_sprite_facts_for_texture(
         facts.push(link.facts);
     }
     Ok(facts)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SpriteImporterAssociation {
+    file_index: usize,
+    object_index: usize,
+    /// Atlas stored in `SpriteInformationObject` for Sprite sheet metadata.
+    association_atlas: Option<(usize, usize)>,
+    /// Atlas resolved from `Sprite.m_SpriteAtlas`, used by `SpriteProcessor` before export.
+    sprite_atlas: Option<(usize, usize)>,
+}
+
+#[derive(Default)]
+pub(crate) struct SpriteTextureAssociationIndex<'objects> {
+    by_texture: HashMap<(usize, usize), Vec<SpriteImporterAssociation>>,
+    atlas_indexes: HashMap<(usize, usize), SpriteAtlasRenderDataIndex<'objects>>,
+}
+
+impl<'objects> SpriteTextureAssociationIndex<'objects> {
+    pub(crate) fn build(
+        workspace: &SerializedFileWorkspace,
+        objects: &'objects ObjectWorkspace,
+        graph: &MultiFileReferenceGraph<'_>,
+    ) -> Result<Self, Box<dyn Error>> {
+        let mut groups: HashMap<(usize, usize), SpriteTextureAssociationGroup> = HashMap::new();
+        let mut atlas_indexes = HashMap::new();
+        for object in objects.objects() {
+            let source_file = workspace.files().get(object.file_index).ok_or_else(|| {
+                invalid_sprite_data(format!(
+                    "Sprite or SpriteAtlas object {} references absent SerializedFile {}",
+                    object.object_index, object.file_index
+                ))
+            })?;
+            if crate::io::special_names::is_default_resource(&source_file.file_name)
+                || crate::io::special_names::is_builtin_extra(&source_file.file_name)
+            {
+                continue;
+            }
+            match object.factory.class_id {
+                SPRITE_OBJECT_CLASS_ID => {
+                    let Ok(payload) = &object.payload else {
+                        continue;
+                    };
+                    let sprite_atlas = resolve_sprite_atlas_pointer(
+                        &payload.root,
+                        graph,
+                        object.file_index,
+                        object.object_index,
+                    )?;
+                    if let Some((field_path, file_id, path_id)) =
+                        sprite_render_data_texture_pointer(&payload.root)?
+                    {
+                        if let Some(texture) = resolve_typed_object_reference(
+                            graph,
+                            object.file_index,
+                            object.object_index,
+                            &field_path,
+                            file_id,
+                            path_id,
+                            28,
+                        )? {
+                            record_sprite_texture_association(
+                                &mut groups,
+                                texture,
+                                SpriteImporterAssociation {
+                                    file_index: object.file_index,
+                                    object_index: object.object_index,
+                                    association_atlas: sprite_atlas,
+                                    sprite_atlas,
+                                },
+                            )?;
+                        }
+                    }
+                }
+                687_078_895 => {
+                    let payload = object.payload.as_ref().map_err(|error| {
+                        invalid_sprite_data(format!(
+                            "SpriteAtlas object {} could not be decoded for PackedSprites: {error}",
+                            object.object_index
+                        ))
+                    })?;
+                    let atlas_identity = (object.file_index, object.object_index);
+                    if !atlas_indexes.contains_key(&atlas_identity) {
+                        atlas_indexes.try_reserve(1).map_err(|_| {
+                            invalid_sprite_data(
+                                "could not allocate SpriteAtlas render-data indexes",
+                            )
+                        })?;
+                        let render_data_index = SpriteAtlasRenderDataIndex::new(&payload.root)
+                            .map_err(|error| {
+                                invalid_sprite_data(format!(
+                                    "SpriteAtlas object {} RenderDataMap index could not be built: {error}",
+                                    object.object_index
+                                ))
+                            })?;
+                        atlas_indexes.insert(atlas_identity, render_data_index);
+                    }
+                    let Some(packed_sprites) = payload
+                        .root
+                        .unique_field_in_base_chain("m_PackedSprites")
+                        .map_err(|error| {
+                            invalid_sprite_data(format!(
+                                "SpriteAtlas object {} PackedSprites field could not be read: {error}",
+                                object.object_index
+                            ))
+                        })?
+                    else {
+                        continue;
+                    };
+                    let SerializedValue::Array(packed_sprites) = packed_sprites else {
+                        return Err(invalid_sprite_data(format!(
+                            "SpriteAtlas object {} m_PackedSprites has kind {}, expected array",
+                            object.object_index,
+                            sprite_value_kind(packed_sprites)
+                        )));
+                    };
+                    let render_data_index =
+                        atlas_indexes.get(&atlas_identity).ok_or_else(|| {
+                            invalid_sprite_data(
+                                "SpriteAtlas render-data index disappeared after insertion",
+                            )
+                        })?;
+                    let packed_sprites_path =
+                        field_path_in_base_chain(&payload.root, "m_PackedSprites")?.ok_or_else(
+                            || {
+                                invalid_sprite_data(format!(
+                                    "SpriteAtlas object {} PackedSprites has no serialized path",
+                                    object.object_index
+                                ))
+                            },
+                        )?;
+                    for (packed_index, packed_sprite) in packed_sprites.iter().enumerate() {
+                        let SerializedValue::PPtr { file_id, path_id } = packed_sprite else {
+                            return Err(invalid_sprite_data(format!(
+                                "SpriteAtlas object {} PackedSprites[{packed_index}] has kind {}, expected PPtr",
+                                object.object_index,
+                                sprite_value_kind(packed_sprite)
+                            )));
+                        };
+                        if *path_id == 0 {
+                            continue;
+                        }
+                        let sprite_path = format!("{packed_sprites_path}[{packed_index}]");
+                        let Some((sprite_file_index, sprite_object_index)) =
+                            resolve_typed_object_reference(
+                                graph,
+                                object.file_index,
+                                object.object_index,
+                                &sprite_path,
+                                *file_id,
+                                *path_id,
+                                SPRITE_OBJECT_CLASS_ID,
+                            )?
+                        else {
+                            continue;
+                        };
+                        let sprite = objects
+                            .get(sprite_file_index, sprite_object_index)
+                            .ok_or_else(|| {
+                                invalid_sprite_data(format!(
+                                    "SpriteAtlas object {} PackedSprites[{packed_index}] resolved to absent Sprite object {sprite_object_index} in file {sprite_file_index}",
+                                    object.object_index
+                                ))
+                            })?;
+                        let Some(texture) = sprite_atlas_data_texture_target(
+                            objects,
+                            graph,
+                            object.file_index,
+                            object.object_index,
+                            sprite,
+                            &render_data_index,
+                        )
+                        .map_err(|error| {
+                            invalid_sprite_data(format!(
+                                "SpriteAtlas object {} PackedSprites[{packed_index}] texture association failed: {error}",
+                                object.object_index
+                            ))
+                        })? else {
+                            continue;
+                        };
+                        let sprite_payload = sprite.payload.as_ref().map_err(|error| {
+                            invalid_sprite_data(format!(
+                                "Packed Sprite object {} could not be decoded: {error}",
+                                sprite.object_index
+                            ))
+                        })?;
+                        let sprite_atlas = resolve_sprite_atlas_pointer(
+                            &sprite_payload.root,
+                            graph,
+                            sprite.file_index,
+                            sprite.object_index,
+                        )?;
+                        record_sprite_texture_association(
+                            &mut groups,
+                            texture,
+                            SpriteImporterAssociation {
+                                file_index: sprite_file_index,
+                                object_index: sprite_object_index,
+                                association_atlas: Some((object.file_index, object.object_index)),
+                                sprite_atlas,
+                            },
+                        )?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut by_texture = HashMap::new();
+        by_texture
+            .try_reserve(groups.len())
+            .map_err(|_| invalid_sprite_data("could not allocate SpriteInformation groups"))?;
+        for (texture, group) in groups {
+            by_texture.insert(texture, group.associations);
+        }
+        Ok(Self {
+            by_texture,
+            atlas_indexes,
+        })
+    }
+
+    fn for_texture(&self, file_index: usize, object_index: usize) -> &[SpriteImporterAssociation] {
+        self.by_texture
+            .get(&(file_index, object_index))
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    fn render_data_index(
+        &self,
+        atlas_file_index: usize,
+        atlas_object_index: usize,
+    ) -> Option<&SpriteAtlasRenderDataIndex<'objects>> {
+        self.atlas_indexes
+            .get(&(atlas_file_index, atlas_object_index))
+    }
+}
+
+#[derive(Default)]
+struct SpriteTextureAssociationGroup {
+    associations: Vec<SpriteImporterAssociation>,
+    indexes: HashMap<(usize, usize), usize>,
+}
+
+fn record_sprite_texture_association(
+    groups: &mut HashMap<(usize, usize), SpriteTextureAssociationGroup>,
+    texture: (usize, usize),
+    candidate: SpriteImporterAssociation,
+) -> Result<(), Box<dyn Error>> {
+    if !groups.contains_key(&texture) {
+        groups
+            .try_reserve(1)
+            .map_err(|_| invalid_sprite_data("could not allocate SpriteInformation groups"))?;
+        groups.insert(texture, SpriteTextureAssociationGroup::default());
+    }
+    let Some(group) = groups.get_mut(&texture) else {
+        return Err(invalid_sprite_data(
+            "SpriteInformation group disappeared after insertion",
+        ));
+    };
+    let sprite_identity = (candidate.file_index, candidate.object_index);
+    if let Some(index) = group.indexes.get(&sprite_identity).copied() {
+        let existing = &mut group.associations[index];
+        match (existing.association_atlas, candidate.association_atlas) {
+            (None, Some(atlas)) => existing.association_atlas = Some(atlas),
+            (Some(existing_atlas), Some(candidate_atlas)) if existing_atlas != candidate_atlas => {
+                return Err(invalid_sprite_data(format!(
+                    "Sprite object {} is associated with conflicting SpriteAtlas objects",
+                    sprite_identity.1
+                )));
+            }
+            _ => {}
+        }
+        if existing.sprite_atlas.is_none() {
+            existing.sprite_atlas = candidate.sprite_atlas;
+        }
+    } else {
+        group.associations.try_reserve(1).map_err(|_| {
+            invalid_sprite_data("could not allocate SpriteInformation associations")
+        })?;
+        group
+            .indexes
+            .try_reserve(1)
+            .map_err(|_| invalid_sprite_data("could not allocate SpriteInformation index"))?;
+        group
+            .indexes
+            .insert(sprite_identity, group.associations.len());
+        group.associations.push(candidate);
+    }
+    Ok(())
+}
+
+fn sprite_render_data_texture_pointer(
+    root: &SerializedValue,
+) -> Result<Option<(String, i32, i64)>, Box<dyn Error>> {
+    let render_data = strict_required_sprite_field(root, "m_RD")?;
+    let render_data_path = field_path_in_base_chain(root, "m_RD")?
+        .ok_or_else(|| invalid_sprite_data("Sprite.m_RD has no serialized field path"))?;
+    let texture = strict_required_sprite_field(render_data, "texture")?;
+    let (file_id, path_id) = match texture {
+        SerializedValue::PPtr { file_id, path_id } => (*file_id, *path_id),
+        value => {
+            return Err(invalid_sprite_data(format!(
+                "Sprite.m_RD.texture has kind {}, expected PPtr",
+                sprite_value_kind(value)
+            )))
+        }
+    };
+    if path_id == 0 {
+        return Ok(None);
+    }
+    let texture_path = field_path_in_base_chain(render_data, "texture")?
+        .ok_or_else(|| invalid_sprite_data("Sprite.m_RD.texture has no serialized field path"))?;
+    Ok(Some((
+        format!("{render_data_path}.{texture_path}"),
+        file_id,
+        path_id,
+    )))
+}
+
+fn resolve_sprite_atlas_pointer(
+    root: &SerializedValue,
+    graph: &MultiFileReferenceGraph<'_>,
+    file_index: usize,
+    object_index: usize,
+) -> Result<Option<(usize, usize)>, Box<dyn Error>> {
+    let pointer = root
+        .unique_field_in_base_chain("m_SpriteAtlas")
+        .map_err(|error| {
+            invalid_sprite_data(format!("could not inspect Sprite.m_SpriteAtlas: {error}"))
+        })?;
+    let Some(pointer) = pointer else {
+        return Ok(None);
+    };
+    let SerializedValue::PPtr { file_id, path_id } = pointer else {
+        return Err(invalid_sprite_data(format!(
+            "Sprite.m_SpriteAtlas has kind {}, expected PPtr",
+            sprite_value_kind(pointer)
+        )));
+    };
+    if *path_id == 0 {
+        return Ok(None);
+    }
+    let field_path = field_path_in_base_chain(root, "m_SpriteAtlas")?
+        .ok_or_else(|| invalid_sprite_data("Sprite.m_SpriteAtlas has no serialized field path"))?;
+    resolve_typed_object_reference(
+        graph,
+        file_index,
+        object_index,
+        &field_path,
+        *file_id,
+        *path_id,
+        687_078_895,
+    )
+}
+
+fn resolve_typed_object_reference(
+    graph: &MultiFileReferenceGraph<'_>,
+    source_file_index: usize,
+    source_object_index: usize,
+    field_path: &str,
+    file_id: i32,
+    path_id: i64,
+    expected_class_id: i32,
+) -> Result<Option<(usize, usize)>, Box<dyn Error>> {
+    let reference = unique_reference_for_field(
+        graph,
+        source_file_index,
+        source_object_index,
+        field_path,
+        file_id,
+        path_id,
+    )
+    .map_err(invalid_sprite_data)?;
+    let target_class_id = match &reference.resolution {
+        MultiFilePPtrResolution::Object {
+            target_file_index,
+            target_object_index,
+        } => graph.object_class_id(*target_file_index, *target_object_index),
+        _ => None,
+    };
+    typed_reference_target(&reference.resolution, target_class_id, expected_class_id)
+        .map_err(|error| {
+            invalid_sprite_data(format!(
+                "Sprite PPtr at {field_path:?} did not resolve to class {expected_class_id}: {error}"
+            ))
+        })
 }
 
 /// Whether a built importer mapping exposes a field (the caller-side equivalent of the
@@ -536,18 +1037,18 @@ fn sprite_meta_data_to_yaml(
     let mut rect = UnityYamlNode::mapping(crate::export::unity_yaml::UnityYamlMappingStyle::Block);
     rect.insert_field("serializedVersion", signed_node(2))?;
     for (name, value) in [
-        ("x", sprite.rect[0]),
-        ("y", sprite.rect[1]),
-        ("width", sprite.rect[2]),
-        ("height", sprite.rect[3]),
+        ("x", sprite.sprite_sheet_rect[0]),
+        ("y", sprite.sprite_sheet_rect[1]),
+        ("width", sprite.sprite_sheet_rect[2]),
+        ("height", sprite.sprite_sheet_rect[3]),
     ] {
         rect.insert_field(name, float_node(value))?;
     }
     metadata.insert_field("rect", rect)?;
     metadata.insert_field("alignment", signed_node(SpriteAlignment::Custom as i64))?;
-    metadata.insert_field("pivot", sprite_point_node(sprite.pivot)?)?;
+    metadata.insert_field("pivot", sprite_point_node(sprite.sprite_sheet_pivot)?)?;
     if sprite.has_border {
-        metadata.insert_field("border", sprite_border_node(sprite.border)?)?;
+        metadata.insert_field("border", sprite_border_node(sprite.sprite_sheet_border)?)?;
     }
     if importer_node_has_field(sprite_sheet, "outline") {
         metadata.insert_field("outline", sprite_outline_to_yaml(&sprite.outline)?)?;
@@ -954,16 +1455,13 @@ fn sprite_value_kind(value: &SerializedValue) -> &'static str {
 /// One sprite render-data texture link: caller facts plus the bundle texture pointer.
 struct SpriteTextureLink<'a> {
     facts: SpriteFacts,
-    texture_file_id: i32,
-    texture_path_id: i64,
     render_data: &'a SerializedValue,
     outline_transform: SpriteOutlineTransform,
 }
 
-/// Read `AddSprites` caller facts from one Sprite payload, resolving the sprite name against
-/// the queried texture. Returns `Ok(None)` when the sprite is atlas-packed (recovery stays open)
-/// or when the render-data texture pointer is null. Missing required fields, duplicate fields,
-/// and malformed value shapes are errors, not skipped sprites.
+/// Read the fields copied into `TextureImporter` metadata after the source SpriteProcessor pass.
+/// Association is gathered separately because packed Sprites are grouped by SpriteAtlas data,
+/// even when their serialized render-data texture pointer is null.
 ///
 /// Crucially, the facts carry the *processed* rect/pivot/border: `SpriteProcessor.ProcessSprite`
 /// recalculates them from the render data (`GetSpriteCoordinatesInAtlas` plus copies), and
@@ -972,38 +1470,19 @@ fn read_sprite_texture_link<'a>(
     root: &'a SerializedValue,
     source_version: Option<&UnityVersion>,
     texture_name: &str,
-) -> Result<Option<SpriteTextureLink<'a>>, Box<dyn Error>> {
+) -> Result<SpriteTextureLink<'a>, Box<dyn Error>> {
     use crate::resources::sprite::get_sprite_coordinates_in_atlas;
-    // Atlas-packed sprites need render-data recovery from the atlas map first, which
-    // stays open; only atlas-null sprites take the direct render-data path.
-    match strict_sprite_field(root, "m_SpriteAtlas")? {
-        None => {}
-        Some(SerializedValue::PPtr {
-            file_id: 0,
-            path_id: 0,
-        }) => {}
-        Some(SerializedValue::PPtr { .. }) => return Ok(None),
-        Some(value) => {
-            return Err(invalid_sprite_data(format!(
-                "Sprite.m_SpriteAtlas has kind {}, expected PPtr",
-                sprite_value_kind(value)
-            )))
-        }
-    }
     let rd_value = strict_required_sprite_field(root, "m_RD")?;
     let rd = sprite_value_scope(rd_value)?;
     let texture_value = strict_required_sprite_field(rd, "texture")?;
-    let (texture_file_id, texture_path_id) = match texture_value {
-        SerializedValue::PPtr { file_id, path_id } => (*file_id, *path_id),
+    match texture_value {
+        SerializedValue::PPtr { .. } => {}
         value => {
             return Err(invalid_sprite_data(format!(
                 "Sprite.m_RD.texture has kind {}, expected PPtr",
                 sprite_value_kind(value)
             )))
         }
-    };
-    if texture_path_id == 0 {
-        return Ok(None);
     }
     let sprite_rect = strict_sprite_rect4(root, "m_Rect")?;
     let texture_rect = strict_sprite_rect4(rd, "textureRect")?;
@@ -1068,11 +1547,12 @@ fn read_sprite_texture_link<'a>(
             sprite_value_kind(pixels_to_units_value)
         ))
     })?;
-    Ok(Some(SpriteTextureLink {
+    Ok(SpriteTextureLink {
         facts: SpriteFacts {
             name: name.clone(),
             export_id: None,
             rect: coords.rect,
+            sprite_sheet_rect: coords.rect,
             source_rect_size: [coords.rect[2], coords.rect[3]],
             texture_rect,
             name_matches_texture: name == texture_name,
@@ -1080,8 +1560,10 @@ fn read_sprite_texture_link<'a>(
             mesh_type,
             has_pivot: layout_has_pivot,
             pivot: coords.pivot,
+            sprite_sheet_pivot: coords.pivot,
             has_border: layout_has_border,
             border: coords.border,
+            sprite_sheet_border: coords.border,
             pixels_to_units,
             outline: Vec::new(),
             physics_shape: Vec::new(),
@@ -1089,8 +1571,6 @@ fn read_sprite_texture_link<'a>(
             sprite_id: None,
             bone_geometry: SpriteBoneGeometry::default(),
         },
-        texture_file_id,
-        texture_path_id,
         render_data: rd,
         outline_transform: SpriteOutlineTransform {
             rect_size: [coords.rect[2], coords.rect[3]],
@@ -1099,7 +1579,81 @@ fn read_sprite_texture_link<'a>(
             is_packed: sprite_settings_raw_is_packed(settings_raw),
             packing_rotation: sprite_settings_raw_packing_rotation(settings_raw),
         },
-    }))
+    })
+}
+
+fn sprite_sheet_metadata_coordinates(
+    link: &SpriteTextureLink<'_>,
+    atlas_render_data: Option<&SerializedValue>,
+) -> Result<
+    (
+        crate::resources::sprite::SpriteAtlasCoordinates,
+        SpriteOutlineTransform,
+    ),
+    Box<dyn Error>,
+> {
+    use crate::resources::sprite::get_sprite_coordinates_in_atlas;
+
+    let processed_rect = link.facts.rect;
+    let render_data_rect = strict_sprite_rect4(link.render_data, "textureRect")?;
+    let (atlas_hit, atlas_rect, atlas_offset, render_data_offset, settings_raw) =
+        if let Some(atlas_data) = atlas_render_data {
+            let atlas_rect = strict_sprite_rect4(atlas_data, "textureRect")?;
+            let atlas_offset = strict_sprite_point2(atlas_data, "textureRectOffset")?;
+            let settings_raw_value = strict_required_sprite_field(atlas_data, "settingsRaw")?;
+            let settings_raw = sprite_u32(settings_raw_value).ok_or_else(|| {
+                invalid_sprite_data(format!(
+                    "SpriteAtlasData.settingsRaw has kind {}, expected unsigned integer",
+                    sprite_value_kind(settings_raw_value)
+                ))
+            })?;
+            (true, atlas_rect, atlas_offset, [0.0; 2], settings_raw)
+        } else {
+            let settings_raw_value = strict_required_sprite_field(link.render_data, "settingsRaw")?;
+            let settings_raw = sprite_u32(settings_raw_value).ok_or_else(|| {
+                invalid_sprite_data(format!(
+                    "Sprite.m_RD.settingsRaw has kind {}, expected unsigned integer",
+                    sprite_value_kind(settings_raw_value)
+                ))
+            })?;
+            (
+                false,
+                [0.0; 4],
+                [0.0; 2],
+                [
+                    render_data_rect[0] - processed_rect[0],
+                    render_data_rect[1] - processed_rect[1],
+                ],
+                settings_raw,
+            )
+        };
+    let processed_offset = [
+        (link.facts.pivot[0] - 0.5) * processed_rect[2],
+        (link.facts.pivot[1] - 0.5) * processed_rect[3],
+    ];
+    let coordinates = get_sprite_coordinates_in_atlas(
+        processed_rect,
+        render_data_rect,
+        render_data_offset,
+        atlas_hit,
+        atlas_rect,
+        atlas_offset,
+        link.facts.has_pivot,
+        link.facts.pivot,
+        processed_offset,
+        link.facts.has_border,
+        link.facts.border,
+    );
+    Ok((
+        coordinates,
+        SpriteOutlineTransform {
+            rect_size: [coordinates.rect[2], coordinates.rect[3]],
+            pivot: coordinates.pivot,
+            pixels_to_units: link.facts.pixels_to_units,
+            is_packed: sprite_settings_raw_is_packed(settings_raw),
+            packing_rotation: sprite_settings_raw_packing_rotation(settings_raw),
+        },
+    ))
 }
 
 fn strict_sprite_rect4(root: &SerializedValue, name: &str) -> Result<[f32; 4], Box<dyn Error>> {
@@ -1726,9 +2280,10 @@ mod tests {
         apply_sprite_importer_decision, apply_sprite_sheet_metadata_to_importer,
         decide_sprite_importer, importer_node_has_field, propagate_asset_bundle_name,
         read_sprite_bone_geometry, read_sprite_bones, read_sprite_physics_shape,
-        read_sprite_texture_link, select_prefab_importer, sprite_export_id_for_ordinal,
-        truncate_execution_order, PrefabImporterBranch, SpriteAlignment, SpriteFacts,
-        SpriteImportMode, SpriteImporterDecision, SpriteOutlineTransform,
+        read_sprite_texture_link, record_sprite_texture_association, select_prefab_importer,
+        sprite_export_id_for_ordinal, sprite_render_data_texture_pointer, truncate_execution_order,
+        PrefabImporterBranch, SpriteAlignment, SpriteFacts, SpriteImportMode,
+        SpriteImporterAssociation, SpriteImporterDecision, SpriteOutlineTransform,
         SPRITE_MESH_TYPE_FULL_RECT, TEXTURE_IMPORTER_TYPE_SPRITE,
     };
     use super::{plugin_importer, texture_importer};
@@ -1783,6 +2338,7 @@ mod tests {
                 name: if matching { "texture" } else { "sprite" }.to_owned(),
                 export_id: None,
                 rect: [1.0, 2.0, 32.0, 16.0],
+                sprite_sheet_rect: [1.0, 2.0, 32.0, 16.0],
                 source_rect_size: [32.0, 16.0],
                 texture_rect: if matching {
                     [1.0, 2.0, 32.0, 16.0]
@@ -1794,8 +2350,10 @@ mod tests {
                 mesh_type: 7,
                 has_pivot: true,
                 pivot: [0.25, 0.75],
+                sprite_sheet_pivot: [0.25, 0.75],
                 has_border: true,
                 border: [1.0, 2.0, 3.0, 4.0],
+                sprite_sheet_border: [1.0, 2.0, 3.0, 4.0],
                 pixels_to_units: 50.0,
                 outline: Vec::new(),
                 physics_shape: Vec::new(),
@@ -1877,6 +2435,44 @@ mod tests {
         assert!(
             !decide_sprite_importer(&[sprite(false), sprite(true)], false, true, true)
                 .build_sprite_sheet
+        );
+    }
+
+    #[test]
+    fn sprite_information_preserves_first_encounter_order_and_atlas_merge() {
+        let target_texture = (4, 8);
+        let mut groups = std::collections::HashMap::new();
+        let direct = |object_index, association_atlas| SpriteImporterAssociation {
+            file_index: 1,
+            object_index,
+            association_atlas,
+            sprite_atlas: None,
+        };
+        let packed = |object_index, atlas| SpriteImporterAssociation {
+            file_index: 1,
+            object_index,
+            association_atlas: Some(atlas),
+            sprite_atlas: None,
+        };
+
+        record_sprite_texture_association(&mut groups, target_texture, direct(7, None)).unwrap();
+        record_sprite_texture_association(&mut groups, target_texture, direct(3, None)).unwrap();
+        record_sprite_texture_association(&mut groups, target_texture, packed(9, (6, 2))).unwrap();
+        record_sprite_texture_association(&mut groups, target_texture, packed(7, (6, 2))).unwrap();
+        let associations = &groups[&target_texture].associations;
+
+        assert_eq!(
+            associations
+                .iter()
+                .map(|association| association.object_index)
+                .collect::<Vec<_>>(),
+            [7, 3, 9]
+        );
+        assert_eq!(associations[0].association_atlas, Some((6, 2)));
+
+        assert!(
+            record_sprite_texture_association(&mut groups, target_texture, packed(7, (6, 4)),)
+                .is_err()
         );
     }
 
@@ -1970,17 +2566,14 @@ mod tests {
     fn sprite_link_reads_menu_shaped_payload() {
         let root = menu_sprite_payload();
         let version = UnityVersion::parse("2022.3.0f1").unwrap();
-        let link = read_sprite_texture_link(&root, Some(&version), "menu")
-            .unwrap()
-            .expect("menu sprite links");
-        assert_eq!(link.texture_file_id, 0);
-        assert_eq!(link.texture_path_id, 12345);
+        let link = read_sprite_texture_link(&root, Some(&version), "menu").unwrap();
         assert_eq!(
             link.facts,
             SpriteFacts {
                 name: "menu".to_owned(),
                 export_id: None,
                 rect: [0.0, 0.0, 1071.0, 755.0],
+                sprite_sheet_rect: [0.0, 0.0, 1071.0, 755.0],
                 source_rect_size: [1071.0, 755.0],
                 texture_rect: [0.0, 0.0, 1071.0, 755.0],
                 name_matches_texture: true,
@@ -1988,8 +2581,10 @@ mod tests {
                 mesh_type: 1,
                 has_pivot: true,
                 pivot: [0.5, 0.5],
+                sprite_sheet_pivot: [0.5, 0.5],
                 has_border: true,
                 border: [0.0, 0.0, 0.0, 0.0],
+                sprite_sheet_border: [0.0, 0.0, 0.0, 0.0],
                 pixels_to_units: 100.0,
                 outline: Vec::new(),
                 physics_shape: Vec::new(),
@@ -1999,11 +2594,10 @@ mod tests {
             }
         );
         // A different texture name only flips the match flag.
-        let other = read_sprite_texture_link(&root, Some(&version), "other")
-            .unwrap()
-            .expect("links regardless");
+        let other = read_sprite_texture_link(&root, Some(&version), "other").unwrap();
         assert!(!other.facts.name_matches_texture);
-        // A null texture pointer skips the sprite like the source null check.
+        // Group collection skips null pointers before reading metadata; metadata reads retain
+        // the fields because an Atlas PackedSprites entry may still group the same Sprite.
         let mut null_root = root.clone();
         if let SerializedValue::Struct(fields) = &mut null_root {
             for field in fields.iter_mut() {
@@ -2021,9 +2615,66 @@ mod tests {
                 }
             }
         }
-        assert!(read_sprite_texture_link(&null_root, Some(&version), "menu")
+        assert!(sprite_render_data_texture_pointer(&null_root)
             .unwrap()
             .is_none());
+        assert!(read_sprite_texture_link(&null_root, Some(&version), "menu").is_ok());
+    }
+
+    #[test]
+    fn sprite_sheet_metadata_reapplies_the_associated_atlas_crop_and_packing_flags() {
+        use crate::serialized_file::object::SerializedFieldValue;
+
+        fn rect_value(x: f32, y: f32, width: f32, height: f32) -> SerializedValue {
+            SerializedValue::Struct(vec![
+                SerializedFieldValue {
+                    name: "x".to_owned(),
+                    value: SerializedValue::F32(x),
+                },
+                SerializedFieldValue {
+                    name: "y".to_owned(),
+                    value: SerializedValue::F32(y),
+                },
+                SerializedFieldValue {
+                    name: "width".to_owned(),
+                    value: SerializedValue::F32(width),
+                },
+                SerializedFieldValue {
+                    name: "height".to_owned(),
+                    value: SerializedValue::F32(height),
+                },
+            ])
+        }
+
+        let root = menu_sprite_payload();
+        let version = UnityVersion::parse("2022.3.0f1").unwrap();
+        let link = read_sprite_texture_link(&root, Some(&version), "menu").unwrap();
+        let atlas_data = SerializedValue::Struct(vec![
+            SerializedFieldValue {
+                name: "textureRect".to_owned(),
+                value: rect_value(1.0, 2.0, 1000.0, 700.0),
+            },
+            SerializedFieldValue {
+                name: "textureRectOffset".to_owned(),
+                value: rect_point(5.0, 7.0),
+            },
+            SerializedFieldValue {
+                name: "settingsRaw".to_owned(),
+                value: SerializedValue::U32(0x15),
+            },
+        ]);
+
+        let (coordinates, transform) =
+            sprite_sheet_metadata_coordinates(&link, Some(&atlas_data)).unwrap();
+        assert_eq!(coordinates.rect, [1.0, 2.0, 1000.0, 700.0]);
+        assert_eq!(coordinates.pivot, [530.5 / 1000.0, 370.5 / 700.0]);
+        assert_eq!(coordinates.border, [0.0; 4]);
+        assert!(transform.is_packed);
+        assert_eq!(transform.packing_rotation, 5);
+
+        let (direct_coordinates, _) = sprite_sheet_metadata_coordinates(&link, None).unwrap();
+        assert_eq!(direct_coordinates.rect, link.facts.rect);
+        assert_eq!(direct_coordinates.pivot, link.facts.pivot);
     }
 
     #[test]
@@ -2150,9 +2801,7 @@ mod tests {
         assert!(!importer_node_has_field(&importer, "missing"));
         let root = menu_sprite_payload();
         let version = UnityVersion::parse("2022.3.0f1").unwrap();
-        let link = read_sprite_texture_link(&root, Some(&version), "menu")
-            .unwrap()
-            .expect("menu sprite links");
+        let link = read_sprite_texture_link(&root, Some(&version), "menu").unwrap();
         let decision = decide_sprite_importer(std::slice::from_ref(&link.facts), false, true, true);
         assert_eq!(decision.mode, SpriteImportMode::Single);
         apply_sprite_importer_decision(&mut importer, &decision).unwrap();
@@ -2209,6 +2858,7 @@ mod tests {
             name: "texture".to_owned(),
             export_id: Some(21_300_000),
             rect: [0.0, 0.0, 8.0, 8.0],
+            sprite_sheet_rect: [0.0, 0.0, 8.0, 8.0],
             source_rect_size: [8.0, 8.0],
             texture_rect: [0.0, 0.0, 8.0, 8.0],
             name_matches_texture: true,
@@ -2216,8 +2866,10 @@ mod tests {
             mesh_type: 0,
             has_pivot: true,
             pivot: [0.5, 0.5],
+            sprite_sheet_pivot: [0.5, 0.5],
             has_border: true,
             border: [0.0; 4],
+            sprite_sheet_border: [0.0; 4],
             pixels_to_units: 100.0,
             outline: vec![vec![[1.25, -2.0], [3.0, 4.0]]],
             physics_shape: vec![vec![[0.0, 0.0], [1.0, 2.0]]],
@@ -2700,6 +3352,7 @@ mod tests {
                 name: name.to_owned(),
                 export_id: Some(export_id),
                 rect,
+                sprite_sheet_rect: rect,
                 source_rect_size: [rect[2], rect[3]],
                 texture_rect: rect,
                 name_matches_texture: false,
@@ -2707,8 +3360,10 @@ mod tests {
                 mesh_type: 0,
                 has_pivot: true,
                 pivot: [0.25, 0.75],
+                sprite_sheet_pivot: [0.25, 0.75],
                 has_border: true,
                 border: [1.0, 2.0, 3.0, 4.0],
+                sprite_sheet_border: [1.0, 2.0, 3.0, 4.0],
                 pixels_to_units: 100.0,
                 outline: vec![vec![[1.0, 2.0], [3.0, 4.0]]],
                 physics_shape: vec![vec![[5.0, 6.0], [7.0, 8.0]]],
