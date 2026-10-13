@@ -32,7 +32,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 
 use crate::numerics::Vec3;
-use crate::serialized_file::object::SerializedValue;
+use crate::serialized_file::object::{SerializedValue, SerializedValueLookupError};
 
 use super::mesh::{MeshVertexBytesSource, MeshView, MeshViewError};
 use super::sub_mesh_data::SubMeshView;
@@ -382,6 +382,8 @@ impl std::error::Error for SpriteRenderDataOutlineError {
 pub enum SpriteRenderDataValueOutlineError {
     /// A render-data field had an invalid decoded shape.
     Fields(MeshViewError),
+    /// A legacy `m_Vertices`/`m_Indices` field had an invalid decoded shape.
+    LegacyFields(SpriteRenderDataLegacyOutlineError),
     /// A set external vertex stream must be resolved by the caller first.
     MissingStreamedVertexBytes,
     /// The outline kernels rejected the decoded geometry.
@@ -393,6 +395,9 @@ impl fmt::Display for SpriteRenderDataValueOutlineError {
         match self {
             Self::Fields(source) => {
                 write!(formatter, "could not read SpriteRenderData outline fields: {source}")
+            }
+            Self::LegacyFields(source) => {
+                write!(formatter, "could not read legacy SpriteRenderData outline fields: {source}")
             }
             Self::MissingStreamedVertexBytes => write!(
                 formatter,
@@ -407,21 +412,84 @@ impl std::error::Error for SpriteRenderDataValueOutlineError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Fields(source) => Some(source),
+            Self::LegacyFields(source) => Some(source),
             Self::Outline(source) => Some(source),
             Self::MissingStreamedVertexBytes => None,
         }
     }
 }
 
+/// Failure while reading the legacy sprite vertex and index arrays.
+#[derive(Debug)]
+pub enum SpriteRenderDataLegacyOutlineError {
+    /// A field lookup was ambiguous or encountered a non-struct value.
+    FieldLookup {
+        /// The serialized field being read.
+        field: &'static str,
+        /// The decoded-value lookup failure.
+        source: SerializedValueLookupError,
+    },
+    /// A required legacy field was absent.
+    MissingField {
+        /// The serialized field being read.
+        field: &'static str,
+    },
+    /// A decoded legacy field or vector component had the wrong value kind.
+    WrongType {
+        /// The serialized field being read.
+        field: &'static str,
+        /// The actual decoded value kind.
+        actual: &'static str,
+    },
+    /// Reserving an intermediate geometry array failed.
+    AllocationFailed {
+        /// The serialized field being read.
+        field: &'static str,
+        /// The number of requested entries.
+        item_count: usize,
+    },
+}
+
+impl fmt::Display for SpriteRenderDataLegacyOutlineError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::FieldLookup { field, source } => {
+                write!(formatter, "could not read '{field}': {source}")
+            }
+            Self::MissingField { field } => {
+                write!(formatter, "legacy sprite render data is missing '{field}'")
+            }
+            Self::WrongType { field, actual } => {
+                write!(formatter, "legacy sprite field '{field}' has kind {actual}")
+            }
+            Self::AllocationFailed { field, item_count } => write!(
+                formatter,
+                "could not reserve {item_count} entries for legacy sprite field '{field}'"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SpriteRenderDataLegacyOutlineError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::FieldLookup { source, .. } => Some(source),
+            Self::MissingField { .. } | Self::WrongType { .. } | Self::AllocationFailed { .. } => {
+                None
+            }
+        }
+    }
+}
+
 /// Generates source-compatible outlines from already-decoded sprite render-data fields.
 ///
-/// This follows `SpriteMetaDataExtensions.GenerateOutline`: each submesh selects its
-/// vertex slice with `FirstVertex`/`VertexCount`, then reads `IndexCount / 3` triangles
-/// as 16-bit little-endian indices starting at the byte offset `FirstByte`. The source
-/// path does not apply `BaseVertex`, `IndexFormat`, or topology conversion here. The
-/// caller supplies a [`VertexDataView`] whose bytes have already been resolved, including
-/// any external stream content. TypeTree decoding, streamed-resource lookup, the legacy
-/// `Vertices`/`Indices` fallback, and importer wiring remain caller-side.
+/// This follows `SpriteMetaDataExtensions.GenerateOutline`: modern render data selects each
+/// submesh's vertex slice with `FirstVertex`/`VertexCount`, then reads `IndexCount / 3`
+/// triangles as 16-bit little-endian indices starting at `FirstByte`. The legacy branch reads
+/// `m_Vertices[*].pos` and groups `m_Indices` into complete triples, discarding a trailing
+/// remainder. The modern source path does not apply `BaseVertex`, `IndexFormat`, or topology
+/// conversion here. The caller supplies modern vertex-stream bytes after resolving any external
+/// stream. Stream lookup and importer wiring remain caller-side.
 pub fn generate_render_data_sprite_outlines(
     vertex_data: &VertexDataView<'_>,
     version: UnityVersion,
@@ -459,10 +527,11 @@ pub fn generate_render_data_sprite_outlines(
 
 /// Reads outline inputs from a decoded `SpriteRenderData` value and generates the modern path.
 ///
-/// Returns `Ok(None)` when the source would take its legacy `Vertices`/`Indices` branch
-/// because `m_VertexData` or `m_SubMeshes` is absent. If the inline vertex bytes are empty
-/// and the decoded stream descriptor is set, the caller must supply the already-resolved
-/// stream bytes; unresolved external data is an error rather than an empty outline.
+/// Uses the source's legacy `m_Vertices`/`m_Indices` path when modern vertex data is absent or
+/// has no submeshes. Returns `Ok(None)` only when neither source branch has outline vertices.
+/// If modern inline vertex bytes are empty and the decoded stream descriptor is set, the caller
+/// must supply the already-resolved stream bytes; unresolved external data is an error rather
+/// than an empty outline.
 pub fn generate_sprite_render_data_outlines_from_value(
     render_data: &SerializedValue,
     version: UnityVersion,
@@ -472,10 +541,10 @@ pub fn generate_sprite_render_data_outlines_from_value(
     let mesh = MeshView::from_render_data_value(render_data, version, endian)
         .map_err(SpriteRenderDataValueOutlineError::Fields)?;
     let Some(vertex_data) = mesh.vertex_data.as_ref() else {
-        return Ok(None);
+        return generate_legacy_sprite_render_data_outlines(render_data);
     };
     if mesh.sub_meshes.is_empty() {
-        return Ok(None);
+        return generate_legacy_sprite_render_data_outlines(render_data);
     }
     let vertex_bytes = match mesh.vertex_data_bytes_source() {
         MeshVertexBytesSource::Inline | MeshVertexBytesSource::Empty => &vertex_data.data,
@@ -509,6 +578,145 @@ pub fn generate_sprite_render_data_outlines_from_value(
     )
     .map(Some)
     .map_err(SpriteRenderDataValueOutlineError::Outline)
+}
+
+fn generate_legacy_sprite_render_data_outlines(
+    render_data: &SerializedValue,
+) -> Result<Option<Vec<Vec<[f32; 2]>>>, SpriteRenderDataValueOutlineError> {
+    let Some(vertices_value) = legacy_sprite_field(render_data, "m_Vertices")? else {
+        return Ok(None);
+    };
+    let SerializedValue::Array(vertex_values) = vertices_value else {
+        return Err(SpriteRenderDataLegacyOutlineError::WrongType {
+            field: "m_Vertices",
+            actual: sprite_serialized_kind(vertices_value),
+        }
+        .into());
+    };
+    if vertex_values.is_empty() {
+        return Ok(None);
+    }
+
+    let mut vertices = Vec::new();
+    vertices
+        .try_reserve_exact(vertex_values.len())
+        .map_err(|_| SpriteRenderDataLegacyOutlineError::AllocationFailed {
+            field: "m_Vertices",
+            item_count: vertex_values.len(),
+        })?;
+    for vertex in vertex_values {
+        let position = legacy_sprite_field(vertex, "pos")?
+            .ok_or(SpriteRenderDataLegacyOutlineError::MissingField { field: "pos" })?;
+        let SerializedValue::Struct(_) = position else {
+            return Err(SpriteRenderDataLegacyOutlineError::WrongType {
+                field: "pos",
+                actual: sprite_serialized_kind(position),
+            }
+            .into());
+        };
+        vertices.push([
+            legacy_sprite_f32(position, "x")?,
+            legacy_sprite_f32(position, "y")?,
+            legacy_sprite_f32(position, "z")?,
+        ]);
+    }
+
+    let indices_value = legacy_sprite_field(render_data, "m_Indices")?
+        .ok_or(SpriteRenderDataLegacyOutlineError::MissingField { field: "m_Indices" })?;
+    let SerializedValue::Array(index_values) = indices_value else {
+        return Err(SpriteRenderDataLegacyOutlineError::WrongType {
+            field: "m_Indices",
+            actual: sprite_serialized_kind(indices_value),
+        }
+        .into());
+    };
+    let triangle_count = index_values.len() / 3;
+    let mut triangles = Vec::new();
+    triangles.try_reserve_exact(triangle_count).map_err(|_| {
+        SpriteRenderDataLegacyOutlineError::AllocationFailed {
+            field: "m_Indices",
+            item_count: triangle_count,
+        }
+    })?;
+    for triangle in index_values.chunks_exact(3) {
+        let mut indices = [0usize; 3];
+        for (slot, index) in triangle.iter().enumerate() {
+            let SerializedValue::U16(index) = index else {
+                return Err(SpriteRenderDataLegacyOutlineError::WrongType {
+                    field: "m_Indices",
+                    actual: sprite_serialized_kind(index),
+                }
+                .into());
+            };
+            indices[slot] = usize::from(*index);
+        }
+        triangles.push(indices);
+    }
+
+    generate_mesh_outlines(&vertices, &triangles)
+        .map(Some)
+        .map_err(|source| {
+            SpriteRenderDataValueOutlineError::Outline(SpriteRenderDataOutlineError::Outline {
+                submesh_index: 0,
+                source,
+            })
+        })
+}
+
+fn legacy_sprite_field<'a>(
+    value: &'a SerializedValue,
+    field: &'static str,
+) -> Result<Option<&'a SerializedValue>, SpriteRenderDataValueOutlineError> {
+    value
+        .unique_field_in_base_chain(field)
+        .map_err(|source| SpriteRenderDataLegacyOutlineError::FieldLookup { field, source }.into())
+}
+
+fn legacy_sprite_f32(
+    value: &SerializedValue,
+    field: &'static str,
+) -> Result<f32, SpriteRenderDataValueOutlineError> {
+    let component = legacy_sprite_field(value, field)?
+        .ok_or(SpriteRenderDataLegacyOutlineError::MissingField { field })?;
+    match component {
+        SerializedValue::F32(component) => Ok(*component),
+        other => Err(SpriteRenderDataLegacyOutlineError::WrongType {
+            field,
+            actual: sprite_serialized_kind(other),
+        }
+        .into()),
+    }
+}
+
+fn sprite_serialized_kind(value: &SerializedValue) -> &'static str {
+    match value {
+        SerializedValue::Bool(_) => "bool",
+        SerializedValue::I8(_) => "SInt8",
+        SerializedValue::U8(_) => "UInt8",
+        SerializedValue::I16(_) => "SInt16",
+        SerializedValue::U16(_) => "UInt16",
+        SerializedValue::Char(_) => "char",
+        SerializedValue::I32(_) => "SInt32",
+        SerializedValue::U32(_) => "UInt32",
+        SerializedValue::I64(_) => "SInt64",
+        SerializedValue::U64(_) => "UInt64",
+        SerializedValue::F32(_) => "float",
+        SerializedValue::F64(_) => "double",
+        SerializedValue::StringBytes(_) => "string bytes",
+        SerializedValue::Bytes(_) => "byte data",
+        SerializedValue::Array(_) => "array",
+        SerializedValue::Struct(_) => "struct",
+        SerializedValue::PPtr { .. } => "PPtr",
+        SerializedValue::ManagedReferenceId { .. } => "managed reference ID",
+        SerializedValue::ManagedReferenceRegistry(_) => "managed reference registry",
+        SerializedValue::Raw { .. } => "raw data",
+    }
+}
+
+impl From<SpriteRenderDataLegacyOutlineError> for SpriteRenderDataValueOutlineError {
+    fn from(error: SpriteRenderDataLegacyOutlineError) -> Self {
+        Self::LegacyFields(error)
+    }
 }
 
 fn read_sprite_submesh_triangles(
@@ -1226,6 +1434,39 @@ mod tests {
             .collect()
     }
 
+    fn legacy_sprite_render_data_value() -> SerializedValue {
+        let vertex = |x, y, z| {
+            SerializedValue::Struct(vec![field(
+                "pos",
+                SerializedValue::Struct(vec![
+                    field("x", SerializedValue::F32(x)),
+                    field("y", SerializedValue::F32(y)),
+                    field("z", SerializedValue::F32(z)),
+                ]),
+            )])
+        };
+        SerializedValue::Struct(vec![
+            field(
+                "m_Vertices",
+                SerializedValue::Array(vec![
+                    vertex(0.0, 0.0, 0.0),
+                    vertex(1.0, 0.0, 0.0),
+                    vertex(0.0, 1.0, 0.0),
+                ]),
+            ),
+            // The source groups `Indices.Count / 3`; the final value is ignored.
+            field(
+                "m_Indices",
+                SerializedValue::Array(vec![
+                    SerializedValue::U16(0),
+                    SerializedValue::U16(1),
+                    SerializedValue::U16(2),
+                    SerializedValue::U16(u16::MAX),
+                ]),
+            ),
+        ])
+    }
+
     #[test]
     fn sprite_class_id_matches_the_source() {
         assert_eq!(SPRITE_CLASS_ID, 213);
@@ -1364,6 +1605,90 @@ mod tests {
             .unwrap(),
             None,
         );
+    }
+
+    #[test]
+    fn decoded_legacy_render_data_uses_positions_and_complete_index_triples() {
+        let root = legacy_sprite_render_data_value();
+        assert_eq!(
+            generate_sprite_render_data_outlines_from_value(
+                &root,
+                UnityVersion::parse("5.5.0f1").unwrap(),
+                EndianType::Little,
+                None,
+            )
+            .unwrap(),
+            Some(vec![vec![[0.0, 1.0], [0.0, 0.0], [1.0, 0.0]]]),
+        );
+    }
+
+    #[test]
+    fn decoded_modern_render_data_precedes_malformed_legacy_fields() {
+        let mut fields = match render_data_value(triangle_vertex_bytes(), None) {
+            SerializedValue::Struct(fields) => fields,
+            _ => unreachable!(),
+        };
+        fields.push(field("m_Vertices", SerializedValue::I32(1)));
+        fields.push(field("m_Indices", SerializedValue::I32(1)));
+        assert_eq!(
+            generate_sprite_render_data_outlines_from_value(
+                &SerializedValue::Struct(fields),
+                UnityVersion::parse("2022.3.0f1").unwrap(),
+                EndianType::Little,
+                None,
+            )
+            .unwrap(),
+            Some(vec![vec![[0.0, 1.0], [0.0, 0.0], [1.0, 0.0]]]),
+        );
+    }
+
+    #[test]
+    fn decoded_legacy_render_data_reports_malformed_positions_and_indices() {
+        let missing_position = SerializedValue::Struct(vec![field(
+            "m_Vertices",
+            SerializedValue::Array(vec![SerializedValue::Struct(vec![field(
+                "pos",
+                SerializedValue::Struct(vec![
+                    field("x", SerializedValue::F32(0.0)),
+                    field("y", SerializedValue::F32(0.0)),
+                ]),
+            )])]),
+        )]);
+        assert!(matches!(
+            generate_sprite_render_data_outlines_from_value(
+                &missing_position,
+                UnityVersion::parse("5.5.0f1").unwrap(),
+                EndianType::Little,
+                None,
+            ),
+            Err(SpriteRenderDataValueOutlineError::LegacyFields(
+                SpriteRenderDataLegacyOutlineError::MissingField { field: "z" }
+            ))
+        ));
+
+        let mut wrong_indices = match legacy_sprite_render_data_value() {
+            SerializedValue::Struct(fields) => fields,
+            _ => unreachable!(),
+        };
+        wrong_indices[1].value = SerializedValue::Array(vec![
+            SerializedValue::U32(0),
+            SerializedValue::U32(1),
+            SerializedValue::U32(2),
+        ]);
+        assert!(matches!(
+            generate_sprite_render_data_outlines_from_value(
+                &SerializedValue::Struct(wrong_indices),
+                UnityVersion::parse("5.5.0f1").unwrap(),
+                EndianType::Little,
+                None,
+            ),
+            Err(SpriteRenderDataValueOutlineError::LegacyFields(
+                SpriteRenderDataLegacyOutlineError::WrongType {
+                    field: "m_Indices",
+                    actual: "UInt32"
+                }
+            ))
+        ));
     }
 
     #[test]
