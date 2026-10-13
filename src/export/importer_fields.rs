@@ -1346,7 +1346,8 @@ mod tests {
 
         assert_eq!(
             read_sprite_physics_shape(&root, transform).unwrap(),
-            vec![vec![[3.0, 4.0], [-1.0, 0.0]]],
+            // Pivot shift is [2, -1.5], then PPU scaling and the 90-degree swap apply.
+            vec![vec![[2.5, 4.0], [-1.5, 0.0]]],
         );
         assert_eq!(
             read_sprite_physics_shape(&SerializedValue::Struct(Vec::new()), transform).unwrap(),
