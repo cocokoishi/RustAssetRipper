@@ -75,6 +75,130 @@ fn pointer_id(node: &UnityYamlNode) -> i64 {
     text(field(node, "fileID")).parse().unwrap()
 }
 
+#[test]
+fn release_controller_documents_follow_source_hierarchy_ids_and_order() {
+    let version = crate::processing::scene_naming::SceneUnityVersion::parse("2022.3.22f1").unwrap();
+
+    let mut layer = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    layer
+        .insert_field("m_Behaviours", empty_sequence())
+        .unwrap();
+    layer.insert_field("m_Motions", empty_sequence()).unwrap();
+    layer
+        .insert_field("m_StateMachine", local_pointer(7000))
+        .unwrap();
+    let mut layers = UnityYamlNode::sequence(UnityYamlSequenceStyle::Block);
+    layers.push(layer).unwrap();
+    let mut root_body = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    root_body.insert_field("m_AnimatorLayers", layers).unwrap();
+    let root =
+        UnityYamlDocument::object(91, 9_100_000, "AnimatorController", root_body, false).unwrap();
+
+    let mut child_state = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    child_state
+        .insert_field("m_State", local_pointer(7001))
+        .unwrap();
+    let mut child_states = UnityYamlNode::sequence(UnityYamlSequenceStyle::Block);
+    child_states.push(child_state).unwrap();
+    let mut machine_body = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    machine_body
+        .insert_field("m_AnyStateTransitions", empty_sequence())
+        .unwrap();
+    machine_body
+        .insert_field("m_ChildStateMachines", empty_sequence())
+        .unwrap();
+    machine_body
+        .insert_field("m_ChildStates", child_states)
+        .unwrap();
+    machine_body
+        .insert_field("m_EntryTransitions", empty_sequence())
+        .unwrap();
+    machine_body
+        .insert_field("m_StateMachineBehaviours", empty_sequence())
+        .unwrap();
+    machine_body
+        .insert_field(
+            "m_StateMachineTransitions",
+            UnityYamlNode::mapping(UnityYamlMappingStyle::Block),
+        )
+        .unwrap();
+    machine_body
+        .insert_field("m_DefaultState", local_pointer(7001))
+        .unwrap();
+    let machine =
+        UnityYamlDocument::object(1107, 7000, "AnimatorStateMachine", machine_body, false).unwrap();
+
+    let mut state_body = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    state_body
+        .insert_field("m_Motion", local_pointer(0))
+        .unwrap();
+    state_body
+        .insert_field("m_StateMachineBehaviours", empty_sequence())
+        .unwrap();
+    let mut transitions = UnityYamlNode::sequence(UnityYamlSequenceStyle::Block);
+    transitions.push(local_pointer(7002)).unwrap();
+    state_body
+        .insert_field("m_Transitions", transitions)
+        .unwrap();
+    let state = UnityYamlDocument::object(1102, 7001, "AnimatorState", state_body, false).unwrap();
+
+    let mut transition_body = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    transition_body
+        .insert_field("m_DstState", local_pointer(7001))
+        .unwrap();
+    let transition = UnityYamlDocument::object(
+        1101,
+        7002,
+        "AnimatorStateTransition",
+        transition_body,
+        false,
+    )
+    .unwrap();
+
+    // The input order is deliberately the old allocator order. Source traversal
+    // visits the root machine, then its state, then that state's transition.
+    let mut documents = vec![root, state, transition, machine];
+    normalize_controller_collection_documents(&mut documents, version).unwrap();
+
+    let ids = documents
+        .iter()
+        .map(|document| document_file_id(document).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        [
+            9_100_000,
+            1_107_709_254_077_376_921,
+            1_102_730_242_686_860_875,
+            1_101_724_804_207_875_695,
+        ]
+    );
+    assert_eq!(
+        documents
+            .iter()
+            .map(|document| controller_document_class_id(document).unwrap())
+            .collect::<Vec<_>>(),
+        [91, 1107, 1102, 1101]
+    );
+
+    let root_layer = &items(field(body(&documents[0]), "m_AnimatorLayers"))[0];
+    assert_eq!(pointer_id(field(root_layer, "m_StateMachine")), ids[1]);
+    let machine_body = body(&documents[1]);
+    assert_eq!(
+        pointer_id(field(
+            &items(field(machine_body, "m_ChildStates"))[0],
+            "m_State"
+        )),
+        ids[2]
+    );
+    assert_eq!(pointer_id(field(machine_body, "m_DefaultState")), ids[2]);
+    assert_eq!(
+        pointer_id(&items(field(body(&documents[2]), "m_Transitions"))[0]),
+        ids[3]
+    );
+    assert_eq!(pointer_id(field(body(&documents[3]), "m_DstState")), ids[2]);
+}
+
 fn body(document: &UnityYamlDocument) -> &UnityYamlNode {
     let UnityYamlNodeKind::Mapping { entries, .. } = &document.root.kind else {
         panic!("document root is not a mapping")
@@ -157,16 +281,19 @@ fn rebuilt_documents_with_behaviours(
         UnityYamlDocument::object(91, root_file_id, "AnimatorController", root, false).unwrap();
     let mut next_guid_sequence = 0u64;
     let mut used_guids = std::collections::HashSet::new();
-    rebuild_animator_controller_documents(
+    let version = crate::processing::scene_naming::SceneUnityVersion::parse("2022.3.0f1").unwrap();
+    let mut documents = rebuild_animator_controller_documents(
         document,
         payload,
         true,
-        crate::processing::scene_naming::SceneUnityVersion::parse("2022.3.0f1").unwrap(),
+        version,
         &mut next_guid_sequence,
         &mut used_guids,
     )
     .unwrap()
-    .documents
+    .documents;
+    normalize_controller_collection_documents(&mut documents, version).unwrap();
+    documents
 }
 
 fn assign_machine_identities(
@@ -732,9 +859,14 @@ fn empty_machine_parent_inference_matches_source_project_export() {
     );
     for node in &machine.machines {
         if node.synthetic_default_state.is_none() {
-            let id = node.file_id;
-            // Rebuild allocation starts at the same root/state ordering.
-            assert_eq!(crc32_ieee(identities[&id].as_bytes()), node.full_path_id);
+            assert_eq!(
+                identities
+                    .values()
+                    .filter(|path| crc32_ieee(path.as_bytes()) == node.full_path_id)
+                    .count(),
+                1,
+                "each emitted machine path has the source CRC identity"
+            );
         }
     }
 
@@ -1224,6 +1356,11 @@ fn controller_behaviour_ranges_and_collection_match_source_yaml() {
             UnityYamlDocument::object(114, member.file_id, "MonoBehaviour", body, false).unwrap(),
         );
     }
+    normalize_controller_collection_documents(
+        &mut documents,
+        crate::processing::scene_naming::SceneUnityVersion::parse("2022.3.0f1").unwrap(),
+    )
+    .unwrap();
     let output = crate::test_support::unique_test_directory("controller-behaviour-project");
     let report = super::super::export_workspace_yaml_project_with_settings(
         &output,

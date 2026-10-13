@@ -162,6 +162,574 @@ pub(super) struct RebuiltControllerDocuments {
     pub(super) dropped: Vec<DroppedControllerDocument>,
 }
 
+/// Reassigns and orders the documents in a release controller collection by the same
+/// first-visit hierarchy order used by `AnimatorControllerExportCollection`. The
+/// processor reconstructs the editor-facing graph from the packed constants, then
+/// `FetchEditorHierarchy` walks that graph before `AssetsExportCollection` allocates
+/// each child ID from the collection's current asset count.
+pub(super) fn normalize_controller_collection_documents(
+    documents: &mut Vec<UnityYamlDocument>,
+    project_version: crate::processing::scene_naming::SceneUnityVersion,
+) -> Result<(), Box<dyn Error>> {
+    if documents.is_empty() {
+        return Err(invalid_project(
+            "AnimatorController collection has no root document",
+        ));
+    }
+
+    let mut document_indexes = HashMap::new();
+    document_indexes
+        .try_reserve(documents.len())
+        .map_err(|_| invalid_project("could not allocate AnimatorController document index"))?;
+    let mut root_index = None;
+    for (index, document) in documents.iter().enumerate() {
+        let file_id = document_file_id(document)?;
+        if document_indexes.insert(file_id, index).is_some() {
+            return Err(invalid_project(format!(
+                "AnimatorController collection repeats document fileID {file_id}"
+            )));
+        }
+        if controller_document_class_id(document)? == ANIMATOR_CONTROLLER_CLASS_ID
+            && root_index.replace(index).is_some()
+        {
+            return Err(invalid_project(
+                "AnimatorController collection has multiple controller roots",
+            ));
+        }
+    }
+    let root_index = root_index.ok_or_else(|| {
+        invalid_project("AnimatorController collection has no class-91 root document")
+    })?;
+
+    let mut traversal = ControllerDocumentTraversal {
+        documents,
+        document_indexes: &document_indexes,
+        project_version,
+        visited: HashSet::new(),
+        ordered_indexes: Vec::new(),
+        remapped_ids: HashMap::new(),
+        used_ids: HashSet::new(),
+    };
+    traversal
+        .visited
+        .try_reserve(traversal.documents.len())
+        .map_err(|_| invalid_project("could not allocate AnimatorController visit set"))?;
+    traversal
+        .ordered_indexes
+        .try_reserve_exact(traversal.documents.len())
+        .map_err(|_| invalid_project("could not allocate AnimatorController document order"))?;
+    traversal
+        .remapped_ids
+        .try_reserve(traversal.documents.len().saturating_sub(1))
+        .map_err(|_| invalid_project("could not allocate AnimatorController ID map"))?;
+    traversal
+        .used_ids
+        .try_reserve(traversal.documents.len())
+        .map_err(|_| invalid_project("could not allocate AnimatorController ID set"))?;
+
+    let root_file_id = document_file_id(&traversal.documents[root_index])?;
+    traversal.used_ids.insert(root_file_id);
+    traversal.visit_root(root_index)?;
+    if traversal.ordered_indexes.len() != traversal.documents.len() {
+        let unvisited = traversal
+            .documents
+            .iter()
+            .enumerate()
+            .filter_map(|(index, document)| {
+                let file_id = document_file_id(document).ok()?;
+                if traversal.visited.contains(&file_id) {
+                    return None;
+                }
+                Some(format!(
+                    "class {} fileID {} (index {index})",
+                    controller_document_class_id(document).unwrap_or_default(),
+                    file_id
+                ))
+            })
+            .take(8)
+            .collect::<Vec<_>>();
+        return Err(invalid_project(format!(
+            "AnimatorController collection contains documents outside FetchEditorHierarchy: {}",
+            unvisited.join(", ")
+        )));
+    }
+
+    let ordered_indexes = std::mem::take(&mut traversal.ordered_indexes);
+    let remapped_ids = std::mem::take(&mut traversal.remapped_ids);
+    drop(traversal);
+
+    for document in documents.iter_mut() {
+        if let Some(old_file_id) = document.root.anchor.as_deref() {
+            let old_file_id = old_file_id.parse::<i64>().map_err(|error| {
+                invalid_project(format!(
+                    "AnimatorController YAML fileID anchor is invalid: {error}"
+                ))
+            })?;
+            if let Some(new_file_id) = remapped_ids.get(&old_file_id) {
+                document.root.anchor = Some(new_file_id.to_string());
+            }
+        }
+        remap_controller_local_file_ids(&mut document.root, &remapped_ids)?;
+    }
+
+    let mut slots = std::mem::take(documents)
+        .into_iter()
+        .map(Some)
+        .collect::<Vec<_>>();
+    documents
+        .try_reserve_exact(ordered_indexes.len())
+        .map_err(|_| invalid_project("could not allocate ordered AnimatorController documents"))?;
+    for index in ordered_indexes {
+        let document = slots
+            .get_mut(index)
+            .and_then(Option::take)
+            .ok_or_else(|| invalid_project("AnimatorController document order repeats an index"))?;
+        documents.push(document);
+    }
+    Ok(())
+}
+
+struct ControllerDocumentTraversal<'a> {
+    documents: &'a [UnityYamlDocument],
+    document_indexes: &'a HashMap<i64, usize>,
+    project_version: crate::processing::scene_naming::SceneUnityVersion,
+    visited: HashSet<i64>,
+    ordered_indexes: Vec<usize>,
+    remapped_ids: HashMap<i64, i64>,
+    used_ids: HashSet<i64>,
+}
+
+impl ControllerDocumentTraversal<'_> {
+    fn visit_root(&mut self, root_index: usize) -> Result<(), Box<dyn Error>> {
+        let root = self.documents.get(root_index).ok_or_else(|| {
+            invalid_project("AnimatorController root document index is out of range")
+        })?;
+        let root_file_id = document_file_id(root)?;
+        self.visited.insert(root_file_id);
+        self.ordered_indexes.push(root_index);
+        let children = controller_root_hierarchy_children(root, self.document_indexes)?;
+        for child in children {
+            self.visit_child(child)?;
+        }
+        Ok(())
+    }
+
+    fn visit_child(&mut self, index: usize) -> Result<(), Box<dyn Error>> {
+        let document = self.documents.get(index).ok_or_else(|| {
+            invalid_project("AnimatorController child document index is out of range")
+        })?;
+        let file_id = document_file_id(document)?;
+        if !self.visited.insert(file_id) {
+            return Ok(());
+        }
+        let class_id = controller_document_class_id(document)?;
+        let seed = i32::try_from(self.remapped_ids.len()).map_err(|_| {
+            invalid_project("AnimatorController pseudo-random export ID seed overflows")
+        })?;
+        let export_id =
+            crate::export::ids::get_pseudo_random_export_id(class_id, seed, self.project_version);
+        if !self.used_ids.insert(export_id) {
+            return Err(invalid_project(format!(
+                "AnimatorController pseudo-random export ID {export_id} collides"
+            )));
+        }
+        self.remapped_ids.insert(file_id, export_id);
+        self.ordered_indexes.push(index);
+
+        let children =
+            controller_document_hierarchy_children(document, class_id, self.document_indexes)?;
+        for child in children {
+            self.visit_child(child)?;
+        }
+        Ok(())
+    }
+}
+
+fn controller_document_class_id(document: &UnityYamlDocument) -> Result<i32, Box<dyn Error>> {
+    document
+        .root
+        .tag
+        .as_deref()
+        .and_then(|tag| tag.strip_prefix("!u!"))
+        .ok_or_else(|| invalid_project("AnimatorController document has no Unity class tag"))?
+        .parse::<i32>()
+        .map_err(|error| {
+            invalid_project(format!(
+                "AnimatorController document class tag is invalid: {error}"
+            ))
+        })
+}
+
+fn controller_document_body(
+    document: &UnityYamlDocument,
+) -> Result<&UnityYamlNode, Box<dyn Error>> {
+    let UnityYamlNodeKind::Mapping { entries, .. } = &document.root.kind else {
+        return Err(invalid_project(
+            "AnimatorController document root is not a mapping",
+        ));
+    };
+    if entries.len() != 1 {
+        return Err(invalid_project(
+            "AnimatorController document root does not have one class body",
+        ));
+    }
+    Ok(&entries[0].1)
+}
+
+fn controller_root_hierarchy_children(
+    document: &UnityYamlDocument,
+    document_indexes: &HashMap<i64, usize>,
+) -> Result<Vec<usize>, Box<dyn Error>> {
+    let body = controller_document_body(document)?;
+    let mut children = Vec::new();
+    let Some(layers) = node_field(body, "m_AnimatorLayers")? else {
+        return Ok(children);
+    };
+    let UnityYamlNodeKind::Sequence { items: layers, .. } = &layers.kind else {
+        return Err(invalid_project(
+            "AnimatorController m_AnimatorLayers is not a sequence",
+        ));
+    };
+    for layer in layers {
+        if let Some(behaviour_pairs) = node_field(layer, "m_Behaviours")? {
+            for pair in
+                controller_node_sequence(behaviour_pairs, "AnimatorController layer behaviours")?
+            {
+                if let Some(state) = node_field(pair, "m_State")? {
+                    append_controller_pointer(state, document_indexes, &mut children)?;
+                }
+                if let Some(behaviours) = node_field(pair, "m_StateMachineBehaviours")? {
+                    append_controller_pointer_sequence(
+                        behaviours,
+                        "AnimatorController layer state behaviours",
+                        document_indexes,
+                        &mut children,
+                    )?;
+                }
+            }
+        }
+        if let Some(motion_pairs) = node_field(layer, "m_Motions")? {
+            for pair in controller_node_sequence(motion_pairs, "AnimatorController layer motions")?
+            {
+                if let Some(state) = node_field(pair, "m_State")? {
+                    append_controller_pointer(state, document_indexes, &mut children)?;
+                }
+                if let Some(motion) = node_field(pair, "m_Motion")? {
+                    append_controller_pointer(motion, document_indexes, &mut children)?;
+                }
+            }
+        }
+        if let Some(state_machine) = node_field(layer, "m_StateMachine")? {
+            append_controller_pointer(state_machine, document_indexes, &mut children)?;
+        }
+    }
+    Ok(children)
+}
+
+fn controller_document_hierarchy_children(
+    document: &UnityYamlDocument,
+    class_id: i32,
+    document_indexes: &HashMap<i64, usize>,
+) -> Result<Vec<usize>, Box<dyn Error>> {
+    let body = controller_document_body(document)?;
+    let mut children = Vec::new();
+    match class_id {
+        ANIMATOR_STATE_CLASS_ID => {
+            if let Some(motions) = node_field(body, "m_Motions")? {
+                append_controller_pointer_sequence(
+                    motions,
+                    "AnimatorState motions",
+                    document_indexes,
+                    &mut children,
+                )?;
+            } else if let Some(motion) = node_field(body, "m_Motion")? {
+                append_controller_pointer(motion, document_indexes, &mut children)?;
+            }
+            if let Some(behaviours) = node_field(body, "m_StateMachineBehaviours")? {
+                append_controller_pointer_sequence(
+                    behaviours,
+                    "AnimatorState behaviours",
+                    document_indexes,
+                    &mut children,
+                )?;
+            }
+            if let Some(transitions) = node_field(body, "m_Transitions")? {
+                append_controller_pointer_sequence(
+                    transitions,
+                    "AnimatorState transitions",
+                    document_indexes,
+                    &mut children,
+                )?;
+            }
+        }
+        BLEND_TREE_CLASS_ID => {
+            if let Some(motions) = node_field(body, "m_Childs")? {
+                for child in controller_node_sequence(motions, "BlendTree children")? {
+                    if let Some(motion) = node_field(child, "m_Motion")? {
+                        append_controller_pointer(motion, document_indexes, &mut children)?;
+                    }
+                }
+            }
+        }
+        ANIMATOR_STATE_MACHINE_CLASS_ID => {
+            if let Some(transitions) = node_field(body, "m_AnyStateTransitions")? {
+                append_controller_pointer_sequence(
+                    transitions,
+                    "AnimatorStateMachine AnyState transitions",
+                    document_indexes,
+                    &mut children,
+                )?;
+            }
+            if let Some(child_machines) = node_field(body, "m_ChildStateMachines")? {
+                for child in
+                    controller_node_sequence(child_machines, "AnimatorStateMachine child machines")?
+                {
+                    if let Some(machine) = node_field(child, "m_StateMachine")? {
+                        append_controller_pointer(machine, document_indexes, &mut children)?;
+                    }
+                }
+                if let Some(child_states) = node_field(body, "m_ChildStates")? {
+                    for child in
+                        controller_node_sequence(child_states, "AnimatorStateMachine child states")?
+                    {
+                        if let Some(state) = node_field(child, "m_State")? {
+                            append_controller_pointer(state, document_indexes, &mut children)?;
+                        }
+                    }
+                }
+                if let Some(transitions) = node_field(body, "m_EntryTransitions")? {
+                    append_controller_pointer_sequence(
+                        transitions,
+                        "AnimatorStateMachine entry transitions",
+                        document_indexes,
+                        &mut children,
+                    )?;
+                }
+                if let Some(behaviours) = node_field(body, "m_StateMachineBehaviours")? {
+                    append_controller_pointer_sequence(
+                        behaviours,
+                        "AnimatorStateMachine behaviours",
+                        document_indexes,
+                        &mut children,
+                    )?;
+                }
+                if let Some(transitions) = node_field(body, "m_StateMachineTransitions")? {
+                    append_controller_pair_value_pointers(
+                        transitions,
+                        "AnimatorStateMachine transitions",
+                        document_indexes,
+                        &mut children,
+                    )?;
+                }
+            } else {
+                if let Some(child_machines) = node_field(body, "m_ChildStateMachine")? {
+                    append_controller_pointer_sequence(
+                        child_machines,
+                        "legacy AnimatorStateMachine children",
+                        document_indexes,
+                        &mut children,
+                    )?;
+                }
+                for dictionary in ["m_LocalTransitions", "m_OrderedTransitions"] {
+                    if let Some(transitions) = node_field(body, dictionary)? {
+                        append_controller_dictionary_key_and_value_pointers(
+                            transitions,
+                            dictionary,
+                            document_indexes,
+                            &mut children,
+                        )?;
+                    }
+                }
+                if let Some(states) = node_field(body, "m_States")? {
+                    append_controller_pointer_sequence(
+                        states,
+                        "legacy AnimatorStateMachine states",
+                        document_indexes,
+                        &mut children,
+                    )?;
+                }
+            }
+        }
+        ANIMATOR_STATE_TRANSITION_CLASS_ID | 1109 | 114 => {}
+        other => {
+            return Err(invalid_project(format!(
+                "AnimatorController collection has unexpected child class {other}"
+            )));
+        }
+    }
+    Ok(children)
+}
+
+fn controller_node_sequence<'a>(
+    node: &'a UnityYamlNode,
+    context: &str,
+) -> Result<&'a [UnityYamlNode], Box<dyn Error>> {
+    let UnityYamlNodeKind::Sequence { items, .. } = &node.kind else {
+        return Err(invalid_project(format!("{context} is not a sequence")));
+    };
+    Ok(items)
+}
+
+fn append_controller_pointer_sequence(
+    node: &UnityYamlNode,
+    context: &str,
+    document_indexes: &HashMap<i64, usize>,
+    children: &mut Vec<usize>,
+) -> Result<(), Box<dyn Error>> {
+    for pointer in controller_node_sequence(node, context)? {
+        append_controller_pointer(pointer, document_indexes, children)?;
+    }
+    Ok(())
+}
+
+fn append_controller_pair_value_pointers(
+    node: &UnityYamlNode,
+    context: &str,
+    document_indexes: &HashMap<i64, usize>,
+    children: &mut Vec<usize>,
+) -> Result<(), Box<dyn Error>> {
+    match &node.kind {
+        UnityYamlNodeKind::Sequence { items, .. } => {
+            for pair in items {
+                let values = node_field(pair, "second")?.ok_or_else(|| {
+                    invalid_project(format!("{context} pair has no second value"))
+                })?;
+                append_controller_pointer_sequence(values, context, document_indexes, children)?;
+            }
+        }
+        UnityYamlNodeKind::Mapping { entries, .. } => {
+            for (_, value) in entries {
+                if let Some(values) = node_field(value, "second")? {
+                    append_controller_pointer_sequence(
+                        values,
+                        context,
+                        document_indexes,
+                        children,
+                    )?;
+                } else {
+                    append_controller_pointer_sequence(value, context, document_indexes, children)?;
+                }
+            }
+        }
+        _ => {
+            return Err(invalid_project(format!(
+                "{context} is not a sequence or mapping"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn append_controller_dictionary_key_and_value_pointers(
+    node: &UnityYamlNode,
+    context: &str,
+    document_indexes: &HashMap<i64, usize>,
+    children: &mut Vec<usize>,
+) -> Result<(), Box<dyn Error>> {
+    let UnityYamlNodeKind::Mapping { entries, .. } = &node.kind else {
+        return Err(invalid_project(format!("{context} is not a mapping")));
+    };
+    for (state, values) in entries {
+        append_controller_pointer(state, document_indexes, children)?;
+        append_controller_pointer_sequence(values, context, document_indexes, children)?;
+    }
+    Ok(())
+}
+
+fn append_controller_pointer(
+    pointer: &UnityYamlNode,
+    document_indexes: &HashMap<i64, usize>,
+    children: &mut Vec<usize>,
+) -> Result<(), Box<dyn Error>> {
+    let Some(file_id) = node_field(pointer, "fileID")? else {
+        return Err(invalid_project(
+            "AnimatorController hierarchy pointer has no fileID",
+        ));
+    };
+    if let Some(guid) = node_field(pointer, "guid")? {
+        let guid = node_string(guid).ok_or_else(|| {
+            invalid_project("AnimatorController hierarchy pointer guid is not a string")
+        })?;
+        if !guid.is_empty() {
+            return Ok(());
+        }
+    }
+    let file_id = match &file_id.kind {
+        UnityYamlNodeKind::Scalar(UnityYamlScalar::Signed(value)) => *value,
+        UnityYamlNodeKind::Scalar(UnityYamlScalar::Unsigned(value)) => i64::try_from(*value)
+            .map_err(|_| invalid_project("AnimatorController hierarchy fileID overflows"))?,
+        _ => {
+            return Err(invalid_project(
+                "AnimatorController hierarchy fileID is not an integer",
+            ));
+        }
+    };
+    if file_id != 0 {
+        if let Some(index) = document_indexes.get(&file_id) {
+            children.try_reserve(1).map_err(|_| {
+                invalid_project("could not allocate AnimatorController child order")
+            })?;
+            children.push(*index);
+        }
+    }
+    Ok(())
+}
+
+fn remap_controller_local_file_ids(
+    node: &mut UnityYamlNode,
+    remapped_ids: &HashMap<i64, i64>,
+) -> Result<(), Box<dyn Error>> {
+    let UnityYamlNodeKind::Mapping { entries, .. } = &mut node.kind else {
+        if let UnityYamlNodeKind::Sequence { items, .. } = &mut node.kind {
+            for item in items {
+                remap_controller_local_file_ids(item, remapped_ids)?;
+            }
+        }
+        return Ok(());
+    };
+
+    let file_id_index = entries
+        .iter()
+        .position(|(key, _)| node_string(key).as_deref() == Some("fileID"));
+    let guid = entries
+        .iter()
+        .find(|(key, _)| node_string(key).as_deref() == Some("guid"))
+        .map(|(_, value)| value);
+    let has_external_guid = match guid.map(|guid| &guid.kind) {
+        None | Some(UnityYamlNodeKind::Scalar(UnityYamlScalar::Null)) => false,
+        Some(UnityYamlNodeKind::Scalar(
+            UnityYamlScalar::String(value) | UnityYamlScalar::PlainString(value),
+        )) => !value.is_empty(),
+        Some(_) => {
+            return Err(invalid_project(
+                "AnimatorController pointer guid is not a string",
+            ));
+        }
+    };
+    if !has_external_guid {
+        if let Some(file_id_index) = file_id_index {
+            let old_file_id = match &entries[file_id_index].1.kind {
+                UnityYamlNodeKind::Scalar(UnityYamlScalar::Signed(value)) => Some(*value),
+                UnityYamlNodeKind::Scalar(UnityYamlScalar::Unsigned(value)) => {
+                    Some(i64::try_from(*value).map_err(|_| {
+                        invalid_project("AnimatorController local pointer fileID overflows")
+                    })?)
+                }
+                _ => None,
+            };
+            if let Some(new_file_id) = old_file_id.and_then(|old| remapped_ids.get(&old)) {
+                entries[file_id_index].1.kind =
+                    UnityYamlNodeKind::Scalar(UnityYamlScalar::Signed(*new_file_id));
+            }
+        }
+    }
+    for (key, value) in entries {
+        remap_controller_local_file_ids(key, remapped_ids)?;
+        remap_controller_local_file_ids(value, remapped_ids)?;
+    }
+    Ok(())
+}
+
 /// Cross-file reference target for one dropped sub-asset, keyed by the
 /// allocator file ID the kept documents used before the split.
 #[derive(Clone, Copy, Debug)]

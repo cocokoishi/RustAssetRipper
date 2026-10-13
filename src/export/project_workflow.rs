@@ -511,7 +511,8 @@ use self::animator_collections::{
     hide_controller_behaviour, prepare_controller_collections,
 };
 use self::animator_controller::{
-    rebuild_animator_controller_documents, RebuiltControllerDocuments,
+    normalize_controller_collection_documents, rebuild_animator_controller_documents,
+    RebuiltControllerDocuments,
 };
 use self::asset_support::*;
 use self::audio_asset::*;

@@ -668,6 +668,9 @@ pub(super) fn plan_routed_asset_files(
                         }
                         documents.push(document);
                     }
+                    if group.is_release {
+                        normalize_controller_collection_documents(&mut documents, project_version)?;
+                    }
                     additional_exported_document_count = documents.len().saturating_sub(1);
                     let controller_bytes =
                         write_unity_yaml_documents(&documents, limits.yaml_write)?.into_bytes();
