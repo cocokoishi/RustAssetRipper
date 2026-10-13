@@ -13,9 +13,9 @@ use std::io;
 use crate::processing::scene_naming::SceneUnityVersion;
 use crate::resources::image_export::ImageExportFormat;
 use crate::resources::texture::{
-    Texture2DView, TextureExportError, export_cubemap_array_image,
-    export_texture2d_array_image, export_texture2d_image_with_unity_version,
-    export_texture3d_image,
+    export_cubemap_array_image, export_texture2d_array_image,
+    export_texture2d_image_with_unity_version, export_texture3d_image, Texture2DView,
+    TextureExportError,
 };
 use crate::resources::texture_array::{CubemapArrayView, Texture2DArrayView, Texture3DView};
 use crate::resources::vertex_data_blob::UnityVersion;
@@ -928,7 +928,10 @@ impl TextureImporterFacts {
                 view.height,
                 optional_i32(root, &["m_MipCount"])?.unwrap_or(0) > 1,
                 view.format,
-                matches!(optional_i32(root, &["m_UsageMode"])?.unwrap_or(0), 3 | 4 | 10),
+                matches!(
+                    optional_i32(root, &["m_UsageMode"])?.unwrap_or(0),
+                    3 | 4 | 10
+                ),
                 false,
                 0,
             ),
@@ -937,7 +940,10 @@ impl TextureImporterFacts {
                 view.width,
                 optional_i32(root, &["m_MipCount"])?.unwrap_or(0) > 1,
                 view.format,
-                matches!(optional_i32(root, &["m_UsageMode"])?.unwrap_or(0), 3 | 4 | 10),
+                matches!(
+                    optional_i32(root, &["m_UsageMode"])?.unwrap_or(0),
+                    3 | 4 | 10
+                ),
                 false,
                 0,
             ),

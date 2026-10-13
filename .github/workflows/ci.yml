@@ -92,8 +92,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable
+      - id: rust_toolchain
+        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable
         with:
           toolchain: stable
       - run: cargo test --workspace --locked
-      - run: cargo build --workspace --release --locked
+      - name: Build release binaries
+        if: ${{ always() && steps.rust_toolchain.outcome == 'success' }}
+        run: cargo build --workspace --release --locked

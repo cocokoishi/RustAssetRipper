@@ -375,9 +375,9 @@ fn texture_array_has_exportable_image_payload(
 ) -> bool {
     let (width, height, depth, image_data_is_empty, stream_data) = match class_id {
         crate::resources::texture_array::TEXTURE2DARRAY_CLASS_ID => {
-            let Ok(view) = crate::resources::texture_array::Texture2DArrayView::from_value(
-                &payload.root,
-            ) else {
+            let Ok(view) =
+                crate::resources::texture_array::Texture2DArrayView::from_value(&payload.root)
+            else {
                 return false;
             };
             (
@@ -389,12 +389,13 @@ fn texture_array_has_exportable_image_payload(
             )
         }
         crate::resources::texture_array::CUBEMAPARRAY_CLASS_ID => {
-            let Ok(view) = crate::resources::texture_array::CubemapArrayView::from_value(
-                &payload.root,
-            ) else {
+            let Ok(view) =
+                crate::resources::texture_array::CubemapArrayView::from_value(&payload.root)
+            else {
                 return false;
             };
-            let Ok(depth) = crate::resources::texture_array::cubemap_array_depth(view.cubemap_count)
+            let Ok(depth) =
+                crate::resources::texture_array::cubemap_array_depth(view.cubemap_count)
             else {
                 return false;
             };
@@ -921,16 +922,15 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                 None
             };
             let texture_export = if texture_route_supported {
-                let expected_exporter =
-                    match class_id {
-                        crate::resources::texture_array::TEXTURE3D_CLASS_ID
-                        | crate::resources::texture_array::TEXTURE2DARRAY_CLASS_ID
-                        | crate::resources::texture_array::CUBEMAPARRAY_CLASS_ID => {
-                            "TextureArrayAssetExporter"
-                        }
-                        _ if lightmap_image_route => "LightmapTextureAssetExporter",
-                        _ => "TextureAssetExporter",
-                    };
+                let expected_exporter = match class_id {
+                    crate::resources::texture_array::TEXTURE3D_CLASS_ID
+                    | crate::resources::texture_array::TEXTURE2DARRAY_CLASS_ID
+                    | crate::resources::texture_array::CUBEMAPARRAY_CLASS_ID => {
+                        "TextureArrayAssetExporter"
+                    }
+                    _ if lightmap_image_route => "LightmapTextureAssetExporter",
+                    _ => "TextureAssetExporter",
+                };
                 if selection.exporter != expected_exporter {
                     return Err(invalid_project(format!(
                         "generated texture class {class_id} selected {}, expected the registered {expected_exporter}",
@@ -957,9 +957,7 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                         settings,
                         asset_bundle_name.as_deref(),
                     )
-                } else if class_id
-                    == crate::resources::texture_array::TEXTURE2DARRAY_CLASS_ID
-                {
+                } else if class_id == crate::resources::texture_array::TEXTURE2DARRAY_CLASS_ID {
                     plan_texture2d_array_project_export_for_source_version(
                         &payload.root,
                         project_version,
@@ -1628,14 +1626,20 @@ mod tests {
             crate::resources::texture_array::TEXTURE2DARRAY_CLASS_ID,
             crate::resources::texture_array::CUBEMAPARRAY_CLASS_ID,
         ] {
-            assert!(texture_array_project_route_supported(class_id, supported, true));
-            assert!(!texture_array_project_route_supported(class_id, supported, false));
+            assert!(texture_array_project_route_supported(
+                class_id, supported, true
+            ));
+            assert!(!texture_array_project_route_supported(
+                class_id, supported, false
+            ));
             assert!(!texture_array_project_route_supported(
                 class_id,
                 registration_boundary,
                 true
             ));
-            assert!(!texture_array_project_route_supported(class_id, older, true));
+            assert!(!texture_array_project_route_supported(
+                class_id, older, true
+            ));
         }
         assert!(!texture_array_project_route_supported(117, supported, true));
     }

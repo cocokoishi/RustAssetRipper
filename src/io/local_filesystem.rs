@@ -794,7 +794,7 @@ fn open_with_share(path: &Path, options: &mut OpenOptions, share: FileShare) -> 
                 Ok(()) => Ok(file),
                 Err(error) if error == rustix::io::Errno::WOULDBLOCK => Err(error.into()),
                 Err(_) => Ok(file),
-            };
+            }
         }
         #[cfg(any(
             target_os = "solaris",
