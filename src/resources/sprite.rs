@@ -32,9 +32,11 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 
 use crate::numerics::Vec3;
+use crate::serialized_file::object::SerializedValue;
 
+use super::mesh::{MeshVertexBytesSource, MeshView, MeshViewError};
 use super::sub_mesh_data::SubMeshView;
-use super::vertex_data_blob::UnityVersion;
+use super::vertex_data_blob::{EndianType, UnityVersion};
 use super::vertex_data_extensions::{generate_vertices, VertexDataExtensionError, VertexDataView};
 
 /// The class ID of `Sprite` (class 213).
@@ -375,6 +377,42 @@ impl std::error::Error for SpriteRenderDataOutlineError {
     }
 }
 
+/// Failure while reading decoded SpriteRenderData fields and generating outlines.
+#[derive(Debug)]
+pub enum SpriteRenderDataValueOutlineError {
+    /// A render-data field had an invalid decoded shape.
+    Fields(MeshViewError),
+    /// A set external vertex stream must be resolved by the caller first.
+    MissingStreamedVertexBytes,
+    /// The outline kernels rejected the decoded geometry.
+    Outline(SpriteRenderDataOutlineError),
+}
+
+impl fmt::Display for SpriteRenderDataValueOutlineError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Fields(source) => {
+                write!(formatter, "could not read SpriteRenderData outline fields: {source}")
+            }
+            Self::MissingStreamedVertexBytes => write!(
+                formatter,
+                "SpriteRenderData uses an external vertex stream, but resolved stream bytes were not supplied"
+            ),
+            Self::Outline(source) => write!(formatter, "{source}"),
+        }
+    }
+}
+
+impl std::error::Error for SpriteRenderDataValueOutlineError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Fields(source) => Some(source),
+            Self::Outline(source) => Some(source),
+            Self::MissingStreamedVertexBytes => None,
+        }
+    }
+}
+
 /// Generates source-compatible outlines from already-decoded sprite render-data fields.
 ///
 /// This follows `SpriteMetaDataExtensions.GenerateOutline`: each submesh selects its
@@ -417,6 +455,60 @@ pub fn generate_render_data_sprite_outlines(
         outlines.append(&mut submesh_outlines);
     }
     Ok(outlines)
+}
+
+/// Reads outline inputs from a decoded `SpriteRenderData` value and generates the modern path.
+///
+/// Returns `Ok(None)` when the source would take its legacy `Vertices`/`Indices` branch
+/// because `m_VertexData` or `m_SubMeshes` is absent. If the inline vertex bytes are empty
+/// and the decoded stream descriptor is set, the caller must supply the already-resolved
+/// stream bytes; unresolved external data is an error rather than an empty outline.
+pub fn generate_sprite_render_data_outlines_from_value(
+    render_data: &SerializedValue,
+    version: UnityVersion,
+    endian: EndianType,
+    resolved_stream_vertex_bytes: Option<&[u8]>,
+) -> Result<Option<Vec<Vec<[f32; 2]>>>, SpriteRenderDataValueOutlineError> {
+    let mesh = MeshView::from_render_data_value(render_data, version, endian)
+        .map_err(SpriteRenderDataValueOutlineError::Fields)?;
+    let Some(vertex_data) = mesh.vertex_data.as_ref() else {
+        return Ok(None);
+    };
+    if mesh.sub_meshes.is_empty() {
+        return Ok(None);
+    }
+    let vertex_bytes = match mesh.vertex_data_bytes_source() {
+        MeshVertexBytesSource::Inline | MeshVertexBytesSource::Empty => &vertex_data.data,
+        MeshVertexBytesSource::Streamed => {
+            if mesh
+                .stream_data
+                .as_ref()
+                .is_some_and(|stream| stream.is_set())
+            {
+                resolved_stream_vertex_bytes
+                    .ok_or(SpriteRenderDataValueOutlineError::MissingStreamedVertexBytes)?
+            } else {
+                &vertex_data.data
+            }
+        }
+    };
+    let vertex_view = VertexDataView {
+        channels: vertex_data.channels.as_deref(),
+        streams: vertex_data.streams.as_deref(),
+        streams_0: None,
+        data: vertex_bytes,
+        vertex_count: vertex_data.vertex_count,
+        current_channels_int32: None,
+        current_channels_uint32: 0,
+    };
+    generate_render_data_sprite_outlines(
+        &vertex_view,
+        version,
+        &mesh.index_buffer,
+        &mesh.sub_meshes,
+    )
+    .map(Some)
+    .map_err(SpriteRenderDataValueOutlineError::Outline)
 }
 
 fn read_sprite_submesh_triangles(
@@ -1068,6 +1160,71 @@ pub fn fill_sprite_metadata(
 mod tests {
     use super::*;
     use crate::resources::vertex_data_blob::{ChannelInfo, StreamInfo};
+    use crate::serialized_file::object::SerializedFieldValue;
+
+    fn field(name: &str, value: SerializedValue) -> SerializedFieldValue {
+        SerializedFieldValue {
+            name: name.to_owned(),
+            value,
+        }
+    }
+
+    fn render_data_value(
+        vertex_bytes: Vec<u8>,
+        stream_data: Option<SerializedValue>,
+    ) -> SerializedValue {
+        let vertex_data = SerializedValue::Struct(vec![
+            field("m_VertexCount", SerializedValue::U32(3)),
+            field(
+                "m_Channels",
+                SerializedValue::Array(vec![SerializedValue::Struct(vec![
+                    field("dimension", SerializedValue::U8(3)),
+                    field("offset", SerializedValue::U8(0)),
+                    field("format", SerializedValue::U8(0)),
+                    field("stream", SerializedValue::U8(0)),
+                ])]),
+            ),
+            field(
+                "m_Streams",
+                SerializedValue::Array(vec![SerializedValue::Struct(vec![
+                    field("channelMask", SerializedValue::U32(1)),
+                    field("offset", SerializedValue::U32(0)),
+                    field("stride", SerializedValue::U32(12)),
+                ])]),
+            ),
+            field("m_DataSize", SerializedValue::Bytes(vertex_bytes)),
+        ]);
+        let submesh = SerializedValue::Struct(vec![
+            field("baseVertex", SerializedValue::U32(65_000)),
+            field("firstByte", SerializedValue::U32(2)),
+            field("firstVertex", SerializedValue::U32(0)),
+            field("indexCount", SerializedValue::U32(4)),
+            field("topology", SerializedValue::I32(5)),
+            field("vertexCount", SerializedValue::U32(3)),
+        ]);
+        let mut fields = vec![
+            field("m_VertexData", vertex_data),
+            field(
+                "m_IndexBuffer",
+                SerializedValue::Bytes(vec![0xFF, 0xEE, 0, 0, 1, 0, 2, 0, 3, 0]),
+            ),
+            // The source's Sprite outline helper still reads 16-bit triangles.
+            field("m_IndexFormat", SerializedValue::I32(1)),
+            field("m_SubMeshes", SerializedValue::Array(vec![submesh])),
+        ];
+        if let Some(stream_data) = stream_data {
+            fields.push(field("m_StreamData", stream_data));
+        }
+        SerializedValue::Struct(fields)
+    }
+
+    fn triangle_vertex_bytes() -> Vec<u8> {
+        [[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
+            .into_iter()
+            .flatten()
+            .flat_map(f32::to_le_bytes)
+            .collect()
+    }
 
     #[test]
     fn sprite_class_id_matches_the_source() {
@@ -1176,6 +1333,69 @@ mod tests {
         assert_eq!(
             generate_render_data_sprite_outlines(&view, version, &[], &empty_range),
             Ok(Vec::new()),
+        );
+    }
+
+    #[test]
+    fn decoded_render_data_fields_feed_the_source_outline_path() {
+        let root = render_data_value(triangle_vertex_bytes(), None);
+        assert_eq!(
+            generate_sprite_render_data_outlines_from_value(
+                &root,
+                UnityVersion::parse("2022.3.0f1").unwrap(),
+                EndianType::Little,
+                None,
+            )
+            .unwrap(),
+            Some(vec![vec![[0.0, 1.0], [0.0, 0.0], [1.0, 0.0]]]),
+        );
+
+        let legacy = SerializedValue::Struct(vec![
+            field("m_Vertices", SerializedValue::Array(Vec::new())),
+            field("m_Indices", SerializedValue::Array(Vec::new())),
+        ]);
+        assert_eq!(
+            generate_sprite_render_data_outlines_from_value(
+                &legacy,
+                UnityVersion::parse("2022.3.0f1").unwrap(),
+                EndianType::Little,
+                None,
+            )
+            .unwrap(),
+            None,
+        );
+    }
+
+    #[test]
+    fn decoded_render_data_requires_set_external_vertex_bytes() {
+        let stream = SerializedValue::Struct(vec![
+            field(
+                "path",
+                SerializedValue::StringBytes(b"streamed-resource".to_vec()),
+            ),
+            field("offset", SerializedValue::U64(4)),
+            field("size", SerializedValue::U32(36)),
+        ]);
+        let root = render_data_value(Vec::new(), Some(stream));
+        let version = UnityVersion::parse("2022.3.0f1").unwrap();
+        assert!(matches!(
+            generate_sprite_render_data_outlines_from_value(
+                &root,
+                version,
+                EndianType::Little,
+                None,
+            ),
+            Err(SpriteRenderDataValueOutlineError::MissingStreamedVertexBytes)
+        ));
+        assert_eq!(
+            generate_sprite_render_data_outlines_from_value(
+                &root,
+                version,
+                EndianType::Little,
+                Some(&triangle_vertex_bytes()),
+            )
+            .unwrap(),
+            Some(vec![vec![[0.0, 1.0], [0.0, 0.0], [1.0, 0.0]]]),
         );
     }
 

@@ -184,6 +184,31 @@ pub struct MeshView {
 }
 
 impl MeshView {
+    /// Reads the vertex, index, submesh, and optional stream fields shared by
+    /// `SpriteRenderData` outline generation.
+    ///
+    /// This intentionally skips Mesh-only compressed data, bind poses, and skin
+    /// fields: `SpriteMetaDataExtensions.GenerateOutline` reads only the fields
+    /// represented here.
+    pub fn from_render_data_value(
+        root: &SerializedValue,
+        version: UnityVersion,
+        endian: EndianType,
+    ) -> Result<Self, MeshViewError> {
+        Ok(Self {
+            version,
+            endian,
+            vertex_data: read_vertex_data(root)?,
+            compressed_mesh: None,
+            index_buffer: read_bytes(root, &["m_IndexBuffer"])?.unwrap_or_default(),
+            index_format: None,
+            sub_meshes: read_sub_meshes(root)?,
+            bind_pose: None,
+            skin: None,
+            stream_data: optional_stream(root)?,
+        })
+    }
+
     /// Reads the export-relevant fields from a decoded `Mesh` payload.
     pub fn from_value(
         root: &SerializedValue,
