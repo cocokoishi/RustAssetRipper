@@ -510,7 +510,9 @@ use self::animator_collections::{
     PreparedControllerCollections, RoutedControllerCollection, RoutedControllerMember,
     hide_controller_behaviour, prepare_controller_collections,
 };
-use self::animator_controller::rebuild_animator_controller_documents;
+use self::animator_controller::{
+    rebuild_animator_controller_documents, RebuiltControllerDocuments,
+};
 use self::asset_support::*;
 use self::audio_asset::*;
 use self::collection_planning::{

@@ -487,7 +487,7 @@ pub fn project_pointer_to_unity_yaml(
     meta_pointer_to_unity_yaml(pointer, export_version, missing_reference_guid)
 }
 
-fn format_unity_guid(bytes: [u8; 16]) -> String {
+pub(crate) fn format_unity_guid(bytes: [u8; 16]) -> String {
     // `UnityGuid.ToString` emits each 32-bit word's nibbles from least significant to most
     // significant, which is the canonical Unity GUID layout (e.g. the `unity default resources`
     // GUID `0000000000000000e000000000000000`).

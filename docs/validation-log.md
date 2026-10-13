@@ -4843,6 +4843,14 @@ These results do not pass the first-phase gate. The reference .NET solution buil
 - Results on latest exports: 青岚山河卷 r23 34,416/0, 青岚古境 r3 3,867/0, 云栖仙府 r3 5,944/0, 玉京烟霞 r3 14,029/0, 烟雨长亭 r1 2,311/0, 松月竹庭 r11 656/0 — 61,223 references checked with zero dangling. (Two tool bugs found and fixed during development: missed `.anim`/`.mat`/`.renderTexture` includes and missing font/scene exemptions; the LightingData→scene 102900000 case was verified conventional against source, not a gap.)
 - Evidence: `DIFF-REFS-INTEGRITY-001`. Unity Editor import/runtime and UABEA were not run; import-equivalence of the resolved graph is static evidence only.
 
+## 2026-10-12 hierarchy-drop split lands for states and trees (r5) — behaviours deferred
+
+- Implemented the oracle-specified rule plus separate-file emission in `src/export/project_workflow/animator_controller.rs` (+ planning/builder GUID threading): unnamed selector-path machines receive no child states; unattached states and their BlendTrees export as separate main-anchor files with minted GUIDs; kept transitions/default-states reference them cross-file (`{fileID, guid, type: 2}`); dropped-source transitions skipped. Full lib suite 1,698/1,698, clippy `-D warnings` green, fmt clean on touched regions.
+- 青岚古境 r5 vs source: 206 matched=41 semGUID=41 (all separate trees content-identical; mint-order sequencing fixed file-stem alignment); 1102 matched=13 (1 semGUID + 12 diffs from deferred behaviour refs); 1101 counts reconciled 1,059=1,059 (spurious transitions gone); onlySource=12 (split MonoBehaviours, deferred); onlyRust=1 (standing Default-ParticleSystem). Integrity scan 3,923 refs zero dangling.
+- 云栖仙府 r4 vs source validates the same rule on a second sample: 206 matched=72 semGUID=72, 1102 matched=98, onlySource 246→76 (all remaining MonoBehaviour), onlyRust=0, totals preserved (717 trees, 1,034 states).
+- Regressions byte-stable: 松月竹庭 r13, 烟雨长亭 r2, 玉京烟霞 r4, 青岚山河卷 r24 all zero-diff vs previous replays (rule fires only on empty-path TOS entries). Opaque unchanged everywhere.
+- Remaining: behaviour split (78 青岚古境 / 76 云栖仙府 unreferenced bundle behaviours → separate files; dropped-state behaviour refs rewired to them). Unity Editor import/runtime and UABEA were not run; product unaccepted.
+
 ## 2026-10-12 drop rule pinpointed to one line plus emission design — implementation next
 
 - Instrumented rebuild trace (temporary, reverted) proves Rust reads constants IDENTICALLY to C# (selectors [(0,true),(0,false)], states `(name, pathID, parent=0)` match the oracle `SCONST` rows exactly). The divergence is purely the attachment rule: source `AnimatorStateMachineContext.AssignStateMachineChildStates` skips `Name.IsEmpty` machines, so states under empty-path (leading-dot TOS, e.g. `.AutoDresserTo0`) parents never attach and fall to separate files; Rust attaches by bare ID equality (`parent 0 == node 0`).

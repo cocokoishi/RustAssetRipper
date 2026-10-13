@@ -78,6 +78,21 @@ static class Oracle
 						writer.WriteLine($"SEL\t{controller.PathID}\t{mi}\t{qi}\t{selector.FullPathID}\t{(selector.IsEntry ? 1 : 0)}");
 					}
 				}
+				for (int si = 0; si < machine.StateConstantArray.Count; si++)
+				{
+					var stateConstant = machine.StateConstantArray[si].Data;
+					if (stateConstant.BlendTreeConstantArray.Count == 0)
+					{
+						continue;
+					}
+					var treeConstant = stateConstant.BlendTreeConstantArray[0].Data;
+					for (int ni = 0; ni < treeConstant.NodeArray.Count; ni++)
+					{
+						var node = treeConstant.NodeArray[ni].Data;
+						string children = string.Join(",", node.ChildIndices.Select(id => id.ToString()));
+						writer.WriteLine($"BNODE\t{controller.PathID}\t{mi}\t{si}\t{ni}\t{node.BlendType}\t{children}\t{node.ClipID}\t{node.Duration}\t{(node.Mirror ? 1 : 0)}\t{node.CycleOffset}");
+					}
+				}
 			}
 		}
 	}

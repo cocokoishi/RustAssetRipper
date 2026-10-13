@@ -1414,7 +1414,7 @@
                 .unwrap();
             } else {
                 super::export_project_to_with_serialized_settings(
-                    &[game.clone()],
+                    std::slice::from_ref(&game),
                     &output,
                     false,
                     &settings,

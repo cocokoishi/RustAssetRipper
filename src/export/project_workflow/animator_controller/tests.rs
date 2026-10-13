@@ -155,13 +155,18 @@ fn rebuilt_documents_with_behaviours(
     }
     let document =
         UnityYamlDocument::object(91, root_file_id, "AnimatorController", root, false).unwrap();
+    let mut next_guid_sequence = 0u64;
+    let mut used_guids = std::collections::HashSet::new();
     rebuild_animator_controller_documents(
         document,
         payload,
         true,
         crate::processing::scene_naming::SceneUnityVersion::parse("2022.3.0f1").unwrap(),
+        &mut next_guid_sequence,
+        &mut used_guids,
     )
     .unwrap()
+    .documents
 }
 
 fn assign_machine_identities(
@@ -722,7 +727,7 @@ fn empty_machine_parent_inference_matches_source_project_export() {
     )
     .unwrap();
     assert!(
-        transition_destination(&machine, 4).is_err(),
+        transition_destination(&machine, 4, &std::collections::HashMap::new()).is_err(),
         "the generated default state must not become a valid packed state index"
     );
     for node in &machine.machines {
@@ -840,15 +845,16 @@ fn invalid_nested_destinations_are_errors_instead_of_null_references() {
         &mut FileIdAllocator::new(),
     )
     .unwrap();
-    assert!(transition_destination(&machine, 4)
+    let no_drops: HashMap<i64, DroppedTarget> = HashMap::new();
+    assert!(transition_destination(&machine, 4, &no_drops)
         .unwrap_err()
         .to_string()
         .contains("absent state index"));
-    assert!(transition_destination(&machine, 30008)
+    assert!(transition_destination(&machine, 30008, &no_drops)
         .unwrap_err()
         .to_string()
         .contains("absent selector index"));
-    assert!(transition_destination(&machine, u32::MAX)
+    assert!(transition_destination(&machine, u32::MAX, &no_drops)
         .unwrap()
         .is_none());
 }
@@ -1271,8 +1277,7 @@ fn controller_behaviour_range_overflow_fails_instead_of_erasing_bindings() {
         .unwrap()
         .unwrap() = SerializedValue::U32(u32::MAX);
     let error = release_controller_behaviour_pointers(&payload)
-        .err()
-        .expect("invalid selected range must fail closed");
+        .expect_err("invalid selected range must fail closed");
     assert!(error.to_string().contains("behaviour"), "{error}");
 }
 
@@ -1544,4 +1549,87 @@ fn shared_editor_controller_members_are_copied_with_collection_local_references(
         input
     );
     std::fs::remove_dir_all(output).unwrap();
+}
+
+fn drop_test_machine(full_path_id: u32, name: &str, accepts_states: bool) -> EditorStateMachine {
+    EditorStateMachine {
+        file_id: 7_000_000_000 + i64::from(full_path_id % 1000),
+        full_path_id,
+        name: name.to_owned(),
+        parent_index: None,
+        state_indexes: Vec::new(),
+        child_machine_indexes: Vec::new(),
+        any_transition_file_ids: Vec::new(),
+        entry_transition_file_ids: Vec::new(),
+        child_exit_transitions: Vec::new(),
+        default_state_file_id: 0,
+        synthetic_default_state: None,
+        behaviours: Vec::new(),
+        accepts_states,
+    }
+}
+
+fn drop_test_state(name: &str, state_path_id: u32, parent_path_id: u32) -> StateConstant {
+    StateConstant {
+        raw: SerializedValue::Struct(Vec::new()),
+        name: name.to_owned(),
+        state_path_id,
+        parent_path_id,
+        file_id: 7_000_000_100 + i64::from(state_path_id % 1000),
+        motion: UnityYamlNode::mapping(UnityYamlMappingStyle::Flow),
+        transition_file_ids: Vec::new(),
+        behaviours: Vec::new(),
+    }
+}
+
+#[test]
+fn unnamed_machines_receive_no_states_and_drop_them() {
+    // Mirrors the frozen `FX_Milfy 1` empty-path case: selector FullPathID 0
+    // with TOS paths such as `.AutoDresserTo0` leaves the machine unnamed, so
+    // its states never attach and export as separate files instead.
+    let mut nodes = vec![
+        drop_test_machine(1080068516, "Base Layer", true),
+        drop_test_machine(0, "", false),
+    ];
+    let states = vec![
+        drop_test_state("WaitForActionOrAFK", 2855423363, 1080068516),
+        drop_test_state("AutoDresserTo0", 2478580324, 0),
+    ];
+    let dropped = attach_states_to_machines(&mut nodes, &states).unwrap();
+    assert_eq!(dropped, vec![1]);
+    assert_eq!(nodes[0].state_indexes, vec![0]);
+    assert!(
+        nodes[1].state_indexes.is_empty(),
+        "unnamed machines stay childless"
+    );
+}
+
+#[test]
+fn named_machines_attach_every_state_without_drops() {
+    let mut nodes = vec![
+        drop_test_machine(1080068516, "Base Layer", true),
+        drop_test_machine(1821034091, "Sub", true),
+    ];
+    let states = vec![
+        drop_test_state("Idle", 2108076675, 1080068516),
+        drop_test_state("Walk", 2606581034, 1821034091),
+    ];
+    let dropped = attach_states_to_machines(&mut nodes, &states).unwrap();
+    assert!(dropped.is_empty());
+    assert_eq!(nodes[0].state_indexes, vec![0]);
+    assert_eq!(nodes[1].state_indexes, vec![1]);
+}
+
+#[test]
+fn foreign_pointers_carry_file_guid_and_serialized_type() {
+    let guid = [0x12; 16];
+    let pointer = foreign_pointer(110200000, guid);
+    assert_eq!(text(field(&pointer, "fileID")), "110200000");
+    assert_eq!(text(field(&pointer, "type")), "2");
+    let rendered = text(field(&pointer, "guid"));
+    assert_eq!(rendered.len(), 32);
+    assert!(
+        rendered.chars().all(|c| c.is_ascii_hexdigit()),
+        "GUID renders as 32 hex digits"
+    );
 }

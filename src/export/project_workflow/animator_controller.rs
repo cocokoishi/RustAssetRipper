@@ -1,9 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 
 use crate::export::unity_yaml::{
-    UnityYamlDocument, UnityYamlMappingStyle, UnityYamlNode, UnityYamlNodeKind, UnityYamlScalar,
-    UnityYamlSequenceStyle,
+    format_unity_guid, UnityYamlDocument, UnityYamlMappingStyle, UnityYamlNode, UnityYamlNodeKind,
+    UnityYamlScalar, UnityYamlSequenceStyle,
 };
 use crate::resources::blend_shape::crc32_ieee;
 use crate::resources::blend_tree_node::BlendTreeNodeView;
@@ -15,6 +15,7 @@ const ANIMATOR_CONTROLLER_CLASS_ID: i32 = 91;
 const ANIMATOR_STATE_TRANSITION_CLASS_ID: i32 = 1101;
 const ANIMATOR_STATE_CLASS_ID: i32 = 1102;
 const ANIMATOR_STATE_MACHINE_CLASS_ID: i32 = 1107;
+const BLEND_TREE_CLASS_ID: i32 = 206;
 const TRANSITION_DESTINATION_FLAG: u32 = 30_000;
 const EXIT_TIME_CONDITION_MODE: i32 =
     crate::resources::transition_constant::CONDITION_MODE_EXIT_TIME;
@@ -101,6 +102,10 @@ struct StateMachineConstant {
     states: Vec<StateConstant>,
     selectors: Vec<SelectorState>,
     machines: Vec<EditorStateMachine>,
+    /// State indexes the source leaves unattached because their owning machines
+    /// never resolved names. They export as separate single-asset files instead
+    /// of embedding in the controller document.
+    dropped_state_indexes: Vec<usize>,
 }
 
 /// One editor node within a layer's packed state-machine constant. State and selector
@@ -121,6 +126,141 @@ struct EditorStateMachine {
     // separate from the packed global state array, so invalid indices stay errors.
     synthetic_default_state: Option<StateConstant>,
     behaviours: Vec<UnityYamlNode>,
+    /// Mirrors `AnimatorStateMachineContext.AssignStateMachineChildStates`: machines
+    /// whose names never resolved (`Name.IsEmpty`, e.g. empty-path TOS entries such
+    /// as `.AutoDresserTo0`) stay in the hierarchy but receive no child states.
+    /// Only the selector-driven (Unity 5+) reconstruction has unnamed machines;
+    /// the legacy path attaches every state directly.
+    accepts_states: bool,
+}
+
+/// One controller sub-asset the source leaves outside the controller file because
+/// its owning machine never resolved a name. Each exports as its own
+/// single-document file with a class-main anchor and a freshly minted GUID,
+/// matching the frozen exporter's separate `.state`/`.blendtree` files.
+#[derive(Clone)]
+pub(super) struct DroppedControllerDocument {
+    /// 1102 for states, 206 for BlendTrees.
+    pub(super) class_id: i32,
+    /// Asset file stem (state name, or `Blend Tree`).
+    pub(super) name: String,
+    /// Class-main anchor (`110200000`/`20600000`) shared by every separate file.
+    pub(super) main_file_id: i64,
+    /// Freshly minted file GUID for cross-file references.
+    pub(super) guid: [u8; 16],
+    /// Single YAML document, anchored at `main_file_id`.
+    pub(super) document: UnityYamlDocument,
+    /// Creation sequence for deterministic separate-file emission order,
+    /// matching the source engine's pre-order creation.
+    pub(super) emit_order: u64,
+}
+
+/// Rebuilt controller file documents plus the sub-assets that fell out of the
+/// hierarchy and must export as separate files.
+pub(super) struct RebuiltControllerDocuments {
+    pub(super) documents: Vec<UnityYamlDocument>,
+    pub(super) dropped: Vec<DroppedControllerDocument>,
+}
+
+/// Cross-file reference target for one dropped sub-asset, keyed by the
+/// allocator file ID the kept documents used before the split.
+#[derive(Clone, Copy, Debug)]
+struct DroppedTarget {
+    main_file_id: i64,
+    guid: [u8; 16],
+    emit_order: u64,
+}
+
+/// Tracks dropped sub-assets while rebuilding one controller file: allocator
+/// file IDs map to their separate-file identities, and finished separate-file
+/// documents accumulate for the planning pass.
+struct DropContext<'m> {
+    next_guid_sequence: &'m mut u64,
+    used_guids: &'m mut HashSet<[u8; 16]>,
+    targets: HashMap<i64, DroppedTarget>,
+    dropped: Vec<DroppedControllerDocument>,
+    next_emit_order: u64,
+}
+
+impl DropContext<'_> {
+    fn mint_target(
+        &mut self,
+        local_file_id: i64,
+        class_id: i32,
+    ) -> Result<DroppedTarget, Box<dyn Error>> {
+        let main_file_id =
+            crate::export::ids::get_main_export_id(class_id, 0).map_err(|error| {
+                invalid_project(format!(
+                    "AnimatorController dropped asset cannot take a class-main file ID: {error}"
+                ))
+            })?;
+        let guid = super::scene_collections::mint_unique_collection_guid(
+            self.next_guid_sequence,
+            self.used_guids,
+        )?;
+        let emit_order = self.next_emit_order;
+        self.next_emit_order = emit_order
+            .checked_add(1)
+            .ok_or_else(|| invalid_project("AnimatorController dropped asset order overflows"))?;
+        let target = DroppedTarget {
+            main_file_id,
+            guid,
+            emit_order,
+        };
+        self.targets.try_reserve(1).map_err(|_| {
+            invalid_project("could not allocate AnimatorController dropped asset mapping")
+        })?;
+        self.targets.insert(local_file_id, target);
+        Ok(target)
+    }
+}
+
+/// Attach every state to the first state-accepting machine with a matching
+/// path ID, collecting the indexes that stay unattached.
+///
+/// Mirrors `AnimatorStateMachineContext.AssignStateMachineChildStates`, which
+/// skips `Name.IsEmpty` machines: states of unnamed machines (e.g. empty-path
+/// TOS entries such as `.AutoDresserTo0`) never attach and export as separate
+/// files instead of embedding in the controller document.
+fn attach_states_to_machines(
+    nodes: &mut [EditorStateMachine],
+    states: &[StateConstant],
+) -> Result<Vec<usize>, Box<dyn Error>> {
+    let mut dropped_state_indexes = Vec::new();
+    for (state_index, state) in states.iter().enumerate() {
+        let owner_index = nodes
+            .iter()
+            .position(|node| node.accepts_states && node.full_path_id == state.parent_path_id);
+        let Some(owner_index) = owner_index else {
+            dropped_state_indexes.try_reserve(1).map_err(|_| {
+                invalid_project("could not allocate AnimatorController dropped states")
+            })?;
+            dropped_state_indexes.push(state_index);
+            continue;
+        };
+        nodes[owner_index]
+            .state_indexes
+            .try_reserve(1)
+            .map_err(|_| invalid_project("could not allocate AnimatorController child states"))?;
+        nodes[owner_index].state_indexes.push(state_index);
+    }
+    Ok(dropped_state_indexes)
+}
+
+/// Cross-file `{fileID, guid, type: 2}` pointer matching the frozen exporter's
+/// references from controller files into separate `.state`/`.blendtree` files.
+fn foreign_pointer(file_id: i64, guid: [u8; 16]) -> UnityYamlNode {
+    let mut pointer = UnityYamlNode::mapping(UnityYamlMappingStyle::Flow);
+    pointer
+        .insert_field("fileID", signed(file_id))
+        .expect("foreign pointer mapping is valid");
+    pointer
+        .insert_field("guid", UnityYamlNode::string(format_unity_guid(guid)))
+        .expect("foreign pointer mapping is valid");
+    pointer
+        .insert_field("type", signed(2))
+        .expect("foreign pointer mapping is valid");
+    pointer
 }
 
 /// Rebuilds Unity's editor-facing controller hierarchy from the packed controller constants.
@@ -132,7 +272,9 @@ pub(super) fn rebuild_animator_controller_documents(
     payload: &ParsedObjectPayload,
     little_endian: bool,
     project_version: crate::processing::scene_naming::SceneUnityVersion,
-) -> Result<Vec<UnityYamlDocument>, Box<dyn Error>> {
+    next_guid_sequence: &mut u64,
+    used_guids: &mut std::collections::HashSet<[u8; 16]>,
+) -> Result<RebuiltControllerDocuments, Box<dyn Error>> {
     let root_file_id = document_file_id(&root_document)?;
     let controller_constant = required_field(&payload.root, "m_Controller", "AnimatorController")?;
     let mut tos = read_tos(required_field(
@@ -201,19 +343,54 @@ pub(super) fn rebuild_animator_controller_documents(
         &mut machines,
     )?;
 
+    // Separate-file identities for dropped states are minted before any
+    // document references them, so kept transitions and default states resolve
+    // cross-file pointers in a single pass.
+    let mut drop = DropContext {
+        next_guid_sequence,
+        used_guids,
+        targets: HashMap::new(),
+        dropped: Vec::new(),
+        next_emit_order: 0,
+    };
+    for machine in &machines {
+        for &state_index in &machine.dropped_state_indexes {
+            let local_file_id = machine.states[state_index].file_id;
+            drop.mint_target(local_file_id, ANIMATOR_STATE_CLASS_ID)?;
+        }
+    }
+
     let mut motion_documents = Vec::new();
     let mut transition_documents = Vec::new();
     for machine in &mut machines {
-        for state in &mut machine.states {
-            let (motion, documents) =
-                state_motion(&state.raw, &clips, &tos, project_version, &mut allocator)?;
+        for (state_index, state) in machine.states.iter_mut().enumerate() {
+            let is_dropped = machine.dropped_state_indexes.contains(&state_index);
+            // Dropped states route their BlendTree documents into the drop
+            // context directly; the returned document list stays empty there.
+            let drop_context = if is_dropped { Some(&mut drop) } else { None };
+            let (motion, documents) = state_motion(
+                &state.raw,
+                &clips,
+                &tos,
+                project_version,
+                &mut allocator,
+                drop_context,
+            )?;
             state.motion = motion;
-            motion_documents.try_reserve(documents.len()).map_err(|_| {
-                invalid_project("could not allocate AnimatorController BlendTree documents")
-            })?;
-            motion_documents.extend(documents);
+            if !is_dropped {
+                motion_documents.try_reserve(documents.len()).map_err(|_| {
+                    invalid_project("could not allocate AnimatorController BlendTree documents")
+                })?;
+                motion_documents.extend(documents);
+            }
         }
-        rebuild_machine_transitions(machine, &tos, &mut allocator, &mut transition_documents)?;
+        rebuild_machine_transitions(
+            machine,
+            &tos,
+            &mut allocator,
+            &mut transition_documents,
+            &drop.targets,
+        )?;
     }
 
     let mut root_body = take_controller_body(&root_document)?;
@@ -271,7 +448,33 @@ pub(super) fn rebuild_animator_controller_documents(
             if let Some(state) = &node.synthetic_default_state {
                 documents.push(state_document(state, 0, 1, &tos)?);
             }
-            documents.push(state_machine_document(node, machine, project_version)?);
+            documents.push(state_machine_document(
+                node,
+                machine,
+                project_version,
+                &drop.targets,
+            )?);
+        }
+        // Dropped states export as separate single-asset files with class-main
+        // anchors, mirroring the frozen exporter's orphan `.state` files.
+        for &state_index in &machine.dropped_state_indexes {
+            let state = &machine.states[state_index];
+            let target = drop.targets.get(&state.file_id).ok_or_else(|| {
+                invalid_project("AnimatorController dropped state has no separate-file identity")
+            })?;
+            let mut document = state_document(state, 0, 1, &tos)?;
+            set_document_anchor(&mut document, target.main_file_id)?;
+            drop.dropped.try_reserve(1).map_err(|_| {
+                invalid_project("could not allocate AnimatorController dropped state documents")
+            })?;
+            drop.dropped.push(DroppedControllerDocument {
+                class_id: ANIMATOR_STATE_CLASS_ID,
+                name: state.name.clone(),
+                main_file_id: target.main_file_id,
+                guid: target.guid,
+                document,
+                emit_order: target.emit_order,
+            });
         }
     }
     documents.extend(motion_documents);
@@ -282,7 +485,22 @@ pub(super) fn rebuild_animator_controller_documents(
             "AnimatorController root document identity changed during reconstruction",
         ));
     }
-    Ok(documents)
+    // Emit separate files in creation order so identically named assets take
+    // the same file stems on both exporters.
+    drop.dropped.sort_by_key(|document| document.emit_order);
+    Ok(RebuiltControllerDocuments {
+        documents,
+        dropped: drop.dropped,
+    })
+}
+
+/// Rewrite a rebuilt document's anchor to its separate-file class-main ID.
+fn set_document_anchor(
+    document: &mut UnityYamlDocument,
+    file_id: i64,
+) -> Result<(), Box<dyn Error>> {
+    document.root.anchor = Some(file_id.to_string());
+    Ok(())
 }
 
 fn read_tos(value: &SerializedValue) -> Result<HashMap<u32, String>, Box<dyn Error>> {
@@ -659,6 +877,9 @@ fn rebuild_state_machine_hierarchy(
         let default_state_file_id = synthetic_default_state
             .as_ref()
             .map_or(0, |state| state.file_id);
+        // The legacy reconstruction names every machine from a TOS path and
+        // attaches all states; only selector-driven machines can be unnamed.
+        let accepts_states = !has_selector_array || !path.name.is_empty();
         nodes.push(EditorStateMachine {
             file_id,
             full_path_id: path.full_path_id,
@@ -672,6 +893,7 @@ fn rebuild_state_machine_hierarchy(
             default_state_file_id,
             synthetic_default_state,
             behaviours: Vec::new(),
+            accepts_states,
         });
     }
     for index in 1..nodes.len() {
@@ -701,22 +923,7 @@ fn rebuild_state_machine_hierarchy(
             remaining -= 1;
         }
     }
-    for (state_index, state) in states.iter().enumerate() {
-        let owner_index = nodes
-            .iter()
-            .position(|node| node.full_path_id == state.parent_path_id)
-            .ok_or_else(|| {
-                invalid_project(format!(
-                    "AnimatorController state {:?} (path {}) has no owning selector path {}",
-                    state.name, state.state_path_id, state.parent_path_id
-                ))
-            })?;
-        nodes[owner_index]
-            .state_indexes
-            .try_reserve(1)
-            .map_err(|_| invalid_project("could not allocate AnimatorController child states"))?;
-        nodes[owner_index].state_indexes.push(state_index);
-    }
+    let dropped_state_indexes = attach_states_to_machines(&mut nodes, &states)?;
     for node in &mut nodes {
         if node.synthetic_default_state.is_some() {
             continue;
@@ -771,6 +978,7 @@ fn rebuild_state_machine_hierarchy(
         states,
         selectors,
         machines: nodes,
+        dropped_state_indexes,
     })
 }
 
@@ -779,11 +987,15 @@ struct TransitionDestination {
     state_file_id: i64,
     machine_file_id: i64,
     is_exit: bool,
+    /// Separate-file identity when the destination state fell out of the
+    /// hierarchy; kept documents reference it cross-file.
+    state_foreign: Option<DroppedTarget>,
 }
 
 fn transition_destination(
     machine: &StateMachineConstant,
     destination: u32,
+    drop_targets: &HashMap<i64, DroppedTarget>,
 ) -> Result<Option<TransitionDestination>, Box<dyn Error>> {
     if destination == u32::MAX {
         return Ok(None);
@@ -792,17 +1004,18 @@ fn transition_destination(
         state_file_id: 0,
         machine_file_id: 0,
         is_exit: false,
+        state_foreign: None,
     };
     if destination < TRANSITION_DESTINATION_FLAG {
-        result.state_file_id = machine
-            .states
-            .get(destination as usize)
-            .ok_or_else(|| {
-                invalid_project(format!(
-                    "AnimatorController transition targets absent state index {destination}"
-                ))
-            })?
-            .file_id;
+        let state = machine.states.get(destination as usize).ok_or_else(|| {
+            invalid_project(format!(
+                "AnimatorController transition targets absent state index {destination}"
+            ))
+        })?;
+        result.state_file_id = state.file_id;
+        // Transitions into dropped states stay embedded but point cross-file,
+        // matching the frozen exporter's kept `m_DstState` references.
+        result.state_foreign = drop_targets.get(&state.file_id).copied();
     } else {
         let selector_index = (destination % TRANSITION_DESTINATION_FLAG) as usize;
         let selector = machine.selectors.get(selector_index).ok_or_else(|| {
@@ -833,9 +1046,15 @@ fn rebuild_machine_transitions(
     tos: &HashMap<u32, String>,
     allocator: &mut FileIdAllocator,
     documents: &mut Vec<UnityYamlDocument>,
+    drop_targets: &HashMap<i64, DroppedTarget>,
 ) -> Result<(), Box<dyn Error>> {
     // States remain globally indexed even after their owning nodes are determined.
+    // Dropped states carry no transitions: the source never attaches them, so
+    // their separate `.state` files export with empty transition lists.
     for state_index in 0..machine.states.len() {
+        if machine.dropped_state_indexes.contains(&state_index) {
+            continue;
+        }
         let transitions = array_field(
             &machine.states[state_index].raw,
             "m_TransitionConstantArray",
@@ -847,6 +1066,7 @@ fn rebuild_machine_transitions(
             if let Some(destination) = transition_destination(
                 machine,
                 required_u32_field(transition, "m_DestinationState", "TransitionConstant")?,
+                drop_targets,
             )? {
                 let file_id = allocator.allocate()?;
                 documents.push(state_transition_document(
@@ -871,6 +1091,7 @@ fn rebuild_machine_transitions(
             if let Some(destination) = transition_destination(
                 machine,
                 required_u32_field(transition, "m_DestinationState", "TransitionConstant")?,
+                drop_targets,
             )? {
                 let file_id = allocator.allocate()?;
                 documents.push(state_transition_document(
@@ -901,6 +1122,7 @@ fn rebuild_machine_transitions(
             if let Some(destination) = transition_destination(
                 machine,
                 required_u32_field(transition, "m_Destination", "SelectorTransitionConstant")?,
+                drop_targets,
             )? {
                 let file_id = allocator.allocate()?;
                 documents.push(selector_transition_document(
@@ -957,6 +1179,7 @@ fn rebuild_machine_transitions(
             if let Some(destination) = transition_destination(
                 machine,
                 required_u32_field(transition, "m_Destination", "SelectorTransitionConstant")?,
+                drop_targets,
             )? {
                 let file_id = allocator.allocate()?;
                 documents.push(selector_transition_document(
@@ -1294,6 +1517,7 @@ fn state_machine_document(
     node: &EditorStateMachine,
     machine: &StateMachineConstant,
     project_version: crate::processing::scene_naming::SceneUnityVersion,
+    drop_targets: &HashMap<i64, DroppedTarget>,
 ) -> Result<UnityYamlDocument, Box<dyn Error>> {
     let mut body = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
     insert_field(&mut body, "serializedVersion", signed(6))?;
@@ -1390,11 +1614,11 @@ fn state_machine_document(
         "m_ParentStateMachinePosition",
         position3(0, -200, 0),
     )?;
-    insert_field(
-        &mut body,
-        "m_DefaultState",
-        local_pointer(node.default_state_file_id),
-    )?;
+    let default_state = match drop_targets.get(&node.default_state_file_id) {
+        Some(target) => foreign_pointer(target.main_file_id, target.guid),
+        None => local_pointer(node.default_state_file_id),
+    };
+    insert_field(&mut body, "m_DefaultState", default_state)?;
     UnityYamlDocument::object(
         ANIMATOR_STATE_MACHINE_CLASS_ID,
         node.file_id,
@@ -1476,11 +1700,11 @@ fn state_transition_document(
         "m_DstStateMachine",
         local_pointer(destination.machine_file_id),
     )?;
-    insert_field(
-        &mut body,
-        "m_DstState",
-        local_pointer(destination.state_file_id),
-    )?;
+    let dst_state = match destination.state_foreign {
+        Some(target) => foreign_pointer(target.main_file_id, target.guid),
+        None => local_pointer(destination.state_file_id),
+    };
+    insert_field(&mut body, "m_DstState", dst_state)?;
     insert_field(&mut body, "m_Solo", signed(0))?;
     insert_field(&mut body, "m_Mute", signed(0))?;
     insert_field(
@@ -1574,11 +1798,11 @@ fn selector_transition_document(
         "m_DstStateMachine",
         local_pointer(destination.machine_file_id),
     )?;
-    insert_field(
-        &mut body,
-        "m_DstState",
-        local_pointer(destination.state_file_id),
-    )?;
+    let dst_state = match destination.state_foreign {
+        Some(target) => foreign_pointer(target.main_file_id, target.guid),
+        None => local_pointer(destination.state_file_id),
+    };
+    insert_field(&mut body, "m_DstState", dst_state)?;
     insert_field(&mut body, "m_Solo", signed(0))?;
     insert_field(&mut body, "m_Mute", signed(0))?;
     insert_field(
@@ -1596,6 +1820,7 @@ fn state_motion(
     tos: &HashMap<u32, String>,
     project_version: crate::processing::scene_naming::SceneUnityVersion,
     allocator: &mut FileIdAllocator,
+    drop: Option<&mut DropContext<'_>>,
 ) -> Result<(UnityYamlNode, Vec<UnityYamlDocument>), Box<dyn Error>> {
     let mut documents = Vec::new();
     let Some(raw_trees) = optional_field(state, "m_BlendTreeConstantArray")? else {
@@ -1623,6 +1848,7 @@ fn state_motion(
         allocator,
         &mut active_nodes,
         &mut documents,
+        drop,
     )?;
     Ok((motion, documents))
 }
@@ -1638,6 +1864,7 @@ fn build_motion_node(
     allocator: &mut FileIdAllocator,
     active_nodes: &mut Vec<usize>,
     documents: &mut Vec<UnityYamlDocument>,
+    mut drop: Option<&mut DropContext<'_>>,
 ) -> Result<UnityYamlNode, Box<dyn Error>> {
     let raw_node = nodes.get(node_index).ok_or_else(|| {
         invalid_project(format!(
@@ -1666,6 +1893,13 @@ fn build_motion_node(
     active_nodes.push(node_index);
 
     let file_id = allocator.allocate()?;
+    // Dropped BlendTrees take separate-file identities up front so parent
+    // documents reference them cross-file in a single pass. The allocator ID
+    // is still consumed to keep every kept document's file ID stable.
+    let target = drop
+        .as_mut()
+        .map(|context| context.mint_target(file_id, BLEND_TREE_CLASS_ID))
+        .transpose()?;
     let mut children = UnityYamlNode::sequence(UnityYamlSequenceStyle::Block);
     for (child_position, child_index) in node_view.child_indices.iter().copied().enumerate() {
         let child_index = usize::try_from(child_index).map_err(|_| {
@@ -1692,6 +1926,7 @@ fn build_motion_node(
                 allocator,
                 active_nodes,
                 documents,
+                drop.as_deref_mut(),
             )?
         };
         let time_scale = if child_view.is_blend_tree() {
@@ -1734,18 +1969,41 @@ fn build_motion_node(
         })?)?;
     }
 
-    let document = blend_tree_document(node, &node_view, tos, children, file_id)?;
-    documents.try_reserve(1).map_err(|_| {
-        invalid_project("could not allocate AnimatorController BlendTree documents")
-    })?;
-    documents.push(document);
+    let document = blend_tree_document(
+        node,
+        &node_view,
+        tos,
+        children,
+        target.map_or(file_id, |target| target.main_file_id),
+    )?;
+    if let (Some(context), Some(target)) = (drop.as_mut(), target) {
+        context.dropped.try_reserve(1).map_err(|_| {
+            invalid_project("could not allocate AnimatorController dropped BlendTree documents")
+        })?;
+        context.dropped.push(DroppedControllerDocument {
+            class_id: BLEND_TREE_CLASS_ID,
+            name: "Blend Tree".to_owned(),
+            main_file_id: target.main_file_id,
+            guid: target.guid,
+            document,
+            emit_order: target.emit_order,
+        });
+    } else {
+        documents.try_reserve(1).map_err(|_| {
+            invalid_project("could not allocate AnimatorController BlendTree documents")
+        })?;
+        documents.push(document);
+    }
     let removed = active_nodes.pop();
     if removed != Some(node_index) {
         return Err(invalid_project(
             "AnimatorController BlendTree traversal stack became inconsistent",
         ));
     }
-    Ok(local_pointer(file_id))
+    Ok(match target {
+        Some(target) => foreign_pointer(target.main_file_id, target.guid),
+        None => local_pointer(file_id),
+    })
 }
 
 fn animation_clip_pointer(
@@ -2804,7 +3062,7 @@ mod blend_tree_source_tests {
         };
         let mut allocator = FileIdAllocator::new();
         let (motion, documents) =
-            state_motion(&state, &clips, &tos, version, &mut allocator).unwrap();
+            state_motion(&state, &clips, &tos, version, &mut allocator, None).unwrap();
 
         assert_eq!(
             scalar(yaml_field(&motion, "fileID")),
@@ -2925,7 +3183,7 @@ mod blend_tree_source_tests {
         };
         let mut allocator = FileIdAllocator::new();
         let (motion, documents) =
-            state_motion(&state, &clips, &tos, version, &mut allocator).unwrap();
+            state_motion(&state, &clips, &tos, version, &mut allocator, None).unwrap();
 
         assert_eq!(documents.len(), 2);
         assert_eq!(scalar(yaml_field(&motion, "fileID")), "7000000000");

@@ -366,6 +366,8 @@ pub fn export_workspace_yaml_project_with_serialized_settings(
         prefabs: prefab_collections,
         lighting_data_assets,
         next_collection_index,
+        next_guid_sequence,
+        used_guids,
     } = prepare_generated_collections(GeneratedCollectionPreparationContext {
         workspace,
         objects,
@@ -400,6 +402,8 @@ pub fn export_workspace_yaml_project_with_serialized_settings(
 
     // Pass 3: materialize every routed object into a staged file.
     let mut plan_builder = ProjectExportPlanBuilder::new(collection_count, saved_assemblies.len())?;
+    plan_builder.next_guid_sequence = next_guid_sequence;
+    plan_builder.used_guids = used_guids;
     plan_routed_asset_files(
         &RoutedAssetPlanningContext {
             filesystem,

@@ -5,6 +5,10 @@ pub(super) struct PreparedGeneratedCollections {
     pub(super) prefabs: Vec<RoutedPrefabCollection>,
     pub(super) lighting_data_assets: Vec<RoutedLightingDataAsset>,
     pub(super) next_collection_index: usize,
+    /// GUID mint state forwarded to the asset planning pass, which mints file
+    /// GUIDs for controller sub-assets that fell out of their hierarchies.
+    pub(super) next_guid_sequence: u64,
+    pub(super) used_guids: HashSet<[u8; 16]>,
 }
 
 pub(super) struct GeneratedCollectionPreparationContext<'context, 'graph> {
@@ -215,6 +219,8 @@ pub(super) fn prepare_generated_collections(
         prefabs: prefab_collections,
         lighting_data_assets,
         next_collection_index,
+        next_guid_sequence,
+        used_guids,
     })
 }
 

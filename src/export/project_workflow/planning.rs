@@ -66,6 +66,10 @@ pub(super) struct ProjectExportPlanBuilder {
     support_file_indexes: HashMap<String, usize>,
     total_bytes: usize,
     exported_object_count: usize,
+    /// GUID mint state forwarded from routing; the controller arm mints file
+    /// GUIDs for hierarchy-dropped sub-assets that export separately.
+    pub(super) next_guid_sequence: u64,
+    pub(super) used_guids: HashSet<[u8; 16]>,
 }
 
 impl ProjectExportPlanBuilder {
@@ -87,6 +91,8 @@ impl ProjectExportPlanBuilder {
             support_file_indexes: HashMap::new(),
             total_bytes: 0,
             exported_object_count: 0,
+            next_guid_sequence: 0,
+            used_guids: HashSet::new(),
         })
     }
 
@@ -593,7 +599,7 @@ pub(super) fn plan_routed_asset_files(
                                     "AnimatorController references absent workspace file",
                                 )
                             })?;
-                    let mut documents = if group.is_release {
+                    let rebuilt = if group.is_release {
                         let payload = entry.object.payload.as_ref().map_err(|error| invalid_project(format!(
                             "AnimatorController file {} object {} PathID {} could not be decoded: {error}",
                             entry.object.file_index, entry.object.object_index, entry.object.path_id,
@@ -604,10 +610,16 @@ pub(super) fn plan_routed_asset_files(
                             source_file.metadata.prefix.body_endian
                                 == crate::io::binary::Endian::Little,
                             project_version,
+                            &mut builder.next_guid_sequence,
+                            &mut builder.used_guids,
                         )?
                     } else {
-                        vec![document]
+                        RebuiltControllerDocuments {
+                            documents: vec![document],
+                            dropped: Vec::new(),
+                        }
                     };
+                    let mut documents = rebuilt.documents;
                     documents.try_reserve(group.children.len()).map_err(|_| {
                         invalid_project("could not allocate AnimatorController member documents")
                     })?;
@@ -645,7 +657,62 @@ pub(super) fn plan_routed_asset_files(
                         documents.push(document);
                     }
                     additional_exported_document_count = documents.len().saturating_sub(1);
-                    write_unity_yaml_documents(&documents, limits.yaml_write)?.into_bytes()
+                    let controller_bytes =
+                        write_unity_yaml_documents(&documents, limits.yaml_write)?.into_bytes();
+                    // Hierarchy-dropped states and BlendTrees export as separate
+                    // single-asset files, mirroring the frozen exporter's orphan
+                    // `.state`/`.blendtree` files with class-main anchors.
+                    for dropped in rebuilt.dropped {
+                        let (class_name, extension) = match dropped.class_id {
+                            1102 => ("AnimatorState", "state"),
+                            206 => ("BlendTree", "blendtree"),
+                            other => {
+                                return Err(invalid_project(format!(
+                                    "AnimatorController dropped asset has unexpected class {other}"
+                                )));
+                            }
+                        };
+                        let identity = crate::export::asset_path::ExportAssetPathIdentity {
+                            class_name: class_name.to_owned(),
+                            named_name: Some(dropped.name.clone()),
+                            ..Default::default()
+                        };
+                        let relative_path = planner.plan_asset_path(&identity, extension)?;
+                        let bytes = write_unity_yaml_documents(
+                            std::slice::from_ref(&dropped.document),
+                            limits.yaml_write,
+                        )?
+                        .into_bytes();
+                        total_bytes = total_bytes.checked_add(bytes.len()).ok_or_else(|| {
+                            invalid_project("project output byte count overflows")
+                        })?;
+                        if total_bytes > limits.max_total_asset_payload_bytes {
+                            return Err(invalid_project(format!(
+                                "project output uses {total_bytes} bytes, exceeding the limit {}",
+                                limits.max_total_asset_payload_bytes
+                            )));
+                        }
+                        exported_object_count = exported_object_count
+                            .checked_add(1)
+                            .ok_or_else(|| invalid_project("exported object count overflows"))?;
+                        files.push(PlannedProjectFile {
+                            collection_name: "AssetExportCollection",
+                            kind: ExportCollectionKind::Asset,
+                            relative_path,
+                            guid: dropped.guid,
+                            bytes,
+                            meta: Some(PlannedProjectMeta {
+                                importer_class: "NativeFormatImporter".to_owned(),
+                                importer: native_format_importer_for_version(
+                                    dropped.main_file_id,
+                                    project_version,
+                                    None,
+                                )?,
+                            }),
+                            label: dropped.name,
+                        });
+                    }
+                    controller_bytes
                 } else {
                     write_unity_yaml_documents(&[document], limits.yaml_write)?.into_bytes()
                 }

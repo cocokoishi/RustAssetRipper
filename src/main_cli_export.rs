@@ -10,24 +10,6 @@ fn resolved_workspace_object_class_id(
         .or_else(|| resolved_type_index.map(|_| raw_type_id))
 }
 
-#[cfg(test)]
-mod workspace_object_class_id_tests {
-    use super::resolved_workspace_object_class_id;
-
-    #[test]
-    fn resolved_type_record_supplies_missing_direct_class_id() {
-        assert_eq!(
-            resolved_workspace_object_class_id(None, Some(0), 33),
-            Some(33)
-        );
-        assert_eq!(
-            resolved_workspace_object_class_id(Some(43), None, 0),
-            Some(43)
-        );
-        assert_eq!(resolved_workspace_object_class_id(None, None, 33), None);
-    }
-}
-
 pub(super) fn export_file_yaml_from_arguments(
     arguments: impl Iterator<Item = OsString>,
 ) -> Result<(), Box<dyn Error>> {
@@ -2158,4 +2140,22 @@ pub(super) fn export_file_yaml_to<W: io::Write>(
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod workspace_object_class_id_tests {
+    use super::resolved_workspace_object_class_id;
+
+    #[test]
+    fn resolved_type_record_supplies_missing_direct_class_id() {
+        assert_eq!(
+            resolved_workspace_object_class_id(None, Some(0), 33),
+            Some(33)
+        );
+        assert_eq!(
+            resolved_workspace_object_class_id(Some(43), None, 0),
+            Some(43)
+        );
+        assert_eq!(resolved_workspace_object_class_id(None, None, 33), None);
+    }
 }
