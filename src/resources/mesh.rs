@@ -303,7 +303,7 @@ impl MeshView {
                 self.version,
                 self.endian,
             )?
-            .read_data()?,
+            .read_channels_for_mesh_merge()?,
             None => None,
         };
         let compressed = match &self.compressed_mesh {
@@ -1006,6 +1006,177 @@ mod tests {
             .read_mesh_data(PackedBitVectorLimits::default())
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn non_position_vertex_channels_merge_with_compressed_positions() {
+        let mut compressed_mesh = CompressedMesh::default();
+        compressed_mesh
+            .set_vertices(
+                &[
+                    crate::resources::compressed_mesh::Vec3::new(0.0, 0.0, 0.0),
+                    crate::resources::compressed_mesh::Vec3::new(1.0, 0.0, 0.0),
+                    crate::resources::compressed_mesh::Vec3::new(0.0, 1.0, 0.0),
+                ],
+                PackedBitVectorLimits::default(),
+            )
+            .unwrap();
+
+        let expected_normals = [
+            [0.0_f32, 0.0, 1.0],
+            [0.0_f32, 1.0, 0.0],
+            [1.0_f32, 0.0, 0.0],
+        ];
+        let mut vertex_bytes = Vec::new();
+        for normal in expected_normals {
+            for component in normal {
+                vertex_bytes.extend_from_slice(&component.to_le_bytes());
+            }
+        }
+
+        let view = MeshView {
+            version: version(),
+            endian: EndianType::Little,
+            vertex_data: Some(VertexDataFields {
+                vertex_count: expected_normals.len() as u32,
+                channels: Some(vec![
+                    ChannelInfo::default(),
+                    ChannelInfo {
+                        dimension: 3,
+                        offset: 0,
+                        format: 0,
+                        stream: 0,
+                    },
+                ]),
+                streams: Some(vec![StreamInfo {
+                    channel_mask: 0b10,
+                    offset: 0,
+                    stride: 12,
+                    ..StreamInfo::default()
+                }]),
+                data: vertex_bytes,
+            }),
+            compressed_mesh: Some(compressed_mesh),
+            index_buffer: Vec::new(),
+            index_format: None,
+            sub_meshes: Vec::new(),
+            bind_pose: None,
+            skin: None,
+            stream_data: None,
+        };
+
+        let mesh_data = view
+            .read_mesh_data(PackedBitVectorLimits::default())
+            .unwrap()
+            .expect("compressed positions make a mesh");
+
+        assert_eq!(mesh_data.vertices.len(), expected_normals.len());
+        assert_eq!(
+            mesh_data.normals,
+            Some(
+                expected_normals
+                    .into_iter()
+                    .map(|normal| crate::numerics::Vec3 {
+                        x: normal[0],
+                        y: normal[1],
+                        z: normal[2],
+                    })
+                    .collect()
+            )
+        );
+    }
+
+    #[test]
+    fn skin_channels_merge_with_compressed_positions_without_a_blob_position_channel() {
+        let mut compressed_mesh = CompressedMesh::default();
+        compressed_mesh
+            .set_vertices(
+                &[
+                    crate::resources::compressed_mesh::Vec3::new(0.0, 0.0, 0.0),
+                    crate::resources::compressed_mesh::Vec3::new(1.0, 0.0, 0.0),
+                    crate::resources::compressed_mesh::Vec3::new(0.0, 1.0, 0.0),
+                ],
+                PackedBitVectorLimits::default(),
+            )
+            .unwrap();
+
+        let expected_skin = [
+            BoneWeight4 {
+                weights: [1.0, 0.0, 0.0, 0.0],
+                indices: [0, 1, 2, 3],
+            },
+            BoneWeight4 {
+                weights: [0.0, 1.0, 0.0, 0.0],
+                indices: [4, 5, 6, 7],
+            },
+            BoneWeight4 {
+                weights: [0.0, 0.0, 1.0, 0.0],
+                indices: [8, 9, 10, 11],
+            },
+        ];
+        let mut vertex_bytes = Vec::new();
+        for skin in expected_skin {
+            for weight in skin.weights {
+                vertex_bytes.extend_from_slice(&weight.to_le_bytes());
+            }
+        }
+        for skin in expected_skin {
+            for index in skin.indices {
+                vertex_bytes.extend_from_slice(&(index as u16).to_le_bytes());
+            }
+        }
+
+        let mut channels = vec![ChannelInfo::default(); 14];
+        channels[12] = ChannelInfo {
+            dimension: 4,
+            offset: 0,
+            format: 0,
+            stream: 0,
+        };
+        channels[13] = ChannelInfo {
+            dimension: 4,
+            offset: 0,
+            format: 8,
+            stream: 1,
+        };
+        let view = MeshView {
+            version: version(),
+            endian: EndianType::Little,
+            vertex_data: Some(VertexDataFields {
+                vertex_count: expected_skin.len() as u32,
+                channels: Some(channels),
+                streams: Some(vec![
+                    StreamInfo {
+                        channel_mask: 1 << 12,
+                        offset: 0,
+                        stride: 16,
+                        ..StreamInfo::default()
+                    },
+                    StreamInfo {
+                        channel_mask: 1 << 13,
+                        offset: 48,
+                        stride: 8,
+                        ..StreamInfo::default()
+                    },
+                ]),
+                data: vertex_bytes,
+            }),
+            compressed_mesh: Some(compressed_mesh),
+            index_buffer: Vec::new(),
+            index_format: None,
+            sub_meshes: Vec::new(),
+            bind_pose: None,
+            skin: None,
+            stream_data: None,
+        };
+
+        let mesh_data = view
+            .read_mesh_data(PackedBitVectorLimits::default())
+            .unwrap()
+            .expect("compressed positions make a mesh");
+
+        assert_eq!(mesh_data.vertices.len(), expected_skin.len());
+        assert_eq!(mesh_data.skin, Some(expected_skin.to_vec()));
     }
 
     #[test]

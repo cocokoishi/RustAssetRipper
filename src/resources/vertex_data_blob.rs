@@ -588,8 +588,21 @@ impl VertexDataBlob {
 
     /// `VertexDataBlob.ToMeshData` / `ReadData`.
     pub fn read_data(&self) -> Result<Option<MeshData>, VertexDataError> {
+        let (mesh, vertices_set, _) = self.read_decoded_data()?;
+        Ok(vertices_set.then_some(mesh))
+    }
+
+    /// The channel arrays returned by `VertexDataBlob.ReadData`, including when its boolean
+    /// return is false because the position channel is absent. `MeshExtensions.ReadData` ignores
+    /// that boolean and merges these arrays with `CompressedMesh` channels.
+    pub(crate) fn read_channels_for_mesh_merge(&self) -> Result<Option<MeshData>, VertexDataError> {
+        let (mesh, vertices_set, channel_data_set) = self.read_decoded_data()?;
+        Ok((vertices_set || channel_data_set).then_some(mesh))
+    }
+
+    fn read_decoded_data(&self) -> Result<(MeshData, bool, bool), VertexDataError> {
         if self.data.is_empty() {
-            return Ok(None);
+            return Ok((MeshData::default(), false, false));
         }
         let vertex_count =
             usize::try_from(self.vertex_count).map_err(|_| VertexDataError::TruncatedData {
@@ -600,6 +613,7 @@ impl VertexDataBlob {
 
         let mut mesh = MeshData::default();
         let mut vertices_set = false;
+        let mut channel_data_set = false;
 
         for (chn, channel) in self.channels.iter().enumerate() {
             let dimension = get_channel_dimension(*channel, chn, self.version)?;
@@ -647,21 +661,24 @@ impl VertexDataBlob {
 
             if format.is_int_format() {
                 let components = bytes_to_int_array(&component_bytes, format)?;
-                self.assign_int_channel(&mut mesh, chn, dimension, &components)?;
+                channel_data_set |=
+                    self.assign_int_channel(&mut mesh, chn, dimension, &components, vertex_count)?;
             } else {
                 let components = bytes_to_float_array(&component_bytes, format)?;
-                self.assign_float_channel(&mut mesh, chn, dimension, &components)?;
+                channel_data_set |= self.assign_float_channel(
+                    &mut mesh,
+                    chn,
+                    dimension,
+                    &components,
+                    vertex_count,
+                )?;
             }
             if chn == 0 {
                 vertices_set = true;
             }
         }
 
-        if vertices_set {
-            Ok(Some(mesh))
-        } else {
-            Ok(None)
-        }
+        Ok((mesh, vertices_set, channel_data_set))
     }
 
     fn assign_float_channel(
@@ -670,52 +687,113 @@ impl VertexDataBlob {
         chn: usize,
         dimension: usize,
         components: &[f32],
-    ) -> Result<(), VertexDataError> {
-        if self.version.at_least(2018) {
+        vertex_count: usize,
+    ) -> Result<bool, VertexDataError> {
+        let channel_was_assigned = if self.version.at_least(2018) {
             match chn {
-                0 => mesh.vertices = float_array_to_vector3(components, dimension)?,
-                1 => mesh.normals = Some(float_array_to_vector3(components, dimension)?),
-                2 => mesh.tangents = Some(float_array_to_vector4(components, dimension)?),
-                3 => mesh.colors = Some(float_array_to_color_float(components)?),
-                4 => mesh.uv0 = Some(float_array_to_vector2(components, dimension)?),
-                5 => mesh.uv1 = Some(float_array_to_vector2(components, dimension)?),
-                6 => mesh.uv2 = Some(float_array_to_vector2(components, dimension)?),
-                7 => mesh.uv3 = Some(float_array_to_vector2(components, dimension)?),
-                8 => mesh.uv4 = Some(float_array_to_vector2(components, dimension)?),
-                9 => mesh.uv5 = Some(float_array_to_vector2(components, dimension)?),
-                10 => mesh.uv6 = Some(float_array_to_vector2(components, dimension)?),
-                11 => mesh.uv7 = Some(float_array_to_vector2(components, dimension)?),
+                0 => {
+                    mesh.vertices = float_array_to_vector3(components, dimension)?;
+                    true
+                }
+                1 => {
+                    mesh.normals = Some(float_array_to_vector3(components, dimension)?);
+                    true
+                }
+                2 => {
+                    mesh.tangents = Some(float_array_to_vector4(components, dimension)?);
+                    true
+                }
+                3 => {
+                    mesh.colors = Some(float_array_to_color_float(components)?);
+                    true
+                }
+                4 => {
+                    mesh.uv0 = Some(float_array_to_vector2(components, dimension)?);
+                    true
+                }
+                5 => {
+                    mesh.uv1 = Some(float_array_to_vector2(components, dimension)?);
+                    true
+                }
+                6 => {
+                    mesh.uv2 = Some(float_array_to_vector2(components, dimension)?);
+                    true
+                }
+                7 => {
+                    mesh.uv3 = Some(float_array_to_vector2(components, dimension)?);
+                    true
+                }
+                8 => {
+                    mesh.uv4 = Some(float_array_to_vector2(components, dimension)?);
+                    true
+                }
+                9 => {
+                    mesh.uv5 = Some(float_array_to_vector2(components, dimension)?);
+                    true
+                }
+                10 => {
+                    mesh.uv6 = Some(float_array_to_vector2(components, dimension)?);
+                    true
+                }
+                11 => {
+                    mesh.uv7 = Some(float_array_to_vector2(components, dimension)?);
+                    true
+                }
                 12 => {
-                    let skin = skin_slot(mesh);
+                    let skin = skin_slot(mesh, vertex_count);
                     for i in 0..skin.len() {
                         for j in 0..dimension {
                             skin[i].weights[j] = components[i * dimension + j];
                         }
                     }
+                    true
                 }
-                13 => {} // Indices are integer and handled elsewhere.
-                _ => {}
+                13 => false, // Indices are integer and handled elsewhere.
+                _ => false,
             }
         } else {
             match chn {
-                0 => mesh.vertices = float_array_to_vector3(components, dimension)?,
-                1 => mesh.normals = Some(float_array_to_vector3(components, dimension)?),
-                2 => mesh.colors = Some(float_array_to_color_float(components)?),
-                3 => mesh.uv0 = Some(float_array_to_vector2(components, dimension)?),
-                4 => mesh.uv1 = Some(float_array_to_vector2(components, dimension)?),
+                0 => {
+                    mesh.vertices = float_array_to_vector3(components, dimension)?;
+                    true
+                }
+                1 => {
+                    mesh.normals = Some(float_array_to_vector3(components, dimension)?);
+                    true
+                }
+                2 => {
+                    mesh.colors = Some(float_array_to_color_float(components)?);
+                    true
+                }
+                3 => {
+                    mesh.uv0 = Some(float_array_to_vector2(components, dimension)?);
+                    true
+                }
+                4 => {
+                    mesh.uv1 = Some(float_array_to_vector2(components, dimension)?);
+                    true
+                }
                 5 => {
                     if self.version.at_least(5) {
                         mesh.uv2 = Some(float_array_to_vector2(components, dimension)?);
+                        true
                     } else {
                         mesh.tangents = Some(float_array_to_vector4(components, dimension)?);
+                        true
                     }
                 }
-                6 => mesh.uv3 = Some(float_array_to_vector2(components, dimension)?),
-                7 => mesh.tangents = Some(float_array_to_vector4(components, dimension)?),
-                _ => {}
+                6 => {
+                    mesh.uv3 = Some(float_array_to_vector2(components, dimension)?);
+                    true
+                }
+                7 => {
+                    mesh.tangents = Some(float_array_to_vector4(components, dimension)?);
+                    true
+                }
+                _ => false,
             }
-        }
-        Ok(())
+        };
+        Ok(channel_was_assigned)
     }
 
     fn assign_int_channel(
@@ -724,17 +802,20 @@ impl VertexDataBlob {
         chn: usize,
         dimension: usize,
         components: &[i32],
-    ) -> Result<(), VertexDataError> {
+        vertex_count: usize,
+    ) -> Result<bool, VertexDataError> {
         // The only integer channel with vertex-data semantics is the 2018.2+ bone-index channel.
         if self.version.at_least_at(2018, 2) && chn == 13 {
-            let skin = skin_slot(mesh);
+            let skin = skin_slot(mesh, vertex_count);
             for i in 0..skin.len() {
                 for j in 0..dimension {
                     skin[i].indices[j] = components[i * dimension + j];
                 }
             }
+            Ok(true)
+        } else {
+            Ok(false)
         }
-        Ok(())
     }
 
     /// `VertexDataBlob.MakeLittleEndian`.
@@ -803,10 +884,9 @@ pub fn supports_skin(version: UnityVersion) -> bool {
     version.at_least_at(2018, 2)
 }
 
-fn skin_slot(mesh: &mut MeshData) -> &mut Vec<BoneWeight4> {
+fn skin_slot(mesh: &mut MeshData, vertex_count: usize) -> &mut Vec<BoneWeight4> {
     if mesh.skin.is_none() {
-        let count = mesh.vertices.len();
-        mesh.skin = Some(vec![BoneWeight4::default(); count]);
+        mesh.skin = Some(vec![BoneWeight4::default(); vertex_count]);
     }
     mesh.skin.as_mut().unwrap()
 }
