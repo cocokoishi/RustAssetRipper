@@ -1307,8 +1307,8 @@ mod tests {
         apply_sprite_outline_to_importer(&mut importer, std::slice::from_ref(&sprite), &single)
             .unwrap();
 
-        let sheet = yaml_mapping_field_mut(&mut importer, "spriteSheet").unwrap();
-        let outline = yaml_mapping_field_mut(sheet, "outline").unwrap();
+        let sheet = super::yaml_mapping_field_mut(&mut importer, "spriteSheet").unwrap();
+        let outline = super::yaml_mapping_field_mut(sheet, "outline").unwrap();
         let UnityYamlNodeKind::Sequence {
             items: outlines, ..
         } = &outline.kind

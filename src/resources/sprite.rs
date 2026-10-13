@@ -938,7 +938,7 @@ pub fn transform_sprite_outline_points(
         transform.rect_size[0] * transform.pivot[0] - transform.rect_size[0] * 0.5,
         transform.rect_size[1] * transform.pivot[1] - transform.rect_size[1] * 0.5,
     ];
-    for outline in &mut outlines {
+    for outline in outlines.iter_mut() {
         for point in outline {
             let scaled = [
                 point[0] * transform.pixels_to_units,
