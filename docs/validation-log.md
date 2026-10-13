@@ -1,5 +1,12 @@
 # Validation log
 
+## 2026-10-12 path_id_map residual exonerated (audit-scope artifact)
+
+- The 烟雨长亭 "Rust-only `AuxiliaryFiles/path_id_map.json`" residual is not a product difference: the frozen Web export root (`real-acceptance-20261012-avtrm烟雨长亭-source-web-r1`) carries `AuxiliaryFiles/` beside `ExportedProject/`, exactly like the Rust layout. The audits compared only the `ExportedProject/` subfolders, hiding the sibling directory on both sides.
+- Direct byte comparison: source vs 烟雨长亭-r8 `AuxiliaryFiles/path_id_map.json` is byte-exact (49,002/49,002). No code change; the audit tool pairs by project-relative paths and cannot do cross-root audits (a whole-root run pairs files but breaks guid resolution — discarded, not evidence).
+- Remaining 烟雨长亭 file-level residuals: `Soft.png`+meta (classified Rust-faithful predefined-cache difference, no patch) only. PrefabImporter and manifest both fixed byte-exact.
+- No Unity runtime claim; product unaccepted.
+
 ## 2026-10-12 manifest CRLF byte-exactness
 
 - `Packages/manifest.json` differed only in line endings (Rust LF+final-newline vs source CRLF+no-final-newline, 1,452 vs 1,419 bytes). Source `System.Text.Json` indented output hardcodes CRLF joins with no trailing newline on every platform; `package_manifest_json` now renders exactly that, with a regression test pinning CRLF-only joins, the exact head/tail, and no trailing newline.
