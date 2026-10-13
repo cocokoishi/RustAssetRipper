@@ -20,27 +20,27 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use super::asset_path::{
-    ExportAssetPathIdentity, ExportFileSystem, HostPathPlatform, UniqueNameLimits, UniqueNameState,
-    join_path, plan_asset_export_paths,
+    join_path, plan_asset_export_paths, ExportAssetPathIdentity, ExportFileSystem,
+    HostPathPlatform, UniqueNameLimits, UniqueNameState,
 };
 use super::collection_claims::{
-    AudioClaimDecode, ClaimAssetKind, ClaimFacts, ClaimMainKind, ClaimOutcome, ShaderTextState,
-    claim_collection, is_supported_audio_export_format,
+    claim_collection, is_supported_audio_export_format, AudioClaimDecode, ClaimAssetKind,
+    ClaimFacts, ClaimMainKind, ClaimOutcome, ShaderTextState,
 };
 use super::collection_kind::ExportCollectionKind;
 use super::collection_paths::{plan_unknown_export_paths, plan_unreadable_export_paths};
-use super::export_extension::{EXPORT_CLASS_MARKERS, ExportClassIdentity, ExportClassMarker};
+use super::export_extension::{ExportClassIdentity, ExportClassMarker, EXPORT_CLASS_MARKERS};
 use super::export_root::prepare_export_root;
 use super::meta::UnityMetaFileOptions;
 use super::post_export::{default_package_dependencies, project_version_file_contents};
 use super::project_order::ProjectExportEvent;
 use super::project_output::{
-    AssetExportStep, AssetExportWithMetaPlan, UnityProjectOutputLimits, create_project_directory,
-    export_asset_with_meta, validate_project_output_path, write_new_project_file,
-    write_new_project_stream,
+    create_project_directory, export_asset_with_meta, validate_project_output_path,
+    write_new_project_file, write_new_project_stream, AssetExportStep, AssetExportWithMetaPlan,
+    UnityProjectOutputLimits,
 };
 use super::project_plan::plan_manager_export_paths;
-use super::registration::{EXPORTER_REGISTRATIONS, RegistrationGate};
+use super::registration::{RegistrationGate, EXPORTER_REGISTRATIONS};
 use super::settings::{
     AudioExportFormat, LightmapTextureExportFormat, ShaderExportMode, SpriteExportMode,
 };
@@ -1203,12 +1203,15 @@ const fn unity_major_minor_at_least(version: SceneUnityVersion, major: u32, mino
 }
 
 /// The baseline default `Packages/manifest.json` body for one Unity version.
+///
+/// `System.Text.Json` indented output joins lines with CRLF on every platform and writes no
+/// trailing newline; the byte comparison against frozen output pins both facts.
 pub fn package_manifest_json(project_version: SceneUnityVersion) -> String {
     let dependencies = default_package_dependencies(
         project_version.major > 2019
             || (project_version.major == 2019 && project_version.minor >= 2),
     );
-    let mut manifest = String::from("{\n  \"dependencies\": {\n");
+    let mut manifest = String::from("{\r\n  \"dependencies\": {\r\n");
     for (index, (name, version)) in dependencies.iter().enumerate() {
         manifest.push_str("    \"");
         manifest.push_str(name);
@@ -1218,9 +1221,9 @@ pub fn package_manifest_json(project_version: SceneUnityVersion) -> String {
         if index + 1 != dependencies.len() {
             manifest.push(',');
         }
-        manifest.push('\n');
+        manifest.push_str("\r\n");
     }
-    manifest.push_str("  }\n}\n");
+    manifest.push_str("  }\r\n}");
     manifest
 }
 
@@ -1437,6 +1440,25 @@ mod tests {
 
     fn facts(class_id: i32) -> ObjectClassFacts {
         ObjectClassFacts::new(class_id, false)
+    }
+
+    /// Frozen `manifest.json` bytes use CRLF joins with no trailing newline on every
+    /// platform; a bare LF or a final newline is a byte difference, not a style choice.
+    #[test]
+    fn package_manifest_uses_crlf_joins_without_trailing_newline() {
+        let manifest = package_manifest_json(SceneUnityVersion::parse("2022.3.22f1").unwrap());
+        assert!(
+            manifest.starts_with("{\r\n  \"dependencies\": {\r\n"),
+            "{manifest:?}"
+        );
+        assert!(manifest.ends_with("\r\n  }\r\n}"), "{manifest:?}");
+        assert!(!manifest.ends_with('\n'), "{manifest:?}");
+        let bytes = manifest.as_bytes();
+        for window in bytes.windows(2) {
+            if window[1] == b'\n' {
+                assert_eq!(window[0], b'\r', "{manifest:?}");
+            }
+        }
     }
 
     #[test]
@@ -1821,10 +1843,11 @@ mod tests {
 
     #[test]
     fn host_relative_paths_reject_escapes_and_collisions() {
-        assert!(
-            validate_host_relative_path("Assets/GameObject/Thing.asset", HostPathPlatform::Windows)
-                .is_ok()
-        );
+        assert!(validate_host_relative_path(
+            "Assets/GameObject/Thing.asset",
+            HostPathPlatform::Windows
+        )
+        .is_ok());
         for bad in [
             "",
             "/absolute",
@@ -1839,13 +1862,11 @@ mod tests {
                 "{bad:?} must be rejected"
             );
         }
-        assert!(
-            validate_host_relative_path(
-                "Assets/Folder\\Literal/Thing.asset",
-                HostPathPlatform::Unix
-            )
-            .is_ok()
-        );
+        assert!(validate_host_relative_path(
+            "Assets/Folder\\Literal/Thing.asset",
+            HostPathPlatform::Unix
+        )
+        .is_ok());
         let plan = ProjectExportPlan {
             project_version_text: "2019.4.0f1".to_owned(),
             project_version_file: String::new(),

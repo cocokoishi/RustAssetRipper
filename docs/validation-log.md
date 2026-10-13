@@ -1,5 +1,12 @@
 # Validation log
 
+## 2026-10-12 manifest CRLF byte-exactness
+
+- `Packages/manifest.json` differed only in line endings (Rust LF+final-newline vs source CRLF+no-final-newline, 1,452 vs 1,419 bytes). Source `System.Text.Json` indented output hardcodes CRLF joins with no trailing newline on every platform; `package_manifest_json` now renders exactly that, with a regression test pinning CRLF-only joins, the exact head/tail, and no trailing newline.
+- 烟雨长亭 r8 vs source manifest is byte-exact (1,452/1,452). r7-vs-r8 audit: zero doc diffs, opaque 311/311 identical, onlySource=0 onlyRust=0 (the single additional difference is the manifest itself). Full workflow suite green, clippy `-D warnings` green, fmt clean on the touched file.
+- Remaining 烟雨长亭 file-level residuals: `Soft.png`+meta (classified Rust-faithful predefined-cache difference, no patch) and `AuxiliaryFiles/path_id_map.json` (intentional Rust product auxiliary with no source counterpart; Unity ignores it).
+- No Unity runtime claim; product unaccepted.
+
 ## 2026-10-12 PrefabImporter defect fixed (layout gates + bundle-name stamp)
 
 - Reproduced exactly: source prefab meta has `variantParentGUID: 000...000`, no `unableToImportOnPreviousDomainReload`, real `.unity3d` assetBundleName; Rust had the inverse plus empty name.

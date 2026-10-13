@@ -1,5 +1,21 @@
 # Source behavior and differential findings
 
+## DIFF-EDITOR-RESOURCE-86-121-001 — editor layout omitted
+
+New frozen Web outputs show 烟雨长亭 CustomRenderTexture(class86) missing four editor base fields and m_ImageContentsHash, and 玉京烟霞 Flare(class121) missing four editor base fields. Release bytes decode using the release TPK; export was retaining that layout instead of the frozen editor projection. Generic2022.3 class selection now includes86/121, with frozen-layout/export-Hash128 regressions. Full lib1701pass/1ignored,Clippy/release0. Final 烟雨长亭 r5 CustomRenderTexture is whole-file byte-exact with frozen source. First 玉京烟霞 three-way audit (r8) pairs class121 and matches class124 exactly; corrections committed as `ff865c2` with full monotonicity replays.
+
+## DIFF-NATIVE-YAML-CLASS-NAME-001 — shared abstract root mislabeled
+
+玉京烟霞 FlareLayer(class124) release/editor TypeTrees root at Behaviour, whereas source generated asset.ClassName is FlareLayer. HaloLayer125 has the same rule at3.5/2022.3. Source TypeTreeObject deliberately derives its name from editor schema; a global class-ID relabel would violate that fallback. New optional native_class_name hint is supplied only for Generated objects and only substitutes abstract roots in project mode. Regression47/47 focused passes include known-ID fallback, unknown/script/explicit/importer preservation. Corrected 玉京烟霞 r8 verified (class124 exact). No comparator exclusions added.
+
+## DIFF-烟雨长亭-SOFT-PREDEFINED-CACHE-001 — pixel equality with sampler differences
+
+All44 烟雨长亭 finalr5 materials compared using exact parsed fields and GUID owners:6 equivalent;38 differ only at _IgnoreCookieTexture, frozen source builtin10001 versus Rust emittedSoft.png. Actual Unity2022.3.22f1 builtin PNG is byte/pixel-exact with Rust; bundle Texture2D PathID1213616326460374869 Alpha8 base16384 bytes equals builtin base mip. However input mipcount/colorSpace/streaming/filter/aniso are1/0/1/2/1, versus builtin8/1/0/1/0. Frozen cache matches(name,width,height), ignoring these settings; Rust preserves input/frozenImporterFactory settings in all12 inspected checks. **Rust-faithful representation difference**, source cache discards recoverable sampling metadata. Do not claim full builtin binding or Unity runtime equivalence. Reports `target/completion-audit-烟雨长亭-r5-material-before.json`, `target/completion-audit-烟雨长亭-soft-fidelity-r5.json`; no product patch.
+
+## DIFF-PREFAB-IMPORTER-VERSION-BUNDLE-001 — required metadata defect, fixed
+
+Expanded 烟雨长亭 finalr5 whole-project audit reveals source PrefabImporter variantParentGUID0 plus actual root assetBundleName; Rust instead hardcodes unableToImportOnPreviousDomainReload0, omits variantParentGUID, and emits empty assetBundleName. Source PrefabExportCollection.CreateImporter selects the full export-version class and copies RootGameObject.AssetBundleName. Frozen TPK class468431735 at2022.3.22f1 has m_VariantParentGUID, confirmed by source runtime dump. Fixed in `dc959fe`: version-gated fields (`unableToImport` only <2020.1, `variantParentGUID` only >=2022.2, TPK-surveyed) plus Container-stamp bundle-name mirror (oracle PRE-empty/POST-stamped proof; 142 resolved via decoded workspace). 烟雨长亭 r7 + 松月竹庭 r16 prefab metas match source; all prefab-bearing samples replayed monotonically. Packages manifest is byte-exact since the CRLF fix; auxiliary path-map mismatch remains open separately.
+
 ## DIFF-REFERENCE-WEB-EXPORT-001 — missing CLI locally bypassed
 
 Frozen GUI.Web Commands routes accept `/LoadFile` and `/Export/UnityProject` forms. The existing isolated GUI.Free build produced fresh 玉京烟霞/烟雨长亭 projects via loopback without changing the baseline. `tools/export-reference-web.ps1` captures hashes/settings/logs, refuses existing destinations and stops its own server. Both exit0; comparison reveals new class86/121/124 gaps. “No CLI, blocked” is superseded. See newest validation-log evidence.
