@@ -1,5 +1,9 @@
 # Source behavior and differential findings
 
+## DIFF-CONTROLLER-SUBDOC-IDS-001 — controller sub-docs use allocator IDs, source uses hierarchy-order pseudo-random (open)
+
+玉京烟霞 r14 all 8 `.controller` docs differ: Rust emits `[91, 1102-state(7000000001), 1107-machine(7000000000)]` while source emits `[91, 1107-machine(1107709254077376921), 1102-state(1102730242686860875)]` — same values otherwise. `AnimatorControllerExportCollection` inherits default `GenerateExportID` (`GetPseudoRandomExportId(asset, m_exportIDs.Count)`); `AddAsset` skips the controller itself, so seeds count non-controller assets in `FetchEditorHierarchy` order (machine 0, states/transitions/blendtrees inline after). Proven by `pseudo_random_export_ids_match_frozen_玉京烟霞_controller_subdocs` (ahoge machine/state IDs reproduce exactly). Remaining: replace the `7000000000` allocator for kept docs with hierarchy-order pseudo-random assignment and emit docs in hierarchy order (stress cases: moon_doll 100+ mixed docs, TriggerHoldDetect inline 1101 transitions).
+
 ## DIFF-SPRITE-IMPORTER-FACTS-001 — sprite facts wired (fixed)
 
 玉京烟霞 `menu.png` (+4 VRC UI textures) `.meta` differed: `textureType` 8 vs 0, `spriteMeshType` 1 vs 0, `alignment` 9 vs 0 (both sides agreed `spriteMode` 1). Production never called `decide_sprite_importer` (test-only) and discovered no per-texture sprites. Fixed by workspace/graph discovery via `m_RD.m_Texture` plus `decide_sprite_importer` field application as a planning post-pass on the plain-Texture2D route, with facts carrying the processed coords values and `f32` rendering. All 5 metas match source; cubemap/3D/lightmap/atlas-packed stay open with prior behavior.
