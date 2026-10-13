@@ -14,20 +14,22 @@
 //! the atlas render-data lookup stay caller-side: these kernels take the resolved
 //! facts so the source shapes stay auditable without a managed collection.
 //!
-//! The `FillSpriteMetaData` mesh-vertex extraction internals stay open and are not
-//! ported here: the `SetBoneGeometry` body (including the `VertexDataBlob`
-//! reads and the vertex/index/weight copies), the `GenerateOutline` and
-//! `GeneratePhysicsShape` bodies (including `MeshOutlineGenerator` and the
-//! packing-rotation fixup), and the edge list (the source carries a
-//! `#warning TODO` for `Edges`). This module reports *whether* the outline, the
-//! physics shape, and the bone payload must be produced, plus the Bone PPU
-//! scaling math; the caller owns the vertex extraction.
+//! `sprite_outline::generate_mesh_outlines` ports the source `MeshOutlineGenerator`
+//! over caller-provided vertices and triangles. The caller still owns versioned
+//! `VertexData`/index-buffer extraction and the subsequent PPU, pivot, and atlas
+//! packing transforms. `GeneratePhysicsShape` and the `SetBoneGeometry` body
+//! (including its `VertexDataBlob` reads and vertex/index/weight copies) remain
+//! open. The source itself carries a `#warning TODO` for `Edges`; it does not
+//! generate that list.
 //!
 //! Also ported is the `SpriteProcessor.ProcessSprite` offset recalculation (pivot
 //! offset and texture-rect offset over caller facts); the atlas detachment and the
 //! rect/pivot/border copies stay caller-side. The `SettingsRaw` packing-settings
 //! bit positions shared by `SpriteAtlasData` and `SpriteRenderData` are pinned as
 //! raw discriminants; only the generated packing-enum member names stay open.
+
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt;
 
 /// The class ID of `Sprite` (class 213).
 pub const SPRITE_CLASS_ID: i32 = 213;
@@ -236,6 +238,385 @@ pub const SPRITE_ALIGNMENT_CUSTOM: i32 = 9;
 /// (`instance.TessellationDetail = 0`).
 pub const SPRITE_TESSELLATION_DETAIL: i32 = 0;
 
+/// Failure while deriving outlines from sprite render-data triangles.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SpriteOutlineError {
+    /// A non-degenerate input triangle refers to a vertex outside the supplied
+    /// vertex array. `triangle_index` is its position in the input triangle list.
+    InvalidVertexIndex {
+        /// Position of the bad triangle in the input list.
+        triangle_index: usize,
+        /// Out-of-range vertex index.
+        vertex_index: usize,
+        /// Number of supplied vertices.
+        vertex_count: usize,
+    },
+    /// The source algorithm found a connected triangle component with no
+    /// boundary edge from which it can start an outline.
+    NoBoundary {
+        /// Position of the first triangle in the input component.
+        triangle_index: usize,
+    },
+    /// The source boundary walk repeated a state without closing at its first
+    /// vertex. The input cannot produce a finite source-compatible outline.
+    TraversalCycle {
+        /// Position of the first triangle in the input component.
+        triangle_index: usize,
+    },
+}
+
+impl fmt::Display for SpriteOutlineError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidVertexIndex {
+                triangle_index,
+                vertex_index,
+                vertex_count,
+            } => write!(
+                formatter,
+                "sprite triangle {triangle_index} references vertex {vertex_index}, but only {vertex_count} vertices were supplied"
+            ),
+            Self::NoBoundary { triangle_index } => write!(
+                formatter,
+                "sprite triangle component starting at {triangle_index} has no outline boundary"
+            ),
+            Self::TraversalCycle { triangle_index } => write!(
+                formatter,
+                "sprite outline walk for component starting at {triangle_index} did not close"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SpriteOutlineError {}
+
+/// Generates the source `MeshOutlineGenerator` outline loops from 3D vertices
+/// and triangle indices, projecting the final points to the XY plane.
+///
+/// Degenerate triangles (any repeated vertex index) are discarded, as in the
+/// source constructor. Adjacency follows the source's directed shared-edge rule;
+/// triangles that share only a vertex remain separate components. The output
+/// order and boundary walk preserve source ordering. Coordinate scaling, pivot
+/// translation, and atlas packing rotation are caller operations.
+pub fn generate_mesh_outlines(
+    vertices: &[[f32; 3]],
+    triangles: &[[usize; 3]],
+) -> Result<Vec<Vec<[f32; 2]>>, SpriteOutlineError> {
+    let mut valid_triangles = Vec::with_capacity(triangles.len());
+    let mut source_indices = Vec::with_capacity(triangles.len());
+    for (triangle_index, triangle) in triangles.iter().copied().enumerate() {
+        if triangle[0] == triangle[1] || triangle[0] == triangle[2] || triangle[1] == triangle[2] {
+            continue;
+        }
+        for vertex_index in triangle {
+            if vertex_index >= vertices.len() {
+                return Err(SpriteOutlineError::InvalidVertexIndex {
+                    triangle_index,
+                    vertex_index,
+                    vertex_count: vertices.len(),
+                });
+            }
+        }
+        valid_triangles.push(triangle);
+        source_indices.push(triangle_index);
+    }
+
+    let mut directed_edges: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+    let mut undirected_edges: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+    for (triangle_index, triangle) in valid_triangles.iter().copied().enumerate() {
+        for (start, end) in triangle_edges(triangle) {
+            directed_edges
+                .entry((start, end))
+                .or_default()
+                .push(triangle_index);
+            undirected_edges
+                .entry(undirected_edge(start, end))
+                .or_default()
+                .push(triangle_index);
+        }
+    }
+
+    let mut adjacency = vec![Vec::new(); valid_triangles.len()];
+    for (triangle_index, triangle) in valid_triangles.iter().copied().enumerate() {
+        let mut neighbors = HashSet::new();
+        for (start, end) in triangle_edges(triangle) {
+            if let Some(matches) = directed_edges.get(&(end, start)) {
+                neighbors.extend(
+                    matches
+                        .iter()
+                        .copied()
+                        .filter(|&other| other != triangle_index),
+                );
+            }
+        }
+        let mut neighbors: Vec<_> = neighbors.into_iter().collect();
+        neighbors.sort_unstable();
+        adjacency[triangle_index] = neighbors;
+    }
+
+    let mut visited = vec![false; valid_triangles.len()];
+    let mut component_order = vec![usize::MAX; valid_triangles.len()];
+    let mut outlines = Vec::new();
+    let mut start = 0;
+    while start < valid_triangles.len() {
+        if visited[start] {
+            start += 1;
+            continue;
+        }
+        let mut component = Vec::new();
+        let mut pending = VecDeque::from([start]);
+        visited[start] = true;
+        while let Some(triangle_index) = pending.pop_front() {
+            component.push(triangle_index);
+            for &neighbor in &adjacency[triangle_index] {
+                if !visited[neighbor] {
+                    visited[neighbor] = true;
+                    pending.push_back(neighbor);
+                }
+            }
+        }
+
+        for (order, &triangle_index) in component.iter().enumerate() {
+            component_order[triangle_index] = order;
+        }
+        let outsiders = generate_outsiders(
+            &component,
+            &component_order,
+            &valid_triangles,
+            &undirected_edges,
+        );
+        if outsiders.is_empty() {
+            return Err(SpriteOutlineError::NoBoundary {
+                triangle_index: source_indices[start],
+            });
+        }
+
+        let outline = generate_outline_indices(
+            &component,
+            &outsiders,
+            &valid_triangles,
+            source_indices[start],
+        )?;
+        outlines.push(
+            outline
+                .into_iter()
+                .map(|vertex_index| {
+                    let vertex = vertices[vertex_index];
+                    [vertex[0], vertex[1]]
+                })
+                .collect(),
+        );
+        for &triangle_index in &component {
+            component_order[triangle_index] = usize::MAX;
+        }
+        start += 1;
+    }
+    Ok(outlines)
+}
+
+#[derive(Clone, Copy)]
+struct SpriteOutlineOutside {
+    triangle: usize,
+    member: usize,
+}
+
+fn triangle_edges(triangle: [usize; 3]) -> [(usize, usize); 3] {
+    [
+        (triangle[0], triangle[1]),
+        (triangle[1], triangle[2]),
+        (triangle[2], triangle[0]),
+    ]
+}
+
+fn undirected_edge(first: usize, second: usize) -> (usize, usize) {
+    if first < second {
+        (first, second)
+    } else {
+        (second, first)
+    }
+}
+
+fn generate_outsiders(
+    component: &[usize],
+    component_order: &[usize],
+    triangles: &[[usize; 3]],
+    undirected_edges: &HashMap<(usize, usize), Vec<usize>>,
+) -> Vec<SpriteOutlineOutside> {
+    let mut outsiders = Vec::new();
+    for &triangle_index in component {
+        let triangle = triangles[triangle_index];
+        let mut candidates = HashSet::new();
+        for (first, second) in triangle_edges(triangle) {
+            if let Some(matches) = undirected_edges.get(&undirected_edge(first, second)) {
+                candidates.extend(matches.iter().copied().filter(|candidate| {
+                    *candidate != triangle_index && component_order[*candidate] != usize::MAX
+                }));
+            }
+        }
+        let mut candidates: Vec<_> = candidates.into_iter().collect();
+        candidates.sort_unstable_by_key(|&candidate| component_order[candidate]);
+
+        let mut neighbor_count = 0;
+        let (mut xy, mut yz, mut zx) = (true, true, true);
+        let mut has_three_neighbors = false;
+        for candidate in candidates {
+            let check = triangles[candidate];
+            if check.contains(&triangle[0]) {
+                if check.contains(&triangle[1]) {
+                    xy = false;
+                } else if check.contains(&triangle[2]) {
+                    zx = false;
+                } else {
+                    continue;
+                }
+            } else if check.contains(&triangle[1]) && check.contains(&triangle[2]) {
+                yz = false;
+            } else {
+                continue;
+            }
+            neighbor_count += 1;
+            if neighbor_count == 3 {
+                has_three_neighbors = true;
+                break;
+            }
+        }
+        if has_three_neighbors {
+            continue;
+        }
+
+        let member = if xy {
+            if zx {
+                2
+            } else {
+                0
+            }
+        } else if yz {
+            1
+        } else {
+            2
+        };
+        outsiders.push(SpriteOutlineOutside {
+            triangle: triangle_index,
+            member,
+        });
+    }
+    outsiders
+}
+
+fn generate_outline_indices(
+    component: &[usize],
+    outsiders: &[SpriteOutlineOutside],
+    triangles: &[[usize; 3]],
+    source_triangle_index: usize,
+) -> Result<Vec<usize>, SpriteOutlineError> {
+    let first_outside = outsiders[0];
+    let first_triangle = triangles[first_outside.triangle];
+    let first = first_triangle[first_outside.member];
+    let second = first_triangle[(first_outside.member + 1) % 3];
+    let mut outline = vec![first, second];
+    let mut last_triangle = first_outside.triangle;
+    let mut last_member = first_outside.member + 1;
+    let mut last_vertex = first;
+    let mut visited = HashSet::new();
+
+    loop {
+        let state = (last_triangle, last_member % 3, last_vertex);
+        if !visited.insert(state) {
+            return Err(SpriteOutlineError::TraversalCycle {
+                triangle_index: source_triangle_index,
+            });
+        }
+
+        if let Some(outside) =
+            get_next_outsider(last_triangle, last_member, component, outsiders, triangles)
+        {
+            last_triangle = outside.triangle;
+            last_member = outside.member + 1;
+            last_vertex = triangles[outside.triangle][outside.member];
+        } else {
+            last_member += 1;
+            if triangles[last_triangle][last_member % 3] == last_vertex && last_vertex != first {
+                break;
+            }
+        }
+
+        let next_vertex = triangles[last_triangle][last_member % 3];
+        if next_vertex == first {
+            break;
+        }
+        outline.push(next_vertex);
+    }
+    Ok(outline)
+}
+
+fn get_next_outsider(
+    triangle_index: usize,
+    member: usize,
+    component: &[usize],
+    outsiders: &[SpriteOutlineOutside],
+    triangles: &[[usize; 3]],
+) -> Option<SpriteOutlineOutside> {
+    let vertex = triangles[triangle_index][member % 3];
+    outsiders.iter().copied().find(|outside| {
+        triangles[outside.triangle][outside.member] == vertex
+            && is_connected_neighbors(
+                triangle_index,
+                outside.triangle,
+                vertex,
+                component,
+                triangles,
+            )
+    })
+}
+
+fn is_connected_neighbors(
+    first_triangle: usize,
+    target_triangle: usize,
+    vertex: usize,
+    component: &[usize],
+    triangles: &[[usize; 3]],
+) -> bool {
+    if has_reverse_edge(triangles[first_triangle], triangles[target_triangle]) {
+        return true;
+    }
+
+    let mut current = first_triangle;
+    let mut visited = HashSet::new();
+    while let Some(next) = get_next_neighbor(current, vertex, component, triangles) {
+        if triangles[next] == triangles[target_triangle] {
+            return true;
+        }
+        if !visited.insert(next) {
+            return false;
+        }
+        current = next;
+    }
+    false
+}
+
+fn get_next_neighbor(
+    triangle_index: usize,
+    vertex: usize,
+    component: &[usize],
+    triangles: &[[usize; 3]],
+) -> Option<usize> {
+    let triangle = triangles[triangle_index];
+    let member = triangle.iter().position(|&value| value == vertex)?;
+    let next_vertex = triangle[(member + 1) % 3];
+    component.iter().copied().find(|&candidate| {
+        let check = triangles[candidate];
+        check != triangle && check.contains(&vertex) && check.contains(&next_vertex)
+    })
+}
+
+fn has_reverse_edge(first: [usize; 3], second: [usize; 3]) -> bool {
+    triangle_edges(first).into_iter().any(|(start, end)| {
+        triangle_edges(second)
+            .into_iter()
+            .any(|(other_start, other_end)| start == other_end && end == other_start)
+    })
+}
+
 /// One sprite bone as caller facts for the `FillSpriteMetaData` bone gate.
 ///
 /// `position` is `ISpriteBone.Position` (`[x, y]`), `length` is
@@ -288,9 +669,9 @@ pub fn scale_sprite_bone_for_metadata(
 ///
 /// Unlike the physics-shape gate there is no sprite-side check: the source
 /// derives the outline from the sprite render data whenever the instance
-/// version carries an outline list. The outline body itself
-/// (`GenerateOutline`, `MeshOutlineGenerator`) stays open; this only reports
-/// whether the caller must run it.
+/// version carries an outline list. [`generate_mesh_outlines`] implements its
+/// triangle-walk core; the caller still extracts the versioned geometry and
+/// applies the PPU, pivot, and packing transforms.
 pub fn should_generate_sprite_outline(instance_has_outline: bool) -> bool {
     instance_has_outline
 }
@@ -323,9 +704,9 @@ pub fn should_fill_sprite_bones(
 
 /// Decision output of the `FillSpriteMetaData` kernel.
 ///
-/// Every field is a value to write or a gated action to run; the mesh-vertex
-/// extraction bodies (`GenerateOutline`, `GeneratePhysicsShape`,
-/// `SetBoneGeometry`) stay open and caller-side.
+/// Every field is a value to write or a gated action to run. Render-data
+/// extraction, physics-shape generation, and bone-geometry extraction remain
+/// caller-side.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FillSpriteMetaDataOutput {
     /// `Rect` value the caller writes (`instance.Rect.CopyValues(rect)`).
@@ -457,6 +838,98 @@ mod tests {
     #[test]
     fn sprite_class_id_matches_the_source() {
         assert_eq!(SPRITE_CLASS_ID, 213);
+    }
+
+    #[test]
+    fn mesh_outlines_match_the_frozen_source_generator() {
+        let vertices = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [2.0, 1.0, 0.0],
+        ];
+
+        // The frozen MeshOutlineGenerator.cs and Vector3i.cs were compiled
+        // unchanged in a small .NET harness. These cover a single face, a
+        // joined strip, separate and vertex-touching components, same-winding
+        // duplicates, and oppositely-wound coincident faces.
+        assert_eq!(
+            generate_mesh_outlines(&vertices, &[[0, 1, 2]]),
+            Ok(vec![vec![[1.0, 1.0], [0.0, 0.0], [1.0, 0.0]]]),
+        );
+        assert_eq!(
+            generate_mesh_outlines(&vertices, &[[0, 1, 2], [0, 2, 3]]),
+            Ok(vec![vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0],]]),
+        );
+        assert_eq!(
+            generate_mesh_outlines(&vertices, &[[0, 1, 2], [0, 2, 3], [1, 4, 5], [1, 5, 2]],),
+            Ok(vec![vec![
+                [0.0, 0.0],
+                [1.0, 0.0],
+                [2.0, 0.0],
+                [2.0, 1.0],
+                [1.0, 1.0],
+                [0.0, 1.0],
+            ]]),
+        );
+        assert_eq!(
+            generate_mesh_outlines(&vertices, &[[0, 1, 2], [3, 4, 5]]),
+            Ok(vec![
+                vec![[1.0, 1.0], [0.0, 0.0], [1.0, 0.0]],
+                vec![[2.0, 1.0], [0.0, 1.0], [2.0, 0.0]],
+            ]),
+        );
+        assert_eq!(
+            generate_mesh_outlines(&vertices, &[[0, 1, 2], [0, 1, 2]]),
+            Ok(vec![
+                vec![[1.0, 1.0], [0.0, 0.0], [1.0, 0.0]],
+                vec![[1.0, 1.0], [0.0, 0.0], [1.0, 0.0]],
+            ]),
+        );
+        assert_eq!(
+            generate_mesh_outlines(&vertices, &[[0, 1, 2], [2, 1, 0]]),
+            Ok(vec![vec![[1.0, 0.0], [1.0, 1.0], [0.0, 0.0]]]),
+        );
+        assert_eq!(
+            generate_mesh_outlines(&vertices, &[[0, 1, 2], [0, 3, 4]]),
+            Ok(vec![
+                vec![[1.0, 1.0], [0.0, 0.0], [1.0, 0.0]],
+                vec![[2.0, 0.0], [0.0, 0.0], [0.0, 1.0]],
+            ]),
+        );
+    }
+
+    #[test]
+    fn mesh_outlines_reject_bad_indices_and_closed_components() {
+        assert_eq!(
+            generate_mesh_outlines(&[[0.0, 0.0, 0.0]], &[[0, 1, 2]]),
+            Err(SpriteOutlineError::InvalidVertexIndex {
+                triangle_index: 0,
+                vertex_index: 1,
+                vertex_count: 1,
+            }),
+        );
+
+        let tetrahedron = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        assert_eq!(
+            generate_mesh_outlines(&tetrahedron, &[[0, 2, 1], [0, 1, 3], [1, 2, 3], [2, 0, 3]],),
+            Err(SpriteOutlineError::NoBoundary { triangle_index: 0 }),
+        );
+    }
+
+    #[test]
+    fn mesh_outline_discards_degenerate_triangles_before_index_validation() {
+        assert_eq!(
+            generate_mesh_outlines(&[], &[[usize::MAX, 2, usize::MAX]]),
+            Ok(Vec::new()),
+        );
     }
 
     #[test]
