@@ -1,5 +1,9 @@
 # Source behavior and differential findings
 
+## DIFF-PATH-ID-MAP-FILE-ORDER-001 — multi-CAB file order differs, sets exact (deferred)
+
+玉京烟霞 (2 SerializedFiles) `AuxiliaryFiles/path_id_map.json`: per-file asset sets and within-file PathID sequences match exactly (552/552, 4/4), but file order differs (source lists `sharedassets` first; Rust lists the main file first). Single-file samples are byte-exact (烟雨长亭 49,002; 青岚古境 80,844; 松月竹庭 15,752; 云栖仙府 51,342). The file is Unity-ignored informational output; the order likely follows source bundle-load order versus workspace mount order, but the rule is unproven and 玉京烟霞 validation is disk-blocked. No code change; revisit only with a cheap validation path.
+
 ## DIFF-EDITOR-RESOURCE-86-121-001 — editor layout omitted
 
 New frozen Web outputs show 烟雨长亭 CustomRenderTexture(class86) missing four editor base fields and m_ImageContentsHash, and 玉京烟霞 Flare(class121) missing four editor base fields. Release bytes decode using the release TPK; export was retaining that layout instead of the frozen editor projection. Generic2022.3 class selection now includes86/121, with frozen-layout/export-Hash128 regressions. Full lib1701pass/1ignored,Clippy/release0. Final 烟雨长亭 r5 CustomRenderTexture is whole-file byte-exact with frozen source. First 玉京烟霞 three-way audit (r8) pairs class121 and matches class124 exactly; corrections committed as `ff865c2` with full monotonicity replays.

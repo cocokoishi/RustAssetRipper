@@ -1,5 +1,11 @@
 # Validation log
 
+## 2026-10-12 prefab fix breadth closed plus path_id_map parity sweep
+
+- 青岚山河卷 `Text.prefab.meta` matches source exactly modulo guid/time — including empty assetBundleName on both sides, which validates the stamp-mirror else-branch (non-Container roots keep the serialized field).
+- `path_id_map.json` byte-exact on 青岚古境 (80,844), 松月竹庭 (15,752), 云栖仙府 (51,342) direct-compared; 烟雨长亭 byte-exact (49,002); 玉京烟霞 per-file sets+sequences exact with file order differing (recorded as DIFF-PATH-ID-MAP-FILE-ORDER-001, deferred). 青岚山河卷 frozen baseline predates post-exporters (no file to compare). The `RUST_ONLY` audit flags on 青岚古境/云栖仙府 are stale-baseline path-layout artifacts (云栖仙府 source nests it inside `ExportedProject/`), not product gaps.
+- No Unity runtime claim; product unaccepted.
+
 ## 2026-10-12 path_id_map residual exonerated (audit-scope artifact)
 
 - The 烟雨长亭 "Rust-only `AuxiliaryFiles/path_id_map.json`" residual is not a product difference: the frozen Web export root (`real-acceptance-20261012-avtrm烟雨长亭-source-web-r1`) carries `AuxiliaryFiles/` beside `ExportedProject/`, exactly like the Rust layout. The audits compared only the `ExportedProject/` subfolders, hiding the sibling directory on both sides.
