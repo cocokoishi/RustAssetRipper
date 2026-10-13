@@ -36,11 +36,13 @@ use std::io;
 
 use crate::export::ids::get_main_export_id;
 use crate::export::unity_yaml::{UnityYamlNode, UnityYamlNodeKind, UnityYamlScalar};
+use crate::numerics::BoneWeight4;
+use crate::resources::mesh::MeshView;
 use crate::resources::sprite::{
     generate_sprite_render_data_outlines_from_value, sprite_settings_raw_is_packed,
     sprite_settings_raw_packing_rotation, transform_sprite_outline_points, SpriteOutlineTransform,
 };
-use crate::resources::vertex_data_blob::{EndianType, UnityVersion};
+use crate::resources::vertex_data_blob::{EndianType, UnityVersion, VertexDataBlob};
 use crate::serialized_file::object::SerializedValue;
 use crate::serialized_file::object_workspace::ObjectWorkspace;
 use crate::serialized_file::reference_graph::{MultiFilePPtrResolution, MultiFileReferenceGraph};
@@ -116,6 +118,8 @@ pub struct SpriteFacts {
     pub export_id: Option<i64>,
     /// The sprite `Rect` (`[x, y, width, height]`).
     pub rect: [f32; 4],
+    /// The processed Sprite `Rect` size used by `SetBoneGeometry` after `SpriteProcessor`.
+    pub source_rect_size: [f32; 2],
     /// The sprite render-data texture rect in the same layout.
     pub texture_rect: [f32; 4],
     /// Whether the sprite name equals the texture name.
@@ -138,8 +142,42 @@ pub struct SpriteFacts {
     pub outline: Vec<Vec<[f32; 2]>>,
     /// Physics shapes after the source PPU, pivot, and packing transforms.
     pub physics_shape: Vec<Vec<[f32; 2]>>,
-    /// Whether the source Sprite layout exposes `m_Bones`.
-    pub source_has_bones: bool,
+    /// Source `m_Bones`; `Some([])` preserves a present-but-empty array.
+    pub bones: Option<Vec<SpriteBoneData>>,
+    /// Stable importer SpriteID for bone metadata, derived from source file/object identity.
+    pub sprite_id: Option<String>,
+    /// Geometry copied by `SpriteMetaDataExtensions.SetBoneGeometry`.
+    pub bone_geometry: SpriteBoneGeometry,
+}
+
+/// Bone metadata copied from one source SpriteBone after the baseline PPU/root transform.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpriteBoneData {
+    /// Bone name.
+    pub name: String,
+    /// Position in Sprite importer coordinates.
+    pub position: [f32; 3],
+    /// Bone rotation quaternion.
+    pub rotation: [f32; 4],
+    /// Bone length in Sprite importer units.
+    pub length: f32,
+    /// Parent index (`-1` for a root bone).
+    pub parent_id: i32,
+    /// Optional source Color32.
+    pub color: Option<[u8; 4]>,
+    /// Optional source bone GUID.
+    pub guid: Option<String>,
+}
+
+/// Geometry emitted beside Sprite bone metadata.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SpriteBoneGeometry {
+    /// Source vertices transformed into importer coordinates.
+    pub vertices: Vec<[f32; 2]>,
+    /// Signed 16-bit indices read from the source little-endian index buffer.
+    pub indices: Vec<i16>,
+    /// Decoded per-vertex skin values.
+    pub weights: Vec<BoneWeight4>,
 }
 
 /// The importer fields `AddSprites` assigns, before version-gated application.
@@ -250,7 +288,9 @@ const SPRITE_OBJECT_CLASS_ID: i32 = 213;
 /// importer path only; asset grouping stays open. Facts follow workspace file/object encounter
 /// order, matching the source `SpriteInformationObject` insertion sequence. Source file version
 /// and endianness select the render-data geometry decoder. When sprite-sheet export is enabled,
-/// malformed outline or physics-shape geometry is an error rather than a silently omitted field.
+/// malformed outline, physics-shape, or bone geometry is an error rather than a silently omitted
+/// field. Bone geometry intentionally decodes the inline `SpriteRenderData.VertexData` payload,
+/// matching the frozen baseline's `VertexDataBlob.Create` call in `SetBoneGeometry`.
 #[allow(clippy::too_many_arguments)]
 pub fn collect_sprite_facts_for_texture(
     workspace: &SerializedFileWorkspace,
@@ -353,6 +393,33 @@ pub fn collect_sprite_facts_for_texture(
                         ))
                     },
                 )?;
+            link.facts.bones = read_sprite_bones(
+                &payload.root,
+                link.facts.pixels_to_units,
+                link.facts.source_rect_size,
+            )
+            .map_err(|error| {
+                invalid_sprite_data(format!(
+                    "Sprite object {} bone metadata could not be read: {error}",
+                    sprite.object_index
+                ))
+            })?;
+            if link.facts.bones.is_some() {
+                link.facts.sprite_id = Some(sprite_importer_id(sprite.file_index, sprite.path_id));
+                link.facts.bone_geometry = read_sprite_bone_geometry(
+                    link.render_data,
+                    source_version,
+                    endian,
+                    link.facts.pixels_to_units,
+                    link.facts.source_rect_size,
+                )
+                .map_err(|error| {
+                    invalid_sprite_data(format!(
+                        "Sprite object {} bone geometry could not be read: {error}",
+                        sprite.object_index
+                    ))
+                })?;
+            }
         }
         facts
             .try_reserve(1)
@@ -411,10 +478,8 @@ pub fn apply_sprite_importer_decision(
     Ok(())
 }
 
-/// Writes the source outline and physics-shape fields for a Single-mode sheet, or source-ordered
-/// per-sprite metadata and export-name mappings for legacy Multiple-mode layouts. Bone metadata
-/// is rejected when the target layout exposes it because the source also derives vertices,
-/// indices, and weights for that branch.
+/// Writes the source outline, physics-shape, and bone fields for a Single-mode sheet, or
+/// source-ordered per-sprite metadata and export-name mappings for legacy Multiple-mode layouts.
 pub fn apply_sprite_sheet_metadata_to_importer(
     importer: &mut UnityYamlNode,
     sprites: &[SpriteFacts],
@@ -427,16 +492,6 @@ pub fn apply_sprite_sheet_metadata_to_importer(
         return Ok(());
     };
     if decision.mode == SpriteImportMode::Multiple {
-        if [
-            "bones", "spriteID", "vertices", "indices", "edges", "weights",
-        ]
-        .into_iter()
-        .any(|field| importer_node_has_field(sprite_sheet, field))
-        {
-            return Err(invalid_sprite_data(
-                "multiple SpriteSheet bone geometry is not yet planned",
-            ));
-        }
         let mut metadata =
             UnityYamlNode::sequence(crate::export::unity_yaml::UnityYamlSequenceStyle::Block);
         for sprite in sprites {
@@ -456,19 +511,11 @@ pub fn apply_sprite_sheet_metadata_to_importer(
             "Single SpriteSheet mode requires exactly one sprite fact",
         ));
     };
-    if sprite.source_has_bones
-        && importer_node_has_field(sprite_sheet, "bones")
-        && importer_node_has_field(sprite_sheet, "spriteID")
-    {
-        return Err(invalid_sprite_data(
-            "Sprite bone metadata and geometry are not yet planned",
-        ));
+    if let Some(outline_field) = yaml_mapping_field_mut(sprite_sheet, "outline") {
+        *outline_field = sprite_outline_to_yaml(&sprite.outline)?;
     }
-    let Some(outline_field) = yaml_mapping_field_mut(sprite_sheet, "outline") else {
-        return write_sprite_physics_shape(sprite_sheet, &sprite.physics_shape);
-    };
-    *outline_field = sprite_outline_to_yaml(&sprite.outline)?;
-    write_sprite_physics_shape(sprite_sheet, &sprite.physics_shape)
+    write_sprite_physics_shape(sprite_sheet, &sprite.physics_shape)?;
+    write_sprite_bone_fields(sprite_sheet, sprite)
 }
 
 fn sprite_meta_data_to_yaml(
@@ -505,6 +552,9 @@ fn sprite_meta_data_to_yaml(
         )?;
     }
     metadata.insert_field("tessellationDetail", signed_node(0))?;
+    for (name, value) in sprite_bone_fields_to_yaml(sprite, sprite_sheet)? {
+        metadata.insert_field(name, value)?;
+    }
     if importer_node_has_field(sprite_sheet, "internalID") {
         let export_id = sprite
             .export_id
@@ -512,6 +562,166 @@ fn sprite_meta_data_to_yaml(
         metadata.insert_field("internalID", signed_node(export_id))?;
     }
     Ok(metadata)
+}
+
+fn write_sprite_bone_fields(
+    sprite_sheet: &mut UnityYamlNode,
+    sprite: &SpriteFacts,
+) -> Result<(), Box<dyn Error>> {
+    if sprite.bones.is_none()
+        || !importer_node_has_field(sprite_sheet, "bones")
+        || !importer_node_has_field(sprite_sheet, "spriteID")
+    {
+        return Ok(());
+    }
+    for (name, value) in sprite_bone_fields_to_yaml(sprite, sprite_sheet)? {
+        let Some(field) = yaml_mapping_field_mut(sprite_sheet, &name) else {
+            continue;
+        };
+        *field = value;
+    }
+    Ok(())
+}
+
+fn sprite_bone_fields_to_yaml(
+    sprite: &SpriteFacts,
+    target_layout: &UnityYamlNode,
+) -> Result<Vec<(String, UnityYamlNode)>, Box<dyn Error>> {
+    let Some(bones) = sprite.bones.as_deref() else {
+        return Ok(Vec::new());
+    };
+    if !importer_node_has_field(target_layout, "bones")
+        || !importer_node_has_field(target_layout, "spriteID")
+    {
+        return Ok(Vec::new());
+    }
+    let sprite_id = sprite
+        .sprite_id
+        .as_ref()
+        .ok_or_else(|| invalid_sprite_data("Sprite bone metadata has no planned SpriteID"))?;
+    let mut fields = vec![
+        ("bones".to_owned(), sprite_bones_to_yaml(bones)?),
+        ("spriteID".to_owned(), UnityYamlNode::string(sprite_id.clone())),
+    ];
+    if importer_node_has_field(target_layout, "vertices") {
+        fields.push((
+            "vertices".to_owned(),
+            sprite_bone_vertices_to_yaml(&sprite.bone_geometry.vertices)?,
+        ));
+    }
+    if importer_node_has_field(target_layout, "indices") {
+        fields.push((
+            "indices".to_owned(),
+            sprite_bone_indices_to_yaml(&sprite.bone_geometry.indices)?,
+        ));
+    }
+    // The frozen baseline still has a TODO for SpriteMetaData.Edges. Its default empty list is
+    // retained instead of inventing edge data from the triangulation.
+    if importer_node_has_field(target_layout, "edges") {
+        fields.push(("edges".to_owned(), empty_sprite_sequence()));
+    }
+    if importer_node_has_field(target_layout, "weights") {
+        fields.push((
+            "weights".to_owned(),
+            sprite_bone_weights_to_yaml(&sprite.bone_geometry.weights)?,
+        ));
+    }
+    Ok(fields)
+}
+
+fn sprite_bones_to_yaml(bones: &[SpriteBoneData]) -> Result<UnityYamlNode, Box<dyn Error>> {
+    let mut sequence = empty_sprite_sequence();
+    for bone in bones {
+        let mut node =
+            UnityYamlNode::mapping(crate::export::unity_yaml::UnityYamlMappingStyle::Block);
+        node.insert_field("name", UnityYamlNode::string(bone.name.clone()))?;
+        node.insert_field("position", vector3_node(bone.position)?)?;
+        node.insert_field("rotation", vector4_node(bone.rotation)?)?;
+        node.insert_field("length", float_node(bone.length))?;
+        node.insert_field("parentId", signed_node(i64::from(bone.parent_id)))?;
+        if let Some(color) = bone.color {
+            let mut color_node =
+                UnityYamlNode::mapping(crate::export::unity_yaml::UnityYamlMappingStyle::Flow);
+            for (name, value) in [
+                ("r", color[0]),
+                ("g", color[1]),
+                ("b", color[2]),
+                ("a", color[3]),
+            ] {
+                color_node.insert_field(
+                    name,
+                    UnityYamlNode::scalar(UnityYamlScalar::Unsigned(u64::from(value))),
+                )?;
+            }
+            node.insert_field("color", color_node)?;
+        }
+        if let Some(guid) = &bone.guid {
+            node.insert_field("guid", UnityYamlNode::string(guid.clone()))?;
+        }
+        sequence.push(node)?;
+    }
+    Ok(sequence)
+}
+
+fn sprite_bone_vertices_to_yaml(
+    vertices: &[[f32; 2]],
+) -> Result<UnityYamlNode, Box<dyn Error>> {
+    let mut sequence = empty_sprite_sequence();
+    for vertex in vertices {
+        sequence.push(sprite_point_node(*vertex)?)?;
+    }
+    Ok(sequence)
+}
+
+fn sprite_bone_indices_to_yaml(indices: &[i16]) -> Result<UnityYamlNode, Box<dyn Error>> {
+    let mut sequence = empty_sprite_sequence();
+    for index in indices {
+        sequence.push(signed_node(i64::from(*index)))?;
+    }
+    Ok(sequence)
+}
+
+fn sprite_bone_weights_to_yaml(
+    weights: &[BoneWeight4],
+) -> Result<UnityYamlNode, Box<dyn Error>> {
+    let mut sequence = empty_sprite_sequence();
+    for weight in weights {
+        let mut node =
+            UnityYamlNode::mapping(crate::export::unity_yaml::UnityYamlMappingStyle::Block);
+        for (index, value) in weight.weights.iter().enumerate() {
+            node.insert_field(format!("weight[{index}]"), float_node(*value))?;
+        }
+        for (index, value) in weight.indices.iter().enumerate() {
+            node.insert_field(format!("boneIndex[{index}]"), signed_node(i64::from(*value)))?;
+        }
+        sequence.push(node)?;
+    }
+    Ok(sequence)
+}
+
+fn vector3_node(vector: [f32; 3]) -> Result<UnityYamlNode, Box<dyn Error>> {
+    let mut node = UnityYamlNode::mapping(crate::export::unity_yaml::UnityYamlMappingStyle::Flow);
+    for (name, value) in [("x", vector[0]), ("y", vector[1]), ("z", vector[2])] {
+        node.insert_field(name, float_node(value))?;
+    }
+    Ok(node)
+}
+
+fn vector4_node(vector: [f32; 4]) -> Result<UnityYamlNode, Box<dyn Error>> {
+    let mut node = UnityYamlNode::mapping(crate::export::unity_yaml::UnityYamlMappingStyle::Flow);
+    for (name, value) in [
+        ("x", vector[0]),
+        ("y", vector[1]),
+        ("z", vector[2]),
+        ("w", vector[3]),
+    ] {
+        node.insert_field(name, float_node(value))?;
+    }
+    Ok(node)
+}
+
+fn empty_sprite_sequence() -> UnityYamlNode {
+    UnityYamlNode::sequence(crate::export::unity_yaml::UnityYamlSequenceStyle::Block)
 }
 
 fn sprite_export_id_for_ordinal(ordinal: usize) -> Result<i64, Box<dyn Error>> {
@@ -802,11 +1012,13 @@ fn read_sprite_texture_link<'a>(
     );
     let name = sprite_name(root)?;
     let settings_raw = sprite_u32(sprite_field(rd, "settingsRaw")?)?;
+    let pixels_to_units = sprite_f32(sprite_field(root, "m_PixelsToUnits")?)?;
     Some(SpriteTextureLink {
         facts: SpriteFacts {
             name: name.clone(),
             export_id: None,
             rect: coords.rect,
+            source_rect_size: [coords.rect[2], coords.rect[3]],
             texture_rect,
             name_matches_texture: name == texture_name,
             extrude: sprite_u32(sprite_field(root, "m_Extrude")?)?,
@@ -815,10 +1027,12 @@ fn read_sprite_texture_link<'a>(
             pivot: coords.pivot,
             has_border: layout_has_border,
             border: coords.border,
-            pixels_to_units: sprite_f32(sprite_field(root, "m_PixelsToUnits")?)?,
+            pixels_to_units,
             outline: Vec::new(),
             physics_shape: Vec::new(),
-            source_has_bones: sprite_field(root, "m_Bones").is_some(),
+            bones: None,
+            sprite_id: None,
+            bone_geometry: SpriteBoneGeometry::default(),
         },
         texture_file_id,
         texture_path_id,
@@ -826,11 +1040,254 @@ fn read_sprite_texture_link<'a>(
         outline_transform: SpriteOutlineTransform {
             rect_size: [coords.rect[2], coords.rect[3]],
             pivot: coords.pivot,
-            pixels_to_units: sprite_f32(sprite_field(root, "m_PixelsToUnits")?)?,
+            pixels_to_units,
             is_packed: sprite_settings_raw_is_packed(settings_raw),
             packing_rotation: sprite_settings_raw_packing_rotation(settings_raw),
         },
     })
+}
+
+fn sprite_importer_id(file_index: usize, path_id: i64) -> String {
+    // SpriteMetaDataExtensions uses Guid.NewGuid() here. A file/object identity pair provides
+    // the same valid 32-hex-digit identifier shape while keeping repeat exports stable.
+    format!("{:016x}{:016x}", file_index as u64, path_id as u64)
+}
+
+fn read_sprite_bones(
+    sprite: &SerializedValue,
+    pixels_to_units: f32,
+    source_rect_size: [f32; 2],
+) -> Result<Option<Vec<SpriteBoneData>>, Box<dyn Error>> {
+    let Some(value) = strict_sprite_field(sprite, "m_Bones")? else {
+        return Ok(None);
+    };
+    let SerializedValue::Array(values) = value else {
+        return Err(invalid_sprite_data(format!(
+            "Sprite m_Bones has kind {}, expected array",
+            sprite_value_kind(value)
+        )));
+    };
+    let mut bones = Vec::new();
+    bones
+        .try_reserve_exact(values.len())
+        .map_err(|_| invalid_sprite_data("could not allocate Sprite bone metadata"))?;
+    for (index, value) in values.iter().enumerate() {
+        let bone = read_sprite_bone(value).map_err(|error| {
+            invalid_sprite_data(format!("Sprite m_Bones[{index}] is invalid: {error}"))
+        })?;
+        let mut position = bone.position;
+        for component in &mut position {
+            *component *= pixels_to_units;
+        }
+        let length = bone.length * pixels_to_units;
+        if bone.parent_id == -1 {
+            position[0] += source_rect_size[0] / 2.0;
+            position[1] += source_rect_size[1] / 2.0;
+        }
+        bones.push(SpriteBoneData {
+            name: bone.name,
+            position,
+            rotation: bone.rotation,
+            length,
+            parent_id: bone.parent_id,
+            color: bone.color,
+            guid: bone.guid,
+        });
+    }
+    Ok(Some(bones))
+}
+
+struct UnscaledSpriteBone {
+    name: String,
+    position: [f32; 3],
+    rotation: [f32; 4],
+    length: f32,
+    parent_id: i32,
+    color: Option<[u8; 4]>,
+    guid: Option<String>,
+}
+
+fn read_sprite_bone(value: &SerializedValue) -> Result<UnscaledSpriteBone, Box<dyn Error>> {
+    let name = match strict_required_sprite_field(value, "name")? {
+        SerializedValue::StringBytes(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+        other => {
+            return Err(invalid_sprite_data(format!(
+                "SpriteBone.name has kind {}, expected string",
+                sprite_value_kind(other)
+            )))
+        }
+    };
+    let position = read_sprite_vector(value, "position", 3)?;
+    let rotation = read_sprite_vector(value, "rotation", 4)?;
+    let length = strict_f32_field(value, "length")?;
+    let parent_id = strict_i32_field(value, "parentId")?;
+    let color = strict_sprite_field(value, "color")?
+        .map(read_sprite_color32)
+        .transpose()?;
+    let guid = strict_sprite_field(value, "guid")?
+        .map(|value| match value {
+            SerializedValue::StringBytes(bytes) => {
+                Ok(String::from_utf8_lossy(bytes).into_owned())
+            }
+            other => Err(invalid_sprite_data(format!(
+                "SpriteBone.guid has kind {}, expected string",
+                sprite_value_kind(other)
+            ))),
+        })
+        .transpose()?;
+    Ok(UnscaledSpriteBone {
+        name,
+        position: [position[0], position[1], position[2]],
+        rotation: [rotation[0], rotation[1], rotation[2], rotation[3]],
+        length,
+        parent_id,
+        color,
+        guid,
+    })
+}
+
+fn read_sprite_vector(
+    value: &SerializedValue,
+    field: &str,
+    dimension: usize,
+) -> Result<Vec<f32>, Box<dyn Error>> {
+    let vector = strict_required_sprite_field(value, field)?;
+    let components: &[&str] = match dimension {
+        3 => &["x", "y", "z"],
+        4 => &["x", "y", "z", "w"],
+        _ => return Err(invalid_sprite_data("unsupported Sprite vector dimension")),
+    };
+    let mut result = Vec::with_capacity(dimension);
+    for component in components {
+        result.push(strict_f32_field(vector, component)?);
+    }
+    Ok(result)
+}
+
+fn read_sprite_color32(value: &SerializedValue) -> Result<[u8; 4], Box<dyn Error>> {
+    let mut channels = [0; 4];
+    for (index, name) in ["r", "g", "b", "a"].into_iter().enumerate() {
+        let channel = strict_required_sprite_field(value, name)?;
+        channels[index] = match channel {
+            SerializedValue::U8(value) => *value,
+            SerializedValue::I8(value) if *value >= 0 => *value as u8,
+            SerializedValue::U16(value) if *value <= u8::MAX as u16 => *value as u8,
+            SerializedValue::U32(value) if *value <= u32::from(u8::MAX) => *value as u8,
+            other => {
+                return Err(invalid_sprite_data(format!(
+                    "SpriteBone.color.{name} has kind {}, expected byte",
+                    sprite_value_kind(other)
+                )))
+            }
+        };
+    }
+    Ok(channels)
+}
+
+fn strict_sprite_field<'a>(
+    value: &'a SerializedValue,
+    name: &str,
+) -> Result<Option<&'a SerializedValue>, Box<dyn Error>> {
+    let scope = sprite_value_scope(value)?;
+    scope
+        .unique_field(name)
+        .map_err(|error| invalid_sprite_data(format!("could not read Sprite field {name}: {error}")))
+}
+
+fn strict_required_sprite_field<'a>(
+    value: &'a SerializedValue,
+    name: &str,
+) -> Result<&'a SerializedValue, Box<dyn Error>> {
+    strict_sprite_field(value, name)?
+        .ok_or_else(|| invalid_sprite_data(format!("Sprite data is missing field {name}")))
+}
+
+fn sprite_value_scope(value: &SerializedValue) -> Result<&SerializedValue, Box<dyn Error>> {
+    if !matches!(value, SerializedValue::Struct(_)) {
+        return Err(invalid_sprite_data(format!(
+            "expected Sprite struct, found {}",
+            sprite_value_kind(value)
+        )));
+    }
+    match value.unique_field("data") {
+        Ok(Some(data)) => Ok(data),
+        Ok(None) => Ok(value),
+        Err(error) => Err(invalid_sprite_data(format!(
+            "could not read Sprite data wrapper: {error}"
+        ))),
+    }
+}
+
+fn strict_f32_field(value: &SerializedValue, name: &str) -> Result<f32, Box<dyn Error>> {
+    let field = strict_required_sprite_field(value, name)?;
+    sprite_f32(field).ok_or_else(|| {
+        invalid_sprite_data(format!(
+            "Sprite field {name} has kind {}, expected float",
+            sprite_value_kind(field)
+        ))
+    })
+}
+
+fn strict_i32_field(value: &SerializedValue, name: &str) -> Result<i32, Box<dyn Error>> {
+    let field = strict_required_sprite_field(value, name)?;
+    match field {
+        SerializedValue::I8(value) => Ok(i32::from(*value)),
+        SerializedValue::I16(value) => Ok(i32::from(*value)),
+        SerializedValue::I32(value) => Ok(*value),
+        SerializedValue::U8(value) => Ok(i32::from(*value)),
+        SerializedValue::U16(value) => Ok(i32::from(*value)),
+        SerializedValue::U32(value) if *value <= i32::MAX as u32 => Ok(*value as i32),
+        other => Err(invalid_sprite_data(format!(
+            "Sprite field {name} has kind {}, expected 32-bit integer",
+            sprite_value_kind(other)
+        ))),
+    }
+}
+
+fn read_sprite_bone_geometry(
+    render_data: &SerializedValue,
+    version: UnityVersion,
+    endian: EndianType,
+    pixels_to_units: f32,
+    source_rect_size: [f32; 2],
+) -> Result<SpriteBoneGeometry, Box<dyn Error>> {
+    let mesh = MeshView::from_render_data_value(render_data, version, endian)
+        .map_err(|error| invalid_sprite_data(format!("could not read SpriteRenderData: {error}")))?;
+    let decoded = match mesh.vertex_data {
+        Some(vertex_data) => VertexDataBlob::from_parts(
+            vertex_data.channels,
+            vertex_data.streams,
+            vertex_data.data,
+            vertex_data.vertex_count,
+            version,
+            endian,
+        )
+        .and_then(|blob| blob.read_channels_for_mesh_merge())
+        .map_err(|error| invalid_sprite_data(format!("could not decode Sprite vertex data: {error}")))?,
+        None => None,
+    };
+    let mut geometry = SpriteBoneGeometry::default();
+    if let Some(decoded) = decoded {
+        geometry
+            .vertices
+            .try_reserve_exact(decoded.vertices.len())
+            .map_err(|_| invalid_sprite_data("could not allocate Sprite bone vertices"))?;
+        for vertex in decoded.vertices {
+            geometry.vertices.push([
+                vertex.x * pixels_to_units + source_rect_size[0] / 2.0,
+                vertex.y * pixels_to_units + source_rect_size[1] / 2.0,
+            ]);
+        }
+        geometry.weights = decoded.skin.unwrap_or_default();
+    }
+    geometry
+        .indices
+        .try_reserve_exact(mesh.index_buffer.len() / 2)
+        .map_err(|_| invalid_sprite_data("could not allocate Sprite bone indices"))?;
+    for pair in mesh.index_buffer.chunks_exact(2) {
+        geometry.indices.push(i16::from_le_bytes([pair[0], pair[1]]));
+    }
+    Ok(geometry)
 }
 
 /// Sprite render-data mesh type: bit 6 of the render-data `settingsRaw`, matching the
@@ -1180,15 +1637,18 @@ mod tests {
     use super::{
         apply_sprite_importer_decision, apply_sprite_sheet_metadata_to_importer,
         decide_sprite_importer, importer_node_has_field, propagate_asset_bundle_name,
-        read_sprite_physics_shape, read_sprite_texture_link, select_prefab_importer,
-        sprite_export_id_for_ordinal, truncate_execution_order, PrefabImporterBranch,
-        SpriteAlignment, SpriteFacts, SpriteImportMode, SpriteImporterDecision,
-        SpriteOutlineTransform, SPRITE_MESH_TYPE_FULL_RECT, TEXTURE_IMPORTER_TYPE_SPRITE,
+        read_sprite_bone_geometry, read_sprite_bones, read_sprite_physics_shape,
+        read_sprite_texture_link, select_prefab_importer, sprite_export_id_for_ordinal,
+        truncate_execution_order, PrefabImporterBranch, SpriteAlignment, SpriteFacts,
+        SpriteImportMode, SpriteImporterDecision, SpriteOutlineTransform, SPRITE_MESH_TYPE_FULL_RECT,
+        TEXTURE_IMPORTER_TYPE_SPRITE,
     };
     use super::{plugin_importer, texture_importer};
     use crate::export::unity_yaml::{UnityYamlNode, UnityYamlNodeKind, UnityYamlScalar};
-    use crate::resources::vertex_data_blob::UnityVersion;
-    use crate::serialized_file::object::SerializedValue;
+    use crate::resources::vertex_data_blob::{
+        ChannelInfo, EndianType, StreamInfo, UnityVersion, VertexDataBlob,
+    };
+    use crate::serialized_file::object::{SerializedFieldValue, SerializedValue};
 
     #[test]
     fn bundle_name_propagates_only_with_field_and_non_null_source() {
@@ -1235,6 +1695,7 @@ mod tests {
                 name: if matching { "texture" } else { "sprite" }.to_owned(),
                 export_id: None,
                 rect: [1.0, 2.0, 32.0, 16.0],
+                source_rect_size: [32.0, 16.0],
                 texture_rect: if matching {
                     [1.0, 2.0, 32.0, 16.0]
                 } else {
@@ -1250,7 +1711,9 @@ mod tests {
                 pixels_to_units: 50.0,
                 outline: Vec::new(),
                 physics_shape: Vec::new(),
-                source_has_bones: false,
+                bones: None,
+                sprite_id: None,
+                bone_geometry: super::SpriteBoneGeometry::default(),
             }
         }
 
@@ -1430,6 +1893,7 @@ mod tests {
                 name: "menu".to_owned(),
                 export_id: None,
                 rect: [0.0, 0.0, 1071.0, 755.0],
+                source_rect_size: [1071.0, 755.0],
                 texture_rect: [0.0, 0.0, 1071.0, 755.0],
                 name_matches_texture: true,
                 extrude: 1,
@@ -1441,7 +1905,9 @@ mod tests {
                 pixels_to_units: 100.0,
                 outline: Vec::new(),
                 physics_shape: Vec::new(),
-                source_has_bones: false,
+                bones: None,
+                sprite_id: None,
+                bone_geometry: super::SpriteBoneGeometry::default(),
             }
         );
         // A different texture name only flips the match flag.
@@ -1590,13 +2056,25 @@ mod tests {
     }
 
     #[test]
-    fn sprite_sheet_outline_is_written_for_single_and_bone_metadata_stays_explicit() {
+    fn sprite_sheet_outline_and_bone_geometry_are_written_for_single_and_multiple_modes() {
         use crate::export::unity_yaml::{UnityYamlMappingStyle, UnityYamlSequenceStyle};
+
+        fn field<'a>(node: &'a UnityYamlNode, name: &str) -> &'a UnityYamlNode {
+            let UnityYamlNodeKind::Mapping { entries, .. } = &node.kind else {
+                panic!("expected a mapping while reading {name}");
+            };
+            entries
+                .iter()
+                .find(|(key, _)| super::yaml_key_is(key, name))
+                .map(|(_, value)| value)
+                .unwrap_or_else(|| panic!("missing field {name}"))
+        }
 
         let sprite = SpriteFacts {
             name: "texture".to_owned(),
             export_id: Some(21_300_000),
             rect: [0.0, 0.0, 8.0, 8.0],
+            source_rect_size: [8.0, 8.0],
             texture_rect: [0.0, 0.0, 8.0, 8.0],
             name_matches_texture: true,
             extrude: 1,
@@ -1608,7 +2086,9 @@ mod tests {
             pixels_to_units: 100.0,
             outline: vec![vec![[1.25, -2.0], [3.0, 4.0]]],
             physics_shape: vec![vec![[0.0, 0.0], [1.0, 2.0]]],
-            source_has_bones: false,
+            bones: None,
+            sprite_id: None,
+            bone_geometry: super::SpriteBoneGeometry::default(),
         };
         let mut sprite_sheet = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
         sprite_sheet
@@ -1632,7 +2112,27 @@ mod tests {
         sprite_sheet
             .insert_field("spriteID", UnityYamlNode::string(String::new()))
             .unwrap();
+        for name in ["vertices", "indices", "edges", "weights"] {
+            sprite_sheet
+                .insert_field(
+                    name,
+                    UnityYamlNode::sequence(UnityYamlSequenceStyle::Block),
+                )
+                .unwrap();
+        }
+        sprite_sheet
+            .insert_field(
+                "sprites",
+                UnityYamlNode::sequence(UnityYamlSequenceStyle::Block),
+            )
+            .unwrap();
         let mut importer = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+        importer
+            .insert_field(
+                "fileIDToRecycleName",
+                UnityYamlNode::mapping(UnityYamlMappingStyle::Block),
+            )
+            .unwrap();
         importer.insert_field("spriteSheet", sprite_sheet).unwrap();
 
         let single = decide_sprite_importer(std::slice::from_ref(&sprite), true, true, true);
@@ -1688,23 +2188,303 @@ mod tests {
         assert_eq!(physics_points.len(), 2);
 
         let mut bones_sprite = sprite.clone();
-        bones_sprite.source_has_bones = true;
+        bones_sprite.bones = Some(vec![super::SpriteBoneData {
+            name: "root".to_owned(),
+            position: [1.0, 2.0, 3.0],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            length: 8.0,
+            parent_id: -1,
+            color: Some([1, 2, 3, 4]),
+            guid: Some("00112233445566778899aabbccddeeff".to_owned()),
+        }]);
+        bones_sprite.sprite_id = Some("00000000000000000000000000000001".to_owned());
+        bones_sprite.bone_geometry = super::SpriteBoneGeometry {
+            vertices: vec![[6.0, 7.0]],
+            indices: vec![0, -1],
+            weights: vec![crate::numerics::BoneWeight4 {
+                weights: [0.5, 0.25, 0.25, 0.0],
+                indices: [0, 1, 2, 0],
+            }],
+        };
         let bones_decision =
             decide_sprite_importer(std::slice::from_ref(&bones_sprite), true, true, true);
         assert!(apply_sprite_sheet_metadata_to_importer(
             &mut importer,
-            &[bones_sprite],
+            std::slice::from_ref(&bones_sprite),
             &bones_decision,
         )
-        .is_err());
+        .is_ok());
 
-        let mut multiple_sprite = sprite.clone();
+        let sheet = field(&importer, "spriteSheet");
+        assert!(matches!(
+            &field(sheet, "spriteID").kind,
+            UnityYamlNodeKind::Scalar(UnityYamlScalar::String(value))
+                if value == "00000000000000000000000000000001"
+        ));
+        let UnityYamlNodeKind::Sequence { items: bones, .. } = &field(sheet, "bones").kind else {
+            panic!("SpriteSheet.bones must be a sequence");
+        };
+        assert_eq!(bones.len(), 1);
+        assert!(matches!(
+            &field(&bones[0], "name").kind,
+            UnityYamlNodeKind::Scalar(UnityYamlScalar::String(value)) if value == "root"
+        ));
+        assert!(matches!(
+            &field(&bones[0], "parentId").kind,
+            UnityYamlNodeKind::Scalar(UnityYamlScalar::Signed(-1))
+        ));
+        assert!(matches!(
+            &field(&bones[0], "guid").kind,
+            UnityYamlNodeKind::Scalar(UnityYamlScalar::String(value))
+                if value == "00112233445566778899aabbccddeeff"
+        ));
+        let UnityYamlNodeKind::Sequence { items: vertices, .. } =
+            &field(sheet, "vertices").kind
+        else {
+            panic!("SpriteSheet.vertices must be a sequence");
+        };
+        assert!(matches!(
+            &field(&vertices[0], "x").kind,
+            UnityYamlNodeKind::Scalar(UnityYamlScalar::Float32(value)) if *value == 6.0
+        ));
+        let UnityYamlNodeKind::Sequence { items: indices, .. } =
+            &field(sheet, "indices").kind
+        else {
+            panic!("SpriteSheet.indices must be a sequence");
+        };
+        assert!(matches!(
+            &indices[1].kind,
+            UnityYamlNodeKind::Scalar(UnityYamlScalar::Signed(-1))
+        ));
+        let UnityYamlNodeKind::Sequence { items: edges, .. } = &field(sheet, "edges").kind else {
+            panic!("SpriteSheet.edges must be a sequence");
+        };
+        assert!(edges.is_empty());
+        let UnityYamlNodeKind::Sequence { items: weights, .. } =
+            &field(sheet, "weights").kind
+        else {
+            panic!("SpriteSheet.weights must be a sequence");
+        };
+        assert_eq!(weights.len(), 1);
+        assert!(matches!(
+            &field(&weights[0], "weight[0]").kind,
+            UnityYamlNodeKind::Scalar(UnityYamlScalar::Float32(value)) if *value == 0.5
+        ));
+
+        let mut multiple_sprite = bones_sprite;
         multiple_sprite.name_matches_texture = false;
-        let multiple = decide_sprite_importer(&[multiple_sprite], true, true, true);
+        let multiple = decide_sprite_importer(&[multiple_sprite.clone()], true, true, true);
         assert_eq!(multiple.mode, SpriteImportMode::Multiple);
-        assert!(
-            apply_sprite_sheet_metadata_to_importer(&mut importer, &[sprite], &multiple,).is_err()
+        apply_sprite_sheet_metadata_to_importer(&mut importer, &[multiple_sprite], &multiple)
+            .unwrap();
+        let sheet = field(&importer, "spriteSheet");
+        let UnityYamlNodeKind::Sequence { items, .. } = &field(sheet, "sprites").kind else {
+            panic!("SpriteSheet.sprites must be a sequence");
+        };
+        assert_eq!(items.len(), 1);
+        assert!(matches!(
+            &field(&items[0], "spriteID").kind,
+            UnityYamlNodeKind::Scalar(UnityYamlScalar::String(value))
+                if value == "00000000000000000000000000000001"
+        ));
+        assert!(matches!(
+            &field(&items[0], "indices").kind,
+            UnityYamlNodeKind::Sequence { items, .. } if items.len() == 2
+        ));
+    }
+
+    #[test]
+    fn sprite_bone_positions_and_lengths_follow_source_scaling() {
+        fn field(name: &str, value: SerializedValue) -> SerializedFieldValue {
+            SerializedFieldValue {
+                name: name.to_owned(),
+                value,
+            }
+        }
+
+        fn vector(fields: &[(&str, f32)]) -> SerializedValue {
+            SerializedValue::Struct(
+                fields
+                    .iter()
+                    .map(|(name, value)| field(name, SerializedValue::F32(*value)))
+                    .collect(),
+            )
+        }
+
+        fn bone(
+            name: &str,
+            parent_id: i32,
+            position: [f32; 3],
+            length: f32,
+        ) -> SerializedValue {
+            SerializedValue::Struct(vec![
+                field("name", SerializedValue::StringBytes(name.as_bytes().to_vec())),
+                field(
+                    "position",
+                    vector(&[("x", position[0]), ("y", position[1]), ("z", position[2])]),
+                ),
+                field(
+                    "rotation",
+                    vector(&[("x", 0.0), ("y", 0.5), ("z", 0.0), ("w", 1.0)]),
+                ),
+                field("length", SerializedValue::F32(length)),
+                field("parentId", SerializedValue::I32(parent_id)),
+            ])
+        }
+
+        let sprite = SerializedValue::Struct(vec![field(
+            "m_Bones",
+            SerializedValue::Array(vec![
+                {
+                    let mut root = match bone("root", -1, [1.0, 2.0, 3.0], 4.0) {
+                        SerializedValue::Struct(fields) => fields,
+                        _ => unreachable!(),
+                    };
+                    root.push(field(
+                        "color",
+                        SerializedValue::Struct(vec![
+                            field("r", SerializedValue::U8(10)),
+                            field("g", SerializedValue::U8(20)),
+                            field("b", SerializedValue::U8(30)),
+                            field("a", SerializedValue::U8(40)),
+                        ]),
+                    ));
+                    root.push(field(
+                        "guid",
+                        SerializedValue::StringBytes(b"00112233445566778899aabbccddeeff".to_vec()),
+                    ));
+                    SerializedValue::Struct(root)
+                },
+                bone("child", 0, [1.0, -2.0, 3.0], 5.0),
+            ]),
+        )]);
+
+        let bones = read_sprite_bones(&sprite, 2.0, [10.0, 6.0])
+            .unwrap()
+            .expect("m_Bones field is present");
+        assert_eq!(bones.len(), 2);
+        assert_eq!(bones[0].position, [7.0, 7.0, 6.0]);
+        assert_eq!(bones[0].length, 8.0);
+        assert_eq!(bones[0].color, Some([10, 20, 30, 40]));
+        assert_eq!(
+            bones[0].guid.as_deref(),
+            Some("00112233445566778899aabbccddeeff")
         );
+        assert_eq!(bones[1].position, [2.0, -4.0, 6.0]);
+        assert_eq!(bones[1].length, 10.0);
+
+        let malformed = SerializedValue::Struct(vec![field(
+            "m_Bones",
+            SerializedValue::Array(vec![SerializedValue::Struct(Vec::new())]),
+        )]);
+        assert!(read_sprite_bones(&malformed, 1.0, [0.0; 2]).is_err());
+    }
+
+    #[test]
+    fn sprite_bone_geometry_decodes_positions_skin_and_little_endian_indices() {
+        fn field(name: &str, value: SerializedValue) -> SerializedFieldValue {
+            SerializedFieldValue {
+                name: name.to_owned(),
+                value,
+            }
+        }
+
+        fn channel_value(channel: ChannelInfo) -> SerializedValue {
+            SerializedValue::Struct(vec![
+                field("dimension", SerializedValue::U8(channel.dimension)),
+                field("offset", SerializedValue::U8(channel.offset)),
+                field("format", SerializedValue::U8(channel.format)),
+                field("stream", SerializedValue::U8(channel.stream)),
+            ])
+        }
+
+        let version = UnityVersion::parse("2019.4.0f1").unwrap();
+        let mut channels = vec![ChannelInfo::default(); 14];
+        channels[0] = ChannelInfo {
+            dimension: 3,
+            offset: 0,
+            format: 0,
+            stream: 0,
+        };
+        channels[12] = ChannelInfo {
+            dimension: 4,
+            offset: 12,
+            format: 0,
+            stream: 0,
+        };
+        channels[13] = ChannelInfo {
+            dimension: 4,
+            offset: 28,
+            format: 11,
+            stream: 0,
+        };
+        let stream = StreamInfo {
+            channel_mask: (1 << 0) | (1 << 12) | (1 << 13),
+            offset: 0,
+            stride: 44,
+            stride_is_u32: false,
+            divider_op: 0,
+            frequency: 0,
+        };
+        let mut data = Vec::new();
+        for (position, weights, indices) in [
+            ([1.0f32, 2.0, 0.0], [0.5f32, 0.25, 0.25, 0.0], [0i32, 1, 2, 0]),
+            ([4.0f32, 5.0, 0.0], [1.0f32, 0.0, 0.0, 0.0], [3i32, 0, 0, 0]),
+        ] {
+            for value in position.into_iter().chain(weights) {
+                data.extend_from_slice(&value.to_le_bytes());
+            }
+            for value in indices {
+                data.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        let blob = VertexDataBlob::from_parts(
+            Some(channels.clone()),
+            Some(vec![stream]),
+            data,
+            2,
+            version,
+            EndianType::Little,
+        )
+        .unwrap();
+        let serialized_channels = channels.into_iter().map(channel_value).collect();
+        let serialized_stream = SerializedValue::Struct(vec![
+            field("channelMask", SerializedValue::U32(stream.channel_mask)),
+            field("offset", SerializedValue::U32(stream.offset)),
+            field("stride", SerializedValue::U8(stream.stride as u8)),
+            field("dividerOp", SerializedValue::U8(stream.divider_op)),
+            field("frequency", SerializedValue::U8(stream.frequency)),
+        ]);
+        let render_data = SerializedValue::Struct(vec![
+            field(
+                "m_VertexData",
+                SerializedValue::Struct(vec![
+                    field("m_VertexCount", SerializedValue::U32(2)),
+                    field("m_Channels", SerializedValue::Array(serialized_channels)),
+                    field("m_Streams", SerializedValue::Array(vec![serialized_stream])),
+                    field("m_DataSize", SerializedValue::Bytes(blob.data)),
+                ]),
+            ),
+            field(
+                "m_IndexBuffer",
+                SerializedValue::Bytes(vec![0, 0, 1, 0, 0xff, 0xff, 0x7f]),
+            ),
+        ]);
+
+        let geometry = read_sprite_bone_geometry(
+            &render_data,
+            version,
+            EndianType::Little,
+            2.0,
+            [10.0, 6.0],
+        )
+        .unwrap();
+        assert_eq!(geometry.vertices, vec![[7.0, 7.0], [13.0, 13.0]]);
+        assert_eq!(geometry.indices, vec![0, 1, -1]);
+        assert_eq!(geometry.weights.len(), 2);
+        assert_eq!(geometry.weights[0].weights, [0.5, 0.25, 0.25, 0.0]);
+        assert_eq!(geometry.weights[0].indices, [0, 1, 2, 0]);
+        assert_eq!(geometry.weights[1].indices, [3, 0, 0, 0]);
     }
 
     #[test]
@@ -1727,6 +2507,7 @@ mod tests {
                 name: name.to_owned(),
                 export_id: Some(export_id),
                 rect,
+                source_rect_size: [rect[2], rect[3]],
                 texture_rect: rect,
                 name_matches_texture: false,
                 extrude: 1,
@@ -1738,7 +2519,9 @@ mod tests {
                 pixels_to_units: 100.0,
                 outline: vec![vec![[1.0, 2.0], [3.0, 4.0]]],
                 physics_shape: vec![vec![[5.0, 6.0], [7.0, 8.0]]],
-                source_has_bones: false,
+                bones: None,
+                sprite_id: None,
+                bone_geometry: super::SpriteBoneGeometry::default(),
             }
         }
 
