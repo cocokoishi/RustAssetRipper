@@ -1330,8 +1330,7 @@
                         "_ATexture"
                     },
                 );
-                let (texture_file_id, texture_path_id) =
-                    second_texture_pointer.unwrap_or_default();
+                let (texture_file_id, texture_path_id) = second_texture_pointer.unwrap_or_default();
                 put_i32_le(&mut payload, texture_file_id);
                 put_i64_le(&mut payload, texture_path_id);
                 put_f32_le(&mut payload, 2.0);
