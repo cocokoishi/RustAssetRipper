@@ -1,5 +1,12 @@
 # Validation log
 
+## 2026-10-12 path_id_map file order fixed, sprite importer gap recorded
+
+- `build_path_id_map` now iterates `source_collection_file_indices` (canonical source order) instead of workspace insertion order. 玉京烟霞 r10 map byte-exact (66,977/66,977); r10 full audit profile identical to r8 with one fewer additional difference (manifest now matches); 松月竹庭 r17 zero-doc-diff regression (the single additional difference is the manifest fix landing). Full suite 1,703/1,703, clippy `-D warnings` green, fmt clean on the touched file.
+- New scoped finding DIFF-SPRITE-IMPORTER-FACTS-001: 5 玉京烟霞 UI-sprite `.metas` differ in textureType/meshType/alignment because production never calls `decide_sprite_importer` (test-only) and discovers no per-texture sprites. Only 玉京烟霞 carries class-213 objects; pixel bytes unaffected. Fix scoped for its own round.
+- Disk recovered to ~11GB via policy-respected superseded-replay cleanup (ancient 青岚山河卷 r1-r13/r24/r25, 云栖仙府 r1/r2/r4/r5/r6, 青岚古境 r1/r7, 烟雨长亭 r2/r3/r4; 玉京烟霞 r4/r5, failed r6/r7 partials, and all evidence baselines preserved).
+- No Unity runtime claim; product unaccepted.
+
 ## 2026-10-12 prefab fix breadth closed plus path_id_map parity sweep
 
 - 青岚山河卷 `Text.prefab.meta` matches source exactly modulo guid/time — including empty assetBundleName on both sides, which validates the stamp-mirror else-branch (non-Container roots keep the serialized field).

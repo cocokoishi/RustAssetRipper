@@ -41,15 +41,27 @@ pub(super) fn workspace_project_version(
 }
 
 /// Build the `PathIdMapExporter` input in source collection and object-table order.
+///
+/// Files follow `source_collection_file_indices` (root standalone order, then depth-first
+/// container order), matching `FetchAssetCollections`, not workspace insertion order: on
+/// multi-CAB inputs the container directory can list a shared-assets file first.
 pub(super) fn build_path_id_map(
     workspace: &SerializedFileWorkspace,
     objects: &ObjectWorkspace,
 ) -> Result<SerializedGameInfo, Box<dyn Error>> {
+    let ordered = workspace
+        .source_collection_file_indices()
+        .map_err(|error| {
+            invalid_project(format!("PathIdMap needs source collection order: {error}"))
+        })?;
     let mut files = Vec::new();
     files
-        .try_reserve_exact(workspace.files().len())
+        .try_reserve_exact(ordered.len())
         .map_err(|_| invalid_project("could not reserve PathIdMap serialized-file records"))?;
-    for (file_index, file) in workspace.files().iter().enumerate() {
+    for file_index in ordered {
+        let file = workspace.files().get(file_index).ok_or_else(|| {
+            invalid_project("PathIdMap source collection order points outside files")
+        })?;
         let collection_name = crate::io::special_names::fix_file_identifier(&file.file_name);
         let objects_in_file = objects.objects_for_file(file_index);
         let mut assets = Vec::new();

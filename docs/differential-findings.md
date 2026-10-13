@@ -1,8 +1,12 @@
 # Source behavior and differential findings
 
-## DIFF-PATH-ID-MAP-FILE-ORDER-001 — multi-CAB file order differs, sets exact (deferred)
+## DIFF-SPRITE-IMPORTER-FACTS-001 — production never consumes sprite facts (open)
 
-玉京烟霞 (2 SerializedFiles) `AuxiliaryFiles/path_id_map.json`: per-file asset sets and within-file PathID sequences match exactly (552/552, 4/4), but file order differs (source lists `sharedassets` first; Rust lists the main file first). Single-file samples are byte-exact (烟雨长亭 49,002; 青岚古境 80,844; 松月竹庭 15,752; 云栖仙府 51,342). The file is Unity-ignored informational output; the order likely follows source bundle-load order versus workspace mount order, but the rule is unproven and 玉京烟霞 validation is disk-blocked. No code change; revisit only with a cheap validation path.
+玉京烟霞 `menu.png` (+4 VRC UI textures) `.meta` differs: `textureType` 8 vs 0, `spriteMeshType` 1 vs 0, `alignment` 9 vs 0 (both sides agree `spriteMode` 1). Rust takes the no-sprites branch because production never calls `decide_sprite_importer` (test-only) and never discovers per-texture sprites; the versioned importer builders receive default sprite fields. Source `TextureExportCollection.AddSprites` reads collection sprites (single path: Custom alignment, sprite mesh type, forced Sprite texture type). Only 玉京烟霞 carries class-213 Sprite objects among the samples; pixel bytes are unaffected (opaque proofs hold). Impact is Unity sprite-import behavior for affected textures. Fix needs sprite discovery/association plus threading through the texture route; scoped for its own round with real-sample validation.
+
+## DIFF-PATH-ID-MAP-FILE-ORDER-001 — multi-CAB file order fixed via source collection order
+
+玉京烟霞 (2 SerializedFiles) `AuxiliaryFiles/path_id_map.json`: per-file asset sets and within-file PathID sequences matched, but file order differed (source lists `sharedassets` first; Rust listed the main file first). UnityFS directory order (`unityfs_inventory`: sharedassets index 0, main index 1) is the source rule, and the workspace already tracks it as `source_collection_file_indices` (used by scene/prefab processing). `build_path_id_map` now iterates that canonical order instead of workspace insertion order. 玉京烟霞 r10 map is byte-exact (66,977/66,977); 松月竹庭 r17 zero-diff regression; full suite green. Single-file samples are unaffected by construction.
 
 ## DIFF-EDITOR-RESOURCE-86-121-001 — editor layout omitted
 
