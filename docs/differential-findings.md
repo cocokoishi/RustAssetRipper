@@ -1108,7 +1108,7 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Root cause | One real deviation found and fixed: `Bitmap::unpack_normal` kept red/alpha in place and only recomputed blue. The old synthetic-only tests encoded the bug (e.g. `(128,128,0,255)` expected `(128,128,254,255)`); the reference produces `(255,128,127,128)`. Two stale expectations corrected alongside the fix. |
 | Rust change | Swapped red/alpha lanes in `Bitmap::unpack_normal` (src/resources/texture_converter.rs); fixture src/resources/cubemap_convert_fixture.txt; test live_cubemap_conversion_matches_the_reference_runtime. |
 | Regression evidence | All three probed conversions reproduce every output pixel plus dimensions; full suite 1384 plus 65 pass with warnings-denied Clippy. |
-| Remaining comparison | Live-sprite/atlas conversion and Unity-produced textures stay with their own rows. The versioned Rust CRN path is now present for Texture2D/Cubemap, but valid CRN pixel parity remains unverified (RES-TEXTURE-CRUNCH-001). |
+| Remaining comparison | Live-sprite/atlas conversion and Unity-produced textures stay with their own rows. The low-level Rust decoder matches six independent C++-oracle hashes, but production Texture2D/Cubemap conversion parity remains unverified (RES-TEXTURE-CRUNCH-001). |
 
 ## DIFF-SPRITE-ATLAS-001 - live-sprite atlas coordinates
 
