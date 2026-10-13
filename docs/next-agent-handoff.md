@@ -2,10 +2,11 @@
 
 ## Latest current checkpoint — 2026-10-13
 
-- Phase 1 remains open. Commit 1dd286c adds the Sprite bone importer path; synthetic regressions cover source scaling, inline vertex/skin/index decoding, and Single/Multiple metadata output.
-- GitHub Actions run 38460712103 passed Linux and Windows workspace tests, warnings-denied Clippy, release builds, changed-line formatting, and public-repository hygiene. Local Cargo tests/builds were not run.
-- The latest implementation uses the frozen source direct inline VertexDataBlob path. Investigate external streamed geometry separately, then continue the remaining Phase 1 closure inventory. The source Edges TODO remains empty; Unity Editor import/runtime and project-output audits were not run.
-- Work remains in the isolated feature branch codex/mesh-partial-channel-20261013. No user input was opened. Use GitHub Actions for Cargo validation.
+- Phase 1 remains open. Commit 0cd4edb adds streamed Sprite bone geometry: the importer now reuses the already-resolved external vertex byte range and errors if a set stream is unresolved. Synthetic coverage verifies streamed and inline geometry equality.
+- GitHub Actions run 38463426666 passed Linux and Windows workspace tests, warnings-denied Clippy, release builds, changed-line formatting, and public-repository hygiene. Linux: 1,730 library tests and 127 CLI tests passed (1 library test ignored); Windows: 1,732 library tests and 127 CLI tests passed (1 library test ignored). Local Cargo tests/builds were not run.
+- The source SetBoneGeometry path reads inline VertexData directly, so the streamed behavior is a generic Rust extension and source-output/Unity validation remains open. Source Edges still has a TODO. No user input or project export was run.
+- The completion inventory report is `target/feature-parity-report-20261013.json`: 391/391 rows recognized, 24 non-verified, zero duplicates/malformed rows, `phase1_gate=OPEN`. The source scan found no `todo!()` or `unimplemented!()` macros; ordinary fallbacks and full feature coverage still need audit.
+- Work remains in isolated branch `codex/mesh-partial-channel-20261013`. Continue the §25 silent-loss/fallback audit by tracing candidate `continue` and default paths back through source and inputs; change code only after reproducing a concrete loss. Use GitHub Actions for Cargo validation. Unity Editor import/runtime was not run.
 
 
 ## Current checkpoint — 2026-10-13 active
