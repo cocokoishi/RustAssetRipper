@@ -749,6 +749,106 @@ fn unityraw_nested_webdata_mounts_file_backed_through_both_path_apis() {
     std::fs::remove_dir(&directory).expect("remove nested-container fixture directory");
 }
 
+fn assert_mixed_nested_resources(
+    filesystem: &VirtualFileSystem,
+    resources: &[MountedResourceFile],
+    destination: &str,
+) {
+    let expected_entries = [("leaf.bin", b"leaf".as_slice()), ("deep/item.bin", b"item")];
+    assert_eq!(resources.len(), expected_entries.len());
+    for (index, (relative, bytes)) in expected_entries.iter().enumerate() {
+        let resource = &resources[index];
+        let output = format!("{destination}/inner.raw/nested.webdata/{relative}");
+        assert_eq!(resource.name, *relative);
+        assert_eq!(resource.container_bundle_index, 2);
+        assert_eq!(resource.resource_index, index);
+        assert_eq!(resource.virtual_path, output);
+        assert_eq!(
+            filesystem.open_file(&output).unwrap().stream_type(),
+            crate::io::stream::SmartStreamType::File
+        );
+        assert_eq!(
+            filesystem.read_all_bytes(&output, bytes.len()).unwrap(),
+            *bytes
+        );
+    }
+}
+
+#[test]
+fn mixed_nested_containers_preserve_leaf_files_through_both_path_apis() {
+    let webdata = webdata_fixture(&[("leaf.bin", b"leaf"), ("deep/item.bin", b"item")]);
+    let inner_raw = unityraw_fixture("nested.webdata", &webdata);
+    let input = unityraw_fixture("inner.raw", &inner_raw);
+
+    let directory = unique_temp_file_path("dir");
+    std::fs::create_dir(&directory).expect("create mixed-container fixture directory");
+    let path = directory.join("raw_raw_webdata.bin");
+    std::fs::write(&path, input).expect("write three-level mixed-container fixture");
+
+    let mut path_filesystem = VirtualFileSystem::new();
+    let path_report = SchemeReader::mount_path(
+        &path,
+        &mut path_filesystem,
+        Some("/mixed-path"),
+        SchemeReaderLimits::default(),
+        ContainerMountLimits::default(),
+    )
+    .expect("mount three-level mixed containers by path");
+    assert_eq!(path_report.mounted_entries, 2);
+    assert!(path_report.failed_entries.is_empty());
+    assert_eq!(
+        path_report.container_scopes,
+        [
+            "/mixed-path",
+            "/mixed-path/inner.raw",
+            "/mixed-path/inner.raw/nested.webdata"
+        ]
+    );
+    assert_eq!(path_report.container_bundles.len(), 3);
+    assert_eq!(
+        path_report.container_bundles[1].parent_bundle_index,
+        Some(0)
+    );
+    assert_eq!(
+        path_report.container_bundles[2].parent_bundle_index,
+        Some(1)
+    );
+    assert_eq!(path_report.container_bundles[2].parent_entry_index, Some(0));
+    assert_mixed_nested_resources(&path_filesystem, &path_report.resource_files, "/mixed-path");
+
+    let mut batch_filesystem = VirtualFileSystem::new();
+    let inputs = [PathMountInput {
+        path: path.clone(),
+        destination_root: Some("/mixed-batch".to_owned()),
+    }];
+    let batch_report = SchemeReader::mount_paths(
+        &inputs,
+        &mut batch_filesystem,
+        SchemeReaderLimits::default(),
+        ContainerMountLimits::default(),
+        BatchMountLimits::default(),
+    )
+    .expect("mount three-level mixed containers by batch path");
+    assert_eq!(batch_report.completed_inputs, 1);
+    assert_eq!(batch_report.mounted_entries, 2);
+    let tree = &batch_report.container_trees[0];
+    assert!(tree.failed_entries.is_empty());
+    assert_eq!(
+        tree.container_scopes,
+        [
+            "/mixed-batch",
+            "/mixed-batch/inner.raw",
+            "/mixed-batch/inner.raw/nested.webdata"
+        ]
+    );
+    assert_mixed_nested_resources(&batch_filesystem, &tree.resource_files, "/mixed-batch");
+
+    drop(batch_filesystem);
+    drop(path_filesystem);
+    std::fs::remove_file(&path).expect("release mixed-container source before cleanup");
+    std::fs::remove_dir(&directory).expect("remove mixed-container fixture directory");
+}
+
 /// Single-path import against reference-written bytes.
 ///
 /// The WebData containers below were written by the frozen
