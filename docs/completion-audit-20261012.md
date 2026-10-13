@@ -2,6 +2,10 @@
 
 Starting HEAD: `6c45a40136cb0a0e1274cbf69c9fd6c50cf6f2de`. GOAL §25 conclusion: **NOT COMPLETE**.
 
+## Latest checkpoint — PrefabImporter fix pushed
+
+Tooling changes are committed/pushed as387e107. Product class86/121 editor-layout and generated-only native-name corrections are committed/pushed as `ff865c2` with monotonicity replays (松月竹庭 r15, 青岚古境 r8, 云栖仙府 r7, 青岚山河卷 r26) plus first 玉京烟霞 three-way audit (r8: class121 paired, class124 exact). The PrefabImporter version/bundle-name defect is fixed and pushed as `dc959fe` (烟雨长亭 r7 + 松月竹庭 r16 prefab metas match source; all prefab-bearing samples replayed). `Packages/manifest.json` is byte-exact since the CRLF fix pushed as `39b5367` (烟雨长亭 r8). Goal was resumed by the user after the pause; no product task remains running. Detailed commands/results/resume order are in latest validation-log and next-agent-handoff. Tables below retain their earlier bounded audit scopes, not a final acceptance claim.
+
 ## Findings affecting the next action
 
 - The frozen Web API successfully exported 玉京烟霞/烟雨长亭. Missing CLI was a local tooling limitation; `tools/export-reference-web.ps1` resolves it without changing source or adding Rust runtime dependencies.
