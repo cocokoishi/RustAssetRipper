@@ -13,6 +13,7 @@ from pathlib import Path
 
 HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 ZERO_SHA = "0" * 40
+INCLUDED_TEST_FRAGMENT = re.compile(r"^src/main_tests_[0-9]+\.rs$")
 
 
 def git(*args: str) -> bytes:
@@ -73,6 +74,34 @@ def format_changes_touch_changed_lines(
     return False
 
 
+def format_source(path: str, source: list[str]) -> list[str] | None:
+    # These files are included at module scope and carry the parent's four-space
+    # indentation. Format them inside a temporary module so rustfmt sees that scope.
+    wrapped = INCLUDED_TEST_FRAGMENT.fullmatch(path) is not None
+    source_text = "".join(source)
+    prefix = "mod __format_context {\n" if wrapped else ""
+    suffix = "}\n" if wrapped else ""
+    formatted = subprocess.run(
+        ["rustfmt", "--edition", "2021", "--emit", "stdout"],
+        input=(prefix + source_text + suffix).encode("utf-8"),
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if formatted.returncode != 0:
+        return None
+    lines = formatted.stdout.decode("utf-8").splitlines(keepends=True)
+    if not wrapped:
+        return lines
+    if (
+        len(lines) < 2
+        or lines[0].strip() != "mod __format_context {"
+        or lines[-1].strip() != "}"
+    ):
+        return None
+    return lines[1:-1]
+
+
 def main() -> int:
     base = select_base()
     head = os.environ.get("GITHUB_SHA", "HEAD")
@@ -92,16 +121,10 @@ def main() -> int:
 
         source_path = Path(path)
         source = source_path.read_text(encoding="utf-8").splitlines(keepends=True)
-        formatted = subprocess.run(
-            ["rustfmt", "--edition", "2021", "--emit", "stdout", path],
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        if formatted.returncode != 0:
+        formatted_lines = format_source(path, source)
+        if formatted_lines is None:
             failures.append(path)
             continue
-        formatted_lines = formatted.stdout.decode("utf-8").splitlines(keepends=True)
         if format_changes_touch_changed_lines(source, formatted_lines, ranges):
             failures.append(path)
 
