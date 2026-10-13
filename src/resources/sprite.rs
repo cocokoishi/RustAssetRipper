@@ -414,6 +414,61 @@ pub fn generate_mesh_outlines(
     Ok(outlines)
 }
 
+/// Coordinate and atlas-packing facts consumed by source `GenerateOutline`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpriteOutlineTransform {
+    /// Width and height of the rect returned by `GetSpriteCoordinatesInAtlas`.
+    pub rect_size: [f32; 2],
+    /// Normalized pivot returned by `GetSpriteCoordinatesInAtlas`.
+    pub pivot: [f32; 2],
+    /// Sprite `PixelsToUnits` value.
+    pub pixels_to_units: f32,
+    /// Whether the selected atlas/render-data record is packed.
+    pub is_packed: bool,
+    /// Raw `SpritePackingRotation` discriminant. Values 1, 2, 3, and 4 mean
+    /// horizontal flip, vertical flip, 180-degree rotation, and legacy
+    /// 90-degree rotation respectively; other values leave points unchanged.
+    pub packing_rotation: u32,
+}
+
+/// Generates and transforms outline points following `SpriteMetaDataExtensions.GenerateOutline`.
+///
+/// This composes [`generate_mesh_outlines`] with the source's exact operation
+/// order: scale by pixels-to-units, shift by the normalized pivot relative to
+/// the rect center, then apply packing rotation only when `is_packed` is true.
+/// The caller resolves the atlas/render-data record and extracts versioned
+/// vertices and triangle indices.
+pub fn generate_sprite_outlines(
+    vertices: &[[f32; 3]],
+    triangles: &[[usize; 3]],
+    transform: SpriteOutlineTransform,
+) -> Result<Vec<Vec<[f32; 2]>>, SpriteOutlineError> {
+    let mut outlines = generate_mesh_outlines(vertices, triangles)?;
+    let pivot_shift = [
+        transform.rect_size[0] * transform.pivot[0] - transform.rect_size[0] * 0.5,
+        transform.rect_size[1] * transform.pivot[1] - transform.rect_size[1] * 0.5,
+    ];
+    for outline in &mut outlines {
+        for point in outline {
+            let scaled = [
+                point[0] * transform.pixels_to_units,
+                point[1] * transform.pixels_to_units,
+            ];
+            *point = [scaled[0] + pivot_shift[0], scaled[1] + pivot_shift[1]];
+            if transform.is_packed {
+                *point = match transform.packing_rotation {
+                    1 => [-point[0], point[1]],
+                    2 => [point[0], -point[1]],
+                    3 => [-point[0], -point[1]],
+                    4 => [point[1], point[0]],
+                    _ => *point,
+                };
+            }
+        }
+    }
+    Ok(outlines)
+}
+
 #[derive(Clone, Copy)]
 struct SpriteOutlineOutside {
     triangle: usize,
@@ -898,6 +953,60 @@ mod tests {
                 vec![[1.0, 1.0], [0.0, 0.0], [1.0, 0.0]],
                 vec![[2.0, 0.0], [0.0, 0.0], [0.0, 1.0]],
             ]),
+        );
+    }
+
+    #[test]
+    fn sprite_outline_applies_ppu_pivot_and_packing_in_source_order() {
+        let vertices = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]];
+        let transform = SpriteOutlineTransform {
+            rect_size: [10.0, 20.0],
+            pivot: [0.25, 0.75],
+            pixels_to_units: 2.0,
+            is_packed: false,
+            packing_rotation: 0,
+        };
+        let base = vec![vec![[-0.5, 7.0], [-2.5, 5.0], [-0.5, 5.0]]];
+        assert_eq!(
+            generate_sprite_outlines(&vertices, &[[0, 1, 2]], transform),
+            Ok(base.clone()),
+        );
+
+        let packed = |packing_rotation| SpriteOutlineTransform {
+            is_packed: true,
+            packing_rotation,
+            ..transform
+        };
+        assert_eq!(
+            generate_sprite_outlines(&vertices, &[[0, 1, 2]], packed(1)),
+            Ok(vec![vec![[0.5, 7.0], [2.5, 5.0], [0.5, 5.0]]]),
+        );
+        assert_eq!(
+            generate_sprite_outlines(&vertices, &[[0, 1, 2]], packed(2)),
+            Ok(vec![vec![[-0.5, -7.0], [-2.5, -5.0], [-0.5, -5.0]]]),
+        );
+        assert_eq!(
+            generate_sprite_outlines(&vertices, &[[0, 1, 2]], packed(3)),
+            Ok(vec![vec![[0.5, -7.0], [2.5, -5.0], [0.5, -5.0]]]),
+        );
+        assert_eq!(
+            generate_sprite_outlines(&vertices, &[[0, 1, 2]], packed(4)),
+            Ok(vec![vec![[7.0, -0.5], [5.0, -2.5], [5.0, -0.5]]]),
+        );
+        assert_eq!(
+            generate_sprite_outlines(&vertices, &[[0, 1, 2]], packed(15)),
+            Ok(base.clone()),
+        );
+        assert_eq!(
+            generate_sprite_outlines(
+                &vertices,
+                &[[0, 1, 2]],
+                SpriteOutlineTransform {
+                    packing_rotation: 4,
+                    ..transform
+                },
+            ),
+            Ok(base),
         );
     }
 
