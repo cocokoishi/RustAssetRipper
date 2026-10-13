@@ -922,6 +922,18 @@ pub fn generate_sprite_outlines(
     transform: SpriteOutlineTransform,
 ) -> Result<Vec<Vec<[f32; 2]>>, SpriteOutlineError> {
     let mut outlines = generate_mesh_outlines(vertices, triangles)?;
+    transform_sprite_outline_points(&mut outlines, transform);
+    Ok(outlines)
+}
+
+/// Applies the caller-side metadata transforms to outlines already generated from render data.
+///
+/// This is the same operation used by [`generate_sprite_outlines`], exposed separately so
+/// callers that decode versioned render data can share the exact transform path.
+pub fn transform_sprite_outline_points(
+    outlines: &mut [Vec<[f32; 2]>],
+    transform: SpriteOutlineTransform,
+) {
     let pivot_shift = [
         transform.rect_size[0] * transform.pivot[0] - transform.rect_size[0] * 0.5,
         transform.rect_size[1] * transform.pivot[1] - transform.rect_size[1] * 0.5,
@@ -944,7 +956,6 @@ pub fn generate_sprite_outlines(
             }
         }
     }
-    Ok(outlines)
 }
 
 #[derive(Clone, Copy)]
@@ -1796,6 +1807,9 @@ mod tests {
             packing_rotation: 0,
         };
         let base = vec![vec![[-0.5, 7.0], [-2.5, 5.0], [-0.5, 5.0]]];
+        let mut decoded = vec![vec![[1.0, 1.0], [0.0, 0.0], [1.0, 0.0]]];
+        transform_sprite_outline_points(&mut decoded, transform);
+        assert_eq!(decoded, base);
         assert_eq!(
             generate_sprite_outlines(&vertices, &[[0, 1, 2]], transform),
             Ok(base.clone()),

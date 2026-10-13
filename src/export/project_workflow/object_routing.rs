@@ -509,6 +509,74 @@ fn read_audio_data_for_project_export(
     }
 }
 
+fn read_sprite_vertex_stream_for_project_export(
+    context: &ProjectRoutingContext<'_, '_, '_>,
+    file_index: usize,
+    path_id: i64,
+    render_data: &SerializedValue,
+    version: crate::resources::vertex_data_blob::UnityVersion,
+    endian: crate::resources::vertex_data_blob::EndianType,
+) -> Result<Option<Vec<u8>>, Box<dyn Error>> {
+    let mesh = crate::resources::mesh::MeshView::from_render_data_value(
+        render_data,
+        version,
+        endian,
+    )
+    .map_err(|error| {
+        invalid_project(format!(
+            "file {file_index} Sprite PathID {path_id} render data could not be read for outline stream resolution: {error}"
+        ))
+    })?;
+    if mesh.vertex_data_bytes_source() != crate::resources::mesh::MeshVertexBytesSource::Streamed {
+        return Ok(None);
+    }
+    let Some(resource) = mesh.stream_data.filter(|resource| resource.is_set()) else {
+        return Ok(None);
+    };
+    if resource.size == 0 {
+        return Ok(Some(Vec::new()));
+    }
+    let source_bundle_index = context
+        .workspace
+        .files()
+        .get(file_index)
+        .ok_or_else(|| {
+            invalid_project(format!(
+                "Sprite references absent SerializedFile {file_index}"
+            ))
+        })?
+        .container_bundle_index;
+    match resolve_and_read_streamed_resource_range(
+        context.filesystem,
+        context.workspace,
+        source_bundle_index,
+        StreamedResourceRange {
+            path: &resource.path,
+            offset: resource.offset,
+            size: u64::from(resource.size),
+        },
+        context.root_catalog,
+        context.resource_provider,
+        context.limits.streamed_content,
+    )
+    .map_err(|error| {
+        invalid_project(format!(
+            "file {file_index} Sprite PathID {path_id} streamed vertex bytes could not be read: {error}"
+        ))
+    })? {
+        StreamedResourceContentResolution::Resolved { bytes, .. } => Ok(Some(bytes)),
+        StreamedResourceContentResolution::Missing {
+            unavailable_data_paths,
+        } => Err(invalid_project(format!(
+            "file {file_index} Sprite PathID {path_id} streamed vertex bytes are missing; unavailable data paths: [{}]",
+            unavailable_data_paths.join(", ")
+        ))),
+        StreamedResourceContentResolution::Unset => Err(invalid_project(format!(
+            "file {file_index} Sprite PathID {path_id} vertex stream became unset during resolution"
+        ))),
+    }
+}
+
 pub(super) fn route_project_objects<'context, 'provider, 'graph>(
     context: &ProjectRoutingContext<'context, 'provider, 'graph>,
 ) -> Result<RoutedProjectObjects<'context>, Box<dyn Error>> {
@@ -1003,17 +1071,28 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                     // Cubemap, texture-array, Texture3D, and lightmap routes keep their existing fields.
                     let sprite_facts =
                         crate::export::importer_fields::collect_sprite_facts_for_texture(
+                            workspace,
                             objects,
                             reference_graph,
                             file_index,
                             object_index,
                             &object.factory.name,
-                            (project_version.major, project_version.minor),
+                            !settings_facts.sprite_export_mode_yaml,
+                            |sprite_file_index, sprite_path_id, render_data, version, endian| {
+                                read_sprite_vertex_stream_for_project_export(
+                                    context,
+                                    sprite_file_index,
+                                    sprite_path_id,
+                                    render_data,
+                                    version,
+                                    endian,
+                                )
+                            },
                         )?;
                     if !sprite_facts.is_empty() {
                         let decision = crate::export::importer_fields::decide_sprite_importer(
                             &sprite_facts,
-                            false,
+                            !settings_facts.sprite_export_mode_yaml,
                             crate::export::importer_fields::importer_node_has_field(
                                 &plan.importer,
                                 "spritePivot",
@@ -1025,6 +1104,11 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                         );
                         crate::export::importer_fields::apply_sprite_importer_decision(
                             &mut plan.importer,
+                            &decision,
+                        )?;
+                        crate::export::importer_fields::apply_sprite_outline_to_importer(
+                            &mut plan.importer,
+                            &sprite_facts,
                             &decision,
                         )?;
                     }

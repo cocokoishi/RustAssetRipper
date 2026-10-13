@@ -35,9 +35,15 @@ use std::error::Error;
 use std::io;
 
 use crate::export::unity_yaml::{UnityYamlNode, UnityYamlNodeKind, UnityYamlScalar};
+use crate::resources::sprite::{
+    generate_sprite_render_data_outlines_from_value, sprite_settings_raw_is_packed,
+    sprite_settings_raw_packing_rotation, transform_sprite_outline_points, SpriteOutlineTransform,
+};
+use crate::resources::vertex_data_blob::{EndianType, UnityVersion};
 use crate::serialized_file::object::SerializedValue;
 use crate::serialized_file::object_workspace::ObjectWorkspace;
 use crate::serialized_file::reference_graph::{MultiFilePPtrResolution, MultiFileReferenceGraph};
+use crate::serialized_file::workspace::SerializedFileWorkspace;
 
 /// Copy an asset bundle name onto an importer exactly like the eight baseline overrides.
 ///
@@ -101,8 +107,10 @@ pub const SPRITE_MESH_TYPE_FULL_RECT: i32 = 0;
 pub const TEXTURE_IMPORTER_TYPE_SPRITE: i32 = 8;
 
 /// Caller facts for one sprite in `TextureExportCollection.AddSprites`.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SpriteFacts {
+    /// Sprite `Name`, copied into a Multiple-mode SpriteMetaData entry.
+    pub name: String,
     /// The sprite `Rect` (`[x, y, width, height]`).
     pub rect: [f32; 4],
     /// The sprite render-data texture rect in the same layout.
@@ -123,6 +131,8 @@ pub struct SpriteFacts {
     pub border: [f32; 4],
     /// The sprite `PixelsToUnits`.
     pub pixels_to_units: f32,
+    /// Generated outlines after the source PPU, pivot, and packing transforms.
+    pub outline: Vec<Vec<[f32; 2]>>,
 }
 
 /// The importer fields `AddSprites` assigns, before version-gated application.
@@ -226,22 +236,30 @@ pub fn select_prefab_importer(is_prefab_marker: bool) -> PrefabImporterBranch {
 /// Class ID of Sprite objects whose render data can point at a texture.
 const SPRITE_OBJECT_CLASS_ID: i32 = 213;
 
-/// Collect `AddSprites` caller facts for the bundle sprites whose render-data texture
+/// Collect `AddSprites` caller facts for workspace sprites whose render-data texture
 /// resolves to one texture object.
 ///
 /// This mirrors the `SpriteProcessor` association (`sprite.RD.Texture.TryGetAsset`) for the
-/// importer-field path only; asset grouping and sheets stay open. Facts follow workspace
-/// encounter order. Null or unresolvable texture pointers are skipped exactly like the
-/// source null check. Structurally unreadable sprites are skipped as well: only the 2022.3
-/// bundle layout below is witnessed, and the previous default fields (which match every
-/// sprite-less texture) remain the fallback rather than failing exports on other layouts.
+/// importer path only; asset grouping and multiple-sprite sheets stay open. Facts follow
+/// workspace encounter order. Source file version and endianness select the render-data
+/// outline decoder. When sprite-sheet export is enabled, malformed outline geometry is an
+/// error rather than a silently omitted field.
+#[allow(clippy::too_many_arguments)]
 pub fn collect_sprite_facts_for_texture(
+    workspace: &SerializedFileWorkspace,
     objects: &ObjectWorkspace,
     graph: &MultiFileReferenceGraph<'_>,
     texture_file_index: usize,
     texture_object_index: usize,
     texture_name: &str,
-    project_version: (u32, u32),
+    generate_outlines: bool,
+    mut resolve_stream_vertex_bytes: impl FnMut(
+        usize,
+        i64,
+        &SerializedValue,
+        UnityVersion,
+        EndianType,
+    ) -> Result<Option<Vec<u8>>, Box<dyn Error>>,
 ) -> Result<Vec<SpriteFacts>, Box<dyn Error>> {
     let mut facts = Vec::new();
     for sprite in objects
@@ -252,7 +270,20 @@ pub fn collect_sprite_facts_for_texture(
         let Ok(payload) = &sprite.payload else {
             continue;
         };
-        let Some(link) = read_sprite_texture_link(&payload.root, texture_name, project_version)
+        let Some(source_file) = workspace.files().get(sprite.file_index) else {
+            return Err(invalid_sprite_data(format!(
+                "Sprite object {} references absent SerializedFile {}",
+                sprite.object_index, sprite.file_index
+            )));
+        };
+        let source_version = source_file
+            .metadata
+            .prefix
+            .unity_version_text
+            .as_deref()
+            .and_then(UnityVersion::parse);
+        let Some(mut link) =
+            read_sprite_texture_link(&payload.root, source_version.as_ref(), texture_name)
         else {
             continue;
         };
@@ -273,6 +304,39 @@ pub fn collect_sprite_facts_for_texture(
         };
         if target_file_index != texture_file_index || target_object_index != texture_object_index {
             continue;
+        }
+        if generate_outlines {
+            let source_version = source_version.ok_or_else(|| {
+                invalid_sprite_data(format!(
+                    "Sprite object {} has no parseable source Unity version",
+                    sprite.object_index
+                ))
+            })?;
+            let endian = match source_file.metadata.prefix.body_endian {
+                crate::io::binary::Endian::Little => EndianType::Little,
+                crate::io::binary::Endian::Big => EndianType::Big,
+            };
+            let stream_bytes = resolve_stream_vertex_bytes(
+                sprite.file_index,
+                sprite.path_id,
+                link.render_data,
+                source_version,
+                endian,
+            )?;
+            link.facts.outline = generate_sprite_render_data_outlines_from_value(
+                link.render_data,
+                source_version,
+                endian,
+                stream_bytes.as_deref(),
+            )
+            .map_err(|error| {
+                invalid_sprite_data(format!(
+                    "Sprite object {} render-data outline failed: {error}",
+                    sprite.object_index
+                ))
+            })?
+            .unwrap_or_default();
+            transform_sprite_outline_points(&mut link.facts.outline, link.outline_transform);
         }
         facts
             .try_reserve(1)
@@ -330,26 +394,96 @@ pub fn apply_sprite_importer_decision(
     Ok(())
 }
 
+/// Copies the source `SpriteSheetMetaData.Outline` fields for a Single-mode sheet.
+///
+/// Multiple-mode sheets require per-sprite metadata records and planned export IDs. Until those
+/// are connected, an enabled Multiple-mode export fails instead of emitting an empty sheet.
+pub fn apply_sprite_outline_to_importer(
+    importer: &mut UnityYamlNode,
+    sprites: &[SpriteFacts],
+    decision: &SpriteImporterDecision,
+) -> Result<(), Box<dyn Error>> {
+    if !decision.build_sprite_sheet {
+        return Ok(());
+    }
+    let Some(sprite_sheet) = yaml_mapping_field_mut(importer, "spriteSheet") else {
+        return Ok(());
+    };
+    if decision.mode == SpriteImportMode::Multiple {
+        return Err(invalid_sprite_data(
+            "multiple SpriteSheet metadata entries and export IDs are not yet planned",
+        ));
+    }
+    let [sprite] = sprites else {
+        return Err(invalid_sprite_data(
+            "Single SpriteSheet mode requires exactly one sprite fact",
+        ));
+    };
+    let Some(outline_field) = yaml_mapping_field_mut(sprite_sheet, "outline") else {
+        return Ok(());
+    };
+    *outline_field = sprite_outline_to_yaml(&sprite.outline)?;
+    Ok(())
+}
+
+fn sprite_outline_to_yaml(outlines: &[Vec<[f32; 2]>]) -> Result<UnityYamlNode, Box<dyn Error>> {
+    let mut outline_node =
+        UnityYamlNode::sequence(crate::export::unity_yaml::UnityYamlSequenceStyle::Block);
+    for outline in outlines {
+        let mut points =
+            UnityYamlNode::sequence(crate::export::unity_yaml::UnityYamlSequenceStyle::Block);
+        for point in outline {
+            let mut vector =
+                UnityYamlNode::mapping(crate::export::unity_yaml::UnityYamlMappingStyle::Flow);
+            vector.insert_field(
+                "x",
+                UnityYamlNode::scalar(UnityYamlScalar::Float32(point[0])),
+            )?;
+            vector.insert_field(
+                "y",
+                UnityYamlNode::scalar(UnityYamlScalar::Float32(point[1])),
+            )?;
+            points.push(vector)?;
+        }
+        outline_node.push(points)?;
+    }
+    Ok(outline_node)
+}
+
+fn yaml_mapping_field_mut<'a>(
+    node: &'a mut UnityYamlNode,
+    name: &str,
+) -> Option<&'a mut UnityYamlNode> {
+    let UnityYamlNodeKind::Mapping { entries, .. } = &mut node.kind else {
+        return None;
+    };
+    entries
+        .iter_mut()
+        .find(|(key, _)| yaml_key_is(key, name))
+        .map(|(_, value)| value)
+}
+
 /// One sprite render-data texture link: caller facts plus the bundle texture pointer.
-struct SpriteTextureLink {
+struct SpriteTextureLink<'a> {
     facts: SpriteFacts,
     texture_file_id: i32,
     texture_path_id: i64,
+    render_data: &'a SerializedValue,
+    outline_transform: SpriteOutlineTransform,
 }
 
 /// Read `AddSprites` caller facts from one Sprite payload, resolving the sprite name against
 /// the queried texture. Returns `None` when the sprite is atlas-packed (recovery stays open),
-/// when the render-data texture pointer is null, or when any required field is absent or
-/// mistyped (only the witnessed 2022.3 bundle layout reads).
+/// when the render-data texture pointer is null, or when a required field is absent or mistyped.
 ///
 /// Crucially, the facts carry the *processed* rect/pivot/border: `SpriteProcessor.ProcessSprite`
 /// recalculates them from the render data (`GetSpriteCoordinatesInAtlas` plus copies), and
 /// `AddSprites` reads those processed values — not the stale bundle `m_Rect`/`m_Pivot`.
-fn read_sprite_texture_link(
-    root: &SerializedValue,
+fn read_sprite_texture_link<'a>(
+    root: &'a SerializedValue,
+    source_version: Option<&UnityVersion>,
     texture_name: &str,
-    project_version: (u32, u32),
-) -> Option<SpriteTextureLink> {
+) -> Option<SpriteTextureLink<'a>> {
     use crate::resources::sprite::get_sprite_coordinates_in_atlas;
     // Atlas-packed sprites need render-data recovery from the atlas map first, which
     // stays open; only atlas-null sprites take the direct render-data path.
@@ -379,8 +513,10 @@ fn read_sprite_texture_link(
     // `Has_Pivot`/`Has_Border` are layout gates, not value presence: every supported
     // layout carries the fields, so a present bundle value always counts; missing bundle
     // values on ancient layouts fall back to the derived/zero coordinates below.
-    let layout_has_pivot = sprite_field(root, "m_Pivot").is_some() || project_version >= (5, 0);
-    let layout_has_border = sprite_field(root, "m_Border").is_some() || project_version >= (5, 0);
+    let layout_has_pivot = sprite_field(root, "m_Pivot").is_some()
+        || source_version.is_some_and(|version| (version.major, version.minor) >= (5, 0));
+    let layout_has_border = sprite_field(root, "m_Border").is_some()
+        || source_version.is_some_and(|version| (version.major, version.minor) >= (5, 0));
     let coords = get_sprite_coordinates_in_atlas(
         sprite_rect,
         texture_rect,
@@ -394,11 +530,14 @@ fn read_sprite_texture_link(
         stored_border.is_some(),
         stored_border.unwrap_or([0.0, 0.0, 0.0, 0.0]),
     );
+    let name = sprite_name(root)?;
+    let settings_raw = sprite_u32(sprite_field(rd, "settingsRaw")?)?;
     Some(SpriteTextureLink {
         facts: SpriteFacts {
+            name: name.clone(),
             rect: coords.rect,
             texture_rect,
-            name_matches_texture: sprite_name(root)? == texture_name,
+            name_matches_texture: name == texture_name,
             extrude: sprite_u32(sprite_field(root, "m_Extrude")?)?,
             mesh_type,
             has_pivot: layout_has_pivot,
@@ -406,9 +545,18 @@ fn read_sprite_texture_link(
             has_border: layout_has_border,
             border: coords.border,
             pixels_to_units: sprite_f32(sprite_field(root, "m_PixelsToUnits")?)?,
+            outline: Vec::new(),
         },
         texture_file_id,
         texture_path_id,
+        render_data: rd,
+        outline_transform: SpriteOutlineTransform {
+            rect_size: [coords.rect[2], coords.rect[3]],
+            pivot: coords.pivot,
+            pixels_to_units: sprite_f32(sprite_field(root, "m_PixelsToUnits")?)?,
+            is_packed: sprite_settings_raw_is_packed(settings_raw),
+            packing_rotation: sprite_settings_raw_packing_rotation(settings_raw),
+        },
     })
 }
 
@@ -757,14 +905,15 @@ pub mod fixed_importer_literals {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_sprite_importer_decision, decide_sprite_importer, importer_node_has_field,
-        propagate_asset_bundle_name, read_sprite_texture_link, select_prefab_importer,
-        truncate_execution_order, PrefabImporterBranch, SpriteAlignment, SpriteFacts,
-        SpriteImportMode, SpriteImporterDecision, SPRITE_MESH_TYPE_FULL_RECT,
+        apply_sprite_importer_decision, apply_sprite_outline_to_importer, decide_sprite_importer,
+        importer_node_has_field, propagate_asset_bundle_name, read_sprite_texture_link,
+        select_prefab_importer, truncate_execution_order, PrefabImporterBranch, SpriteAlignment,
+        SpriteFacts, SpriteImportMode, SpriteImporterDecision, SPRITE_MESH_TYPE_FULL_RECT,
         TEXTURE_IMPORTER_TYPE_SPRITE,
     };
     use super::{plugin_importer, texture_importer};
-    use crate::export::unity_yaml::UnityYamlNode;
+    use crate::export::unity_yaml::{UnityYamlNode, UnityYamlNodeKind, UnityYamlScalar};
+    use crate::resources::vertex_data_blob::UnityVersion;
     use crate::serialized_file::object::SerializedValue;
 
     #[test]
@@ -809,6 +958,7 @@ mod tests {
     fn sprite_importer_follows_add_sprites_branches() {
         fn sprite(matching: bool) -> SpriteFacts {
             SpriteFacts {
+                name: if matching { "texture" } else { "sprite" }.to_owned(),
                 rect: [1.0, 2.0, 32.0, 16.0],
                 texture_rect: if matching {
                     [1.0, 2.0, 32.0, 16.0]
@@ -823,6 +973,7 @@ mod tests {
                 has_border: true,
                 border: [1.0, 2.0, 3.0, 4.0],
                 pixels_to_units: 50.0,
+                outline: Vec::new(),
             }
         }
 
@@ -991,12 +1142,15 @@ mod tests {
     #[test]
     fn sprite_link_reads_menu_shaped_payload() {
         let root = menu_sprite_payload();
-        let link = read_sprite_texture_link(&root, "menu", (2022, 3)).expect("menu sprite links");
+        let version = UnityVersion::parse("2022.3.0f1").unwrap();
+        let link =
+            read_sprite_texture_link(&root, Some(&version), "menu").expect("menu sprite links");
         assert_eq!(link.texture_file_id, 0);
         assert_eq!(link.texture_path_id, 12345);
         assert_eq!(
             link.facts,
             SpriteFacts {
+                name: "menu".to_owned(),
                 rect: [0.0, 0.0, 1071.0, 755.0],
                 texture_rect: [0.0, 0.0, 1071.0, 755.0],
                 name_matches_texture: true,
@@ -1007,10 +1161,12 @@ mod tests {
                 has_border: true,
                 border: [0.0, 0.0, 0.0, 0.0],
                 pixels_to_units: 100.0,
+                outline: Vec::new(),
             }
         );
         // A different texture name only flips the match flag.
-        let other = read_sprite_texture_link(&root, "other", (2022, 3)).expect("links regardless");
+        let other =
+            read_sprite_texture_link(&root, Some(&version), "other").expect("links regardless");
         assert!(!other.facts.name_matches_texture);
         // A null texture pointer skips the sprite like the source null check.
         let mut null_root = root.clone();
@@ -1030,7 +1186,7 @@ mod tests {
                 }
             }
         }
-        assert!(read_sprite_texture_link(&null_root, "menu", (2022, 3)).is_none());
+        assert!(read_sprite_texture_link(&null_root, Some(&version), "menu").is_none());
     }
 
     #[test]
@@ -1078,7 +1234,9 @@ mod tests {
         assert!(importer_node_has_field(&importer, "spritePivot"));
         assert!(!importer_node_has_field(&importer, "missing"));
         let root = menu_sprite_payload();
-        let link = read_sprite_texture_link(&root, "menu", (2022, 3)).expect("menu sprite links");
+        let version = UnityVersion::parse("2022.3.0f1").unwrap();
+        let link =
+            read_sprite_texture_link(&root, Some(&version), "menu").expect("menu sprite links");
         let decision = decide_sprite_importer(std::slice::from_ref(&link.facts), false, true, true);
         assert_eq!(decision.mode, SpriteImportMode::Single);
         apply_sprite_importer_decision(&mut importer, &decision).unwrap();
@@ -1114,6 +1272,72 @@ mod tests {
                 "textureType"
             ]
         );
+    }
+
+    #[test]
+    fn sprite_sheet_outline_is_written_for_single_and_rejects_unplanned_multiple() {
+        use crate::export::unity_yaml::{UnityYamlMappingStyle, UnityYamlSequenceStyle};
+
+        let sprite = SpriteFacts {
+            name: "texture".to_owned(),
+            rect: [0.0, 0.0, 8.0, 8.0],
+            texture_rect: [0.0, 0.0, 8.0, 8.0],
+            name_matches_texture: true,
+            extrude: 1,
+            mesh_type: 0,
+            has_pivot: true,
+            pivot: [0.5, 0.5],
+            has_border: true,
+            border: [0.0; 4],
+            pixels_to_units: 100.0,
+            outline: vec![vec![[1.25, -2.0], [3.0, 4.0]]],
+        };
+        let mut sprite_sheet = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+        sprite_sheet
+            .insert_field(
+                "outline",
+                UnityYamlNode::sequence(UnityYamlSequenceStyle::Block),
+            )
+            .unwrap();
+        let mut importer = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+        importer.insert_field("spriteSheet", sprite_sheet).unwrap();
+
+        let single = decide_sprite_importer(std::slice::from_ref(&sprite), true, true, true);
+        assert_eq!(single.mode, SpriteImportMode::Single);
+        apply_sprite_outline_to_importer(&mut importer, std::slice::from_ref(&sprite), &single)
+            .unwrap();
+
+        let sheet = yaml_mapping_field_mut(&mut importer, "spriteSheet").unwrap();
+        let outline = yaml_mapping_field_mut(sheet, "outline").unwrap();
+        let UnityYamlNodeKind::Sequence {
+            items: outlines, ..
+        } = &outline.kind
+        else {
+            panic!("outline must be a sequence");
+        };
+        assert_eq!(outlines.len(), 1);
+        let UnityYamlNodeKind::Sequence { items: points, .. } = &outlines[0].kind else {
+            panic!("each outline must be a point sequence");
+        };
+        assert_eq!(points.len(), 2);
+        let UnityYamlNodeKind::Mapping { entries, .. } = &points[0].kind else {
+            panic!("outline points must be Vector2 mappings");
+        };
+        assert_eq!(entries.len(), 2);
+        assert!(matches!(
+            &entries[0].1.kind,
+            UnityYamlNodeKind::Scalar(UnityYamlScalar::Float32(value)) if *value == 1.25
+        ));
+        assert!(matches!(
+            &entries[1].1.kind,
+            UnityYamlNodeKind::Scalar(UnityYamlScalar::Float32(value)) if *value == -2.0
+        ));
+
+        let mut multiple_sprite = sprite.clone();
+        multiple_sprite.name_matches_texture = false;
+        let multiple = decide_sprite_importer(&[multiple_sprite], true, true, true);
+        assert_eq!(multiple.mode, SpriteImportMode::Multiple);
+        assert!(apply_sprite_outline_to_importer(&mut importer, &[sprite], &multiple,).is_err());
     }
 
     #[test]
