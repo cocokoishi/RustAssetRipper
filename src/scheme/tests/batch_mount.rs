@@ -1015,9 +1015,28 @@ fn mount_directory_preserving_containers_keeps_split_container_identity() {
         .unwrap();
     assert_eq!(preserved, container);
     assert_eq!(
+        filesystem
+            .open_file("/platform/Game_Data/data.unity3d")
+            .unwrap()
+            .stream_type(),
+        crate::io::stream::SmartStreamType::File
+    );
+    assert_eq!(
         SchemeReader::read(&preserved).unwrap().kind(),
         FileKind::UnityWebData
     );
+
+    #[cfg(unix)]
+    {
+        std::fs::remove_file(root.join("data.unity3d.split0"))
+            .expect("Unix permits unlinking a retained split input");
+        std::fs::remove_file(root.join("data.unity3d.split1"))
+            .expect("Unix permits unlinking a retained split input");
+        let preserved_after_unlink = filesystem
+            .read_all_bytes("/platform/Game_Data/data.unity3d", container.len())
+            .unwrap();
+        assert_eq!(preserved_after_unlink, container);
+    }
 
     #[cfg(windows)]
     {
@@ -1026,8 +1045,11 @@ fn mount_directory_preserving_containers_keeps_split_container_identity() {
     }
 
     drop(filesystem);
-    std::fs::remove_file(root.join("data.unity3d.split0")).unwrap();
-    std::fs::remove_file(root.join("data.unity3d.split1")).unwrap();
+    #[cfg(windows)]
+    {
+        std::fs::remove_file(root.join("data.unity3d.split0")).unwrap();
+        std::fs::remove_file(root.join("data.unity3d.split1")).unwrap();
+    }
     std::fs::remove_dir(root).unwrap();
 }
 
