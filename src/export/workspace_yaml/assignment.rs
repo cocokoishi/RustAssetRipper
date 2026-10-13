@@ -362,14 +362,21 @@ fn workspace_assignments_to_unity_yaml_with_context<A: UnityYamlCollectionAssign
                     None
                 };
                 let sprite_atlas_overlay = if asset.class_id == 213 {
-                    workspace_sprite_atlas_yaml_overlay(objects, reference_graph, object, asset)
-                        .map_err(|message| UnityYamlWorkspaceCollectionError::ObjectExport {
+                    workspace_sprite_atlas_yaml_overlay(
+                        objects,
+                        export_context.reference_graph,
+                        object,
+                        asset,
+                    )
+                    .map_err(|message| {
+                        UnityYamlWorkspaceCollectionError::ObjectExport {
                             assignment_index,
                             source: Box::new(UnityYamlWorkspaceExportError::SpriteAtlasInvariant {
                                 source: asset,
                                 message,
                             }),
-                        })?
+                        }
+                    })?
                 } else {
                     None
                 };
