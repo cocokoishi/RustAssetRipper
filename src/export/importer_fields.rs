@@ -1105,10 +1105,10 @@ fn read_sprite_texture_link<'a>(
 fn strict_sprite_rect4(root: &SerializedValue, name: &str) -> Result<[f32; 4], Box<dyn Error>> {
     let value = strict_required_sprite_field(root, name)?;
     Ok([
-        strict_f32_field(value, "x")?,
-        strict_f32_field(value, "y")?,
-        strict_f32_field(value, "width")?,
-        strict_f32_field(value, "height")?,
+        strict_sprite_component(value, name, "x")?,
+        strict_sprite_component(value, name, "y")?,
+        strict_sprite_component(value, name, "width")?,
+        strict_sprite_component(value, name, "height")?,
     ])
 }
 
@@ -1130,7 +1130,10 @@ fn strict_sprite_point2_value(
     value: &SerializedValue,
     name: &str,
 ) -> Result<[f32; 2], Box<dyn Error>> {
-    Ok([strict_f32_field(value, "x")?, strict_f32_field(value, "y")?])
+    Ok([
+        strict_sprite_component(value, name, "x")?,
+        strict_sprite_component(value, name, "y")?,
+    ])
 }
 
 fn strict_sprite_optional_point4(
@@ -1147,11 +1150,23 @@ fn strict_sprite_point4_value(
     name: &str,
 ) -> Result<[f32; 4], Box<dyn Error>> {
     Ok([
-        strict_f32_field(value, "x")?,
-        strict_f32_field(value, "y")?,
-        strict_f32_field(value, "z")?,
-        strict_f32_field(value, "w")?,
+        strict_sprite_component(value, name, "x")?,
+        strict_sprite_component(value, name, "y")?,
+        strict_sprite_component(value, name, "z")?,
+        strict_sprite_component(value, name, "w")?,
     ])
+}
+
+fn strict_sprite_component(
+    value: &SerializedValue,
+    field: &str,
+    component: &str,
+) -> Result<f32, Box<dyn Error>> {
+    strict_f32_field(value, component).map_err(|error| {
+        invalid_sprite_data(format!(
+            "Sprite field {field}.{component} could not be read: {error}"
+        ))
+    })
 }
 
 fn sprite_importer_id(file_index: usize, path_id: i64) -> String {
