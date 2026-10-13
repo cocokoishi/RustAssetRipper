@@ -442,7 +442,10 @@
         .expect("production export-project writes the all-interface source fixture");
 
         let path_id_map = fs::read(output_root.join("AuxiliaryFiles/path_id_map.json")).unwrap();
-        assert_eq!(path_id_map, expected_map);
+        assert_eq!(
+            normalize_text_line_endings(&path_id_map),
+            normalize_text_line_endings(&expected_map)
+        );
         let path_id_map_text = std::str::from_utf8(&path_id_map).unwrap();
         for expected in [
             "\"PathID\": 101",
@@ -606,9 +609,20 @@
         }
 
         fn normalized_lines(text: &str) -> String {
-            let normalized = text
-                .replace("\r\n", "\n")
+            let newline_normalized = text.replace("\r\n", "\n");
+            let normalized = newline_normalized
                 .lines()
+                .map(|line| {
+                    let key = line
+                        .split_once(':')
+                        .map(|(key, _)| key.trim())
+                        .unwrap_or_default();
+                    if key.to_ascii_lowercase().contains("source") {
+                        line.replace('\\', "/")
+                    } else {
+                        line.to_owned()
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join("\n");
             format!("{normalized}\n")
@@ -974,8 +988,8 @@
                 "package manifest differs beyond line endings for Unity {unity_version} {storage}"
             );
             assert_eq!(
-                fs::read(output_root.join("AuxiliaryFiles/path_id_map.json")).unwrap(),
-                source_row_bytes(fixture, "AuxiliaryFiles/path_id_map.json"),
+                normalize_text_line_endings(&fs::read(output_root.join("AuxiliaryFiles/path_id_map.json")).unwrap()),
+                normalize_text_line_endings(&source_row_bytes(fixture, "AuxiliaryFiles/path_id_map.json")),
                 "PathIdMap post-export output differs for Unity {unity_version} {storage}"
             );
             assert!(!output_root

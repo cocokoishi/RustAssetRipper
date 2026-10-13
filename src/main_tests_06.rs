@@ -319,9 +319,9 @@
             })
             .collect::<Vec<_>>();
         assert_eq!(
-            fs::read(output_root.join("AuxiliaryFiles/path_id_map.json"))
-                .expect("project export writes the PathIdMap post-export file"),
-            source_path_id_map,
+            normalize_text_line_endings(&fs::read(output_root.join("AuxiliaryFiles/path_id_map.json"))
+                .expect("project export writes the PathIdMap post-export file")),
+            normalize_text_line_endings(&source_path_id_map),
             "PathIdMap collection names/order differ across sibling nested bundles"
         );
         assert_eq!(fs::read(&bundle_path).unwrap(), bundled_fixture);

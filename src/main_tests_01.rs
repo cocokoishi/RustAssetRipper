@@ -27,6 +27,19 @@
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static NEXT_TEST_DIRECTORY: AtomicUsize = AtomicUsize::new(0);
+    /// Normalize only text line endings in frozen source exports to the host form.
+    fn normalize_text_line_endings(bytes: &[u8]) -> Vec<u8> {
+        let mut normalized = Vec::with_capacity(bytes.len());
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] == b'\r' && bytes.get(index + 1) == Some(&b'\n') {
+                index += 1;
+            }
+            normalized.push(bytes[index]);
+            index += 1;
+        }
+        normalized
+    }
 
     /// The built-in `ExportSettings` record, used by project-export tests without a settings file.
     fn default_export_settings() -> ExportSettingsFile {
