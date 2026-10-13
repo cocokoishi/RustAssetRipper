@@ -790,7 +790,7 @@ fn open_with_share(path: &Path, options: &mut OpenOptions, share: FileShare) -> 
                 FileShare::None => rustix::fs::FlockOperation::NonBlockingLockExclusive,
                 FileShare::Read => rustix::fs::FlockOperation::NonBlockingLockShared,
             };
-            return match rustix::fs::flock(&file, operation) {
+            match rustix::fs::flock(&file, operation) {
                 Ok(()) => Ok(file),
                 Err(error) if error == rustix::io::Errno::WOULDBLOCK => Err(error.into()),
                 Err(_) => Ok(file),

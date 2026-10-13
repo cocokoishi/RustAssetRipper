@@ -13,10 +13,11 @@ use std::io;
 use crate::processing::scene_naming::SceneUnityVersion;
 use crate::resources::image_export::ImageExportFormat;
 use crate::resources::texture::{
-    Texture2DView, TextureExportError, export_texture2d_image_with_unity_version,
+    Texture2DView, TextureExportError, export_cubemap_array_image,
+    export_texture2d_array_image, export_texture2d_image_with_unity_version,
     export_texture3d_image,
 };
-use crate::resources::texture_array::Texture3DView;
+use crate::resources::texture_array::{CubemapArrayView, Texture2DArrayView, Texture3DView};
 use crate::resources::vertex_data_blob::UnityVersion;
 use crate::serialized_file::object::SerializedValue;
 
@@ -77,6 +78,8 @@ pub enum TextureProjectView {
     Texture2D(Texture2DView),
     Cubemap(Texture2DView),
     Texture3D(Texture3DView),
+    Texture2DArray(Texture2DArrayView),
+    CubemapArray(CubemapArrayView),
 }
 
 impl TextureProjectView {
@@ -84,6 +87,8 @@ impl TextureProjectView {
         match self {
             Self::Texture2D(view) | Self::Cubemap(view) => &view.image_data,
             Self::Texture3D(view) => &view.image_data,
+            Self::Texture2DArray(view) => &view.image_data,
+            Self::CubemapArray(view) => &view.image_data,
         }
     }
 
@@ -91,6 +96,8 @@ impl TextureProjectView {
         match self {
             Self::Texture2D(view) | Self::Cubemap(view) => view.stream_data.as_ref(),
             Self::Texture3D(view) => view.stream_data.as_ref(),
+            Self::Texture2DArray(view) => view.stream_data.as_ref(),
+            Self::CubemapArray(view) => view.stream_data.as_ref(),
         }
     }
 }
@@ -100,6 +107,8 @@ enum TextureProjectKind {
     Texture2D,
     Cubemap,
     Texture3D,
+    Texture2DArray,
+    CubemapArray,
 }
 
 impl TextureProjectPlan {
@@ -130,6 +139,12 @@ impl TextureProjectPlan {
             ),
             TextureProjectView::Texture3D(view) => {
                 export_texture3d_image(view, stream_content, self.image_format)
+            }
+            TextureProjectView::Texture2DArray(view) => {
+                export_texture2d_array_image(view, stream_content, self.image_format)
+            }
+            TextureProjectView::CubemapArray(view) => {
+                export_cubemap_array_image(view, stream_content, self.image_format)
             }
         }
     }
@@ -240,6 +255,67 @@ pub fn plan_texture3d_project_export_for_source_version(
     )
 }
 
+/// Plans a source `TextureArrayAssetExporter` route for a class-187 `Texture2DArray`.
+///
+/// The 2022.3 `TextureImporter` template is source-pinned. Older and newer layouts stay explicit
+/// fallbacks until their generated importer fields have equivalent evidence.
+pub fn plan_texture2d_array_project_export_for_source_version(
+    root: &SerializedValue,
+    project_version: SceneUnityVersion,
+    source_unity_version: Option<UnityVersion>,
+    settings: &ExportSettingsFile,
+    asset_bundle_name: Option<&str>,
+) -> Result<TextureProjectPlan, Box<dyn Error>> {
+    require_texture_array_importer_layout(project_version, "Texture2DArray")?;
+    plan_texture_project_export_with_source_version(
+        root,
+        project_version,
+        source_unity_version,
+        settings,
+        asset_bundle_name,
+        1,
+        TextureProjectKind::Texture2DArray,
+    )
+}
+
+/// Plans a source `TextureArrayAssetExporter` route for a class-188 `CubemapArray`.
+///
+/// The frozen importer marks this as `Texture2DArray`, including its source comment that it
+/// might instead be a cube. The Rust project template preserves that serialized shape.
+pub fn plan_cubemap_array_project_export_for_source_version(
+    root: &SerializedValue,
+    project_version: SceneUnityVersion,
+    source_unity_version: Option<UnityVersion>,
+    settings: &ExportSettingsFile,
+    asset_bundle_name: Option<&str>,
+) -> Result<TextureProjectPlan, Box<dyn Error>> {
+    require_texture_array_importer_layout(project_version, "CubemapArray")?;
+    plan_texture_project_export_with_source_version(
+        root,
+        project_version,
+        source_unity_version,
+        settings,
+        asset_bundle_name,
+        1,
+        TextureProjectKind::CubemapArray,
+    )
+}
+
+fn require_texture_array_importer_layout(
+    project_version: SceneUnityVersion,
+    texture_kind: &str,
+) -> Result<(), Box<dyn Error>> {
+    if TextureImporterLayout::for_project_version(project_version)
+        != Some(TextureImporterLayout::Unity2022_3)
+    {
+        return Err(invalid_data(format!(
+            "{texture_kind} TextureImporter serialization is not source-pinned for Unity {}.{}",
+            project_version.major, project_version.minor
+        )));
+    }
+    Ok(())
+}
+
 /// Build the specialized lightmap importer used by `LightmapExportCollection`.
 ///
 /// Unlike the ordinary texture collection, this source collection leaves the importer factory's
@@ -323,6 +399,12 @@ fn plan_texture_project_export_with_source_version(
         }
         TextureProjectKind::Texture3D => {
             TextureProjectView::Texture3D(Texture3DView::from_value(root)?)
+        }
+        TextureProjectKind::Texture2DArray => {
+            TextureProjectView::Texture2DArray(Texture2DArrayView::from_value(root)?)
+        }
+        TextureProjectKind::CubemapArray => {
+            TextureProjectView::CubemapArray(CubemapArrayView::from_value(root)?)
         }
     };
     let image_format = ImageExportFormat::from_settings_format(settings.image_export_format);
@@ -446,6 +528,7 @@ fn texture_importer(
         signed(match texture_kind {
             TextureProjectKind::Texture2D => 1,
             TextureProjectKind::Cubemap => 2,
+            TextureProjectKind::Texture2DArray | TextureProjectKind::CubemapArray => 4,
             TextureProjectKind::Texture3D => 8,
         }),
     )?;
@@ -840,6 +923,24 @@ impl TextureImporterFacts {
                     0,
                 )
             }
+            TextureProjectView::Texture2DArray(view) => (
+                view.width,
+                view.height,
+                optional_i32(root, &["m_MipCount"])?.unwrap_or(0) > 1,
+                view.format,
+                matches!(optional_i32(root, &["m_UsageMode"])?.unwrap_or(0), 3 | 4 | 10),
+                false,
+                0,
+            ),
+            TextureProjectView::CubemapArray(view) => (
+                view.width,
+                view.width,
+                optional_i32(root, &["m_MipCount"])?.unwrap_or(0) > 1,
+                view.format,
+                matches!(optional_i32(root, &["m_UsageMode"])?.unwrap_or(0), 3 | 4 | 10),
+                false,
+                0,
+            ),
         };
         let is_readable =
             optional_bool(root, &["m_IsReadable", "IsReadable_C28"])?.unwrap_or(false);

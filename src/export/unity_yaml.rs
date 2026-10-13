@@ -1785,7 +1785,7 @@ mod tests {
     /// Both spellings of each pair parse to identical `f32` bits (checked with a
     /// scratch parse: `280.89062` and `280.89063` are both bits `0x438C7200`;
     /// `477.89062` and `477.89063` are both `0x43EEF200`). The expected strings are
-    /// the frozen reference's YAML spellings from `青岚山河卷` class-4
+    /// the frozen reference's YAML spellings from 松风竹庭` class-4
     /// `m_LocalPosition.z` documents (local fileID 34284 decodes the exact midpoint
     /// `-280.890625`), while Rust's own formatter picks the odd neighbor.
     #[test]

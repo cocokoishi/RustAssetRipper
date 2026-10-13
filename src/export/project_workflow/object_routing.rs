@@ -369,6 +369,72 @@ fn texture3d_has_exportable_image_payload(payload: &ParsedObjectPayload) -> bool
                 .is_some_and(|stream| stream.is_set() && stream.size > 0))
 }
 
+fn texture_array_has_exportable_image_payload(
+    payload: &ParsedObjectPayload,
+    class_id: i32,
+) -> bool {
+    let (width, height, depth, image_data_is_empty, stream_data) = match class_id {
+        crate::resources::texture_array::TEXTURE2DARRAY_CLASS_ID => {
+            let Ok(view) = crate::resources::texture_array::Texture2DArrayView::from_value(
+                &payload.root,
+            ) else {
+                return false;
+            };
+            (
+                view.width,
+                view.height,
+                view.depth,
+                view.image_data.is_empty(),
+                view.stream_data,
+            )
+        }
+        crate::resources::texture_array::CUBEMAPARRAY_CLASS_ID => {
+            let Ok(view) = crate::resources::texture_array::CubemapArrayView::from_value(
+                &payload.root,
+            ) else {
+                return false;
+            };
+            let Ok(depth) = crate::resources::texture_array::cubemap_array_depth(view.cubemap_count)
+            else {
+                return false;
+            };
+            (
+                view.width,
+                view.width,
+                usize::try_from(depth).unwrap_or(0),
+                view.image_data.is_empty(),
+                view.stream_data,
+            )
+        }
+        _ => return false,
+    };
+    width > 0
+        && height > 0
+        && depth > 0
+        && (!image_data_is_empty
+            || stream_data.is_some_and(|stream| stream.is_set() && stream.size > 0))
+}
+
+fn source_has_texture_array_exporter(project_version: SceneUnityVersion) -> bool {
+    (project_version.major, project_version.minor) >= (2020, 2)
+}
+
+fn texture_array_project_route_supported(
+    class_id: i32,
+    project_version: SceneUnityVersion,
+    image_payload_exportable: bool,
+) -> bool {
+    image_payload_exportable
+        && matches!(
+            class_id,
+            crate::resources::texture_array::TEXTURE2DARRAY_CLASS_ID
+                | crate::resources::texture_array::CUBEMAPARRAY_CLASS_ID
+        )
+        && source_has_texture_array_exporter(project_version)
+        && TextureImporterLayout::for_project_version(project_version)
+            == Some(TextureImporterLayout::Unity2022_3)
+}
+
 fn should_report_unported_texture_route(
     image_payload_exportable: bool,
     texture_route_supported: bool,
@@ -703,6 +769,15 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
             let texture3d_image_exportable = engine_guid.is_none()
                 && class_id == crate::resources::texture_array::TEXTURE3D_CLASS_ID
                 && payload.is_some_and(texture3d_has_exportable_image_payload);
+            let texture_array_image_exportable = engine_guid.is_none()
+                && matches!(
+                    class_id,
+                    crate::resources::texture_array::TEXTURE2DARRAY_CLASS_ID
+                        | crate::resources::texture_array::CUBEMAPARRAY_CLASS_ID
+                )
+                && payload.is_some_and(|payload| {
+                    texture_array_has_exportable_image_payload(payload, class_id)
+                });
             let lightmap_scene_directory = lightmap_texture_directories
                 .get(&(file_index, object_index))
                 .cloned();
@@ -722,7 +797,12 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                 && cubemap_importer_supported
                 && ((texture_image_exportable && lightmap_scene_directory.is_none())
                     || lightmap_image_route
-                    || (texture3d_image_exportable && lightmap_scene_directory.is_none()));
+                    || (texture3d_image_exportable && lightmap_scene_directory.is_none())
+                    || texture_array_project_route_supported(
+                        class_id,
+                        project_version,
+                        texture_array_image_exportable,
+                    ));
             let mut claim_facts = claim_facts_for_shader_text(facts, settings_facts, shader_text);
             claim_facts.audio_decode = audio_claim_decode;
             claim_facts.engine_file = engine_guid.is_some();
@@ -732,6 +812,10 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                     .is_some_and(|script| !script.is_empty()),
                 128 => font_data.is_some_and(|data| !data.is_empty()),
                 crate::resources::texture_array::TEXTURE3D_CLASS_ID => texture3d_image_exportable,
+                crate::resources::texture_array::TEXTURE2DARRAY_CLASS_ID
+                | crate::resources::texture_array::CUBEMAPARRAY_CLASS_ID => {
+                    texture_array_image_exportable
+                }
                 _ => false,
             };
             if class_id == 128 {
@@ -741,7 +825,12 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                 // main asset for every texture referenced by LightmapSettings.Lightmaps.
                 claim_facts.main = ClaimMainKind::LightingData;
             } else if texture_route_supported
-                && class_id != crate::resources::texture_array::TEXTURE3D_CLASS_ID
+                && !matches!(
+                    class_id,
+                    crate::resources::texture_array::TEXTURE3D_CLASS_ID
+                        | crate::resources::texture_array::TEXTURE2DARRAY_CLASS_ID
+                        | crate::resources::texture_array::CUBEMAPARRAY_CLASS_ID
+                )
             {
                 // SpriteProcessor assigns exportable textures a generated main asset, including
                 // textures referenced by Sprite objects. Keep image routing in the ordinary
@@ -833,12 +922,14 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
             };
             let texture_export = if texture_route_supported {
                 let expected_exporter =
-                    if class_id == crate::resources::texture_array::TEXTURE3D_CLASS_ID {
-                        "TextureArrayAssetExporter"
-                    } else if lightmap_image_route {
-                        "LightmapTextureAssetExporter"
-                    } else {
-                        "TextureAssetExporter"
+                    match class_id {
+                        crate::resources::texture_array::TEXTURE3D_CLASS_ID
+                        | crate::resources::texture_array::TEXTURE2DARRAY_CLASS_ID
+                        | crate::resources::texture_array::CUBEMAPARRAY_CLASS_ID => {
+                            "TextureArrayAssetExporter"
+                        }
+                        _ if lightmap_image_route => "LightmapTextureAssetExporter",
+                        _ => "TextureAssetExporter",
                     };
                 if selection.exporter != expected_exporter {
                     return Err(invalid_project(format!(
@@ -860,6 +951,24 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                     .and_then(crate::resources::vertex_data_blob::UnityVersion::parse);
                 let plan = if class_id == crate::resources::texture_array::TEXTURE3D_CLASS_ID {
                     plan_texture3d_project_export_for_source_version(
+                        &payload.root,
+                        project_version,
+                        source_unity_version,
+                        settings,
+                        asset_bundle_name.as_deref(),
+                    )
+                } else if class_id
+                    == crate::resources::texture_array::TEXTURE2DARRAY_CLASS_ID
+                {
+                    plan_texture2d_array_project_export_for_source_version(
+                        &payload.root,
+                        project_version,
+                        source_unity_version,
+                        settings,
+                        asset_bundle_name.as_deref(),
+                    )
+                } else if class_id == crate::resources::texture_array::CUBEMAPARRAY_CLASS_ID {
+                    plan_cubemap_array_project_export_for_source_version(
                         &payload.root,
                         project_version,
                         source_unity_version,
@@ -893,7 +1002,7 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                     // Mirror `TextureExportCollection.AddSprites` for plain Texture2D
                     // collections: sprites bound to this texture through their render-data
                     // texture pointer overwrite the default sprite importer fields.
-                    // Cubemap, Texture3D, and lightmap routes keep their existing fields.
+                    // Cubemap, texture-array, Texture3D, and lightmap routes keep their existing fields.
                     let sprite_facts =
                         crate::export::importer_fields::collect_sprite_facts_for_texture(
                             objects,
@@ -1112,7 +1221,10 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                 }
             };
             let fallback_reason = if should_report_unported_texture_route(
-                texture_image_exportable || texture3d_image_exportable,
+                texture_image_exportable
+                    || texture3d_image_exportable
+                    || (texture_array_image_exportable
+                        && source_has_texture_array_exporter(project_version)),
                 texture_route_supported,
                 yaml_lightmap_route,
             ) {
@@ -1493,9 +1605,10 @@ mod tests {
     use super::{
         predefined_engine_material_rows, predefined_engine_material_target,
         predefined_engine_shader_target, project_object_name, select_engine_assets_band,
-        should_report_unported_texture_route,
+        should_report_unported_texture_route, texture_array_project_route_supported,
     };
     use crate::export::project_workflow::SHADER_CLASS_ID;
+    use crate::processing::scene_naming::SceneUnityVersion;
     use crate::resources::shader::{ParsedShaderForm, ParsedShaderProperty, ShaderView};
 
     #[test]
@@ -1504,6 +1617,27 @@ mod tests {
         assert!(should_report_unported_texture_route(true, false, false));
         assert!(!should_report_unported_texture_route(true, true, false));
         assert!(!should_report_unported_texture_route(false, false, false));
+    }
+
+    #[test]
+    fn texture_array_project_routes_require_the_registered_and_pinned_target_version() {
+        let supported = SceneUnityVersion::parse("2022.3.22f1").unwrap();
+        let registration_boundary = SceneUnityVersion::parse("2020.2.0f1").unwrap();
+        let older = SceneUnityVersion::parse("2019.4.40f1").unwrap();
+        for class_id in [
+            crate::resources::texture_array::TEXTURE2DARRAY_CLASS_ID,
+            crate::resources::texture_array::CUBEMAPARRAY_CLASS_ID,
+        ] {
+            assert!(texture_array_project_route_supported(class_id, supported, true));
+            assert!(!texture_array_project_route_supported(class_id, supported, false));
+            assert!(!texture_array_project_route_supported(
+                class_id,
+                registration_boundary,
+                true
+            ));
+            assert!(!texture_array_project_route_supported(class_id, older, true));
+        }
+        assert!(!texture_array_project_route_supported(117, supported, true));
     }
 
     #[test]
