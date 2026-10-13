@@ -1171,7 +1171,7 @@ fn sprite_sheet_v7() -> Result<UnityYamlNode, Box<dyn Error>> {
         ("bones", empty_sequence()),
         ("spriteID", UnityYamlNode::string("")),
         ("vertices", empty_sequence()),
-        ("indices", empty_sequence()),
+        ("indices", UnityYamlNode::string("")),
         ("edges", empty_sequence()),
         ("weights", empty_sequence()),
     ])
@@ -1280,7 +1280,7 @@ fn sprite_sheet(modern: bool) -> Result<UnityYamlNode, Box<dyn Error>> {
         ("spriteID", UnityYamlNode::string("")),
         ("internalID", signed(0)),
         ("vertices", empty_sequence()),
-        ("indices", empty_sequence()),
+        ("indices", UnityYamlNode::string("")),
         ("edges", empty_sequence()),
         ("weights", empty_sequence()),
         ("secondaryTextures", empty_sequence()),

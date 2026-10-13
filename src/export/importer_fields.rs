@@ -601,7 +601,10 @@ fn sprite_bone_fields_to_yaml(
         .ok_or_else(|| invalid_sprite_data("Sprite bone metadata has no planned SpriteID"))?;
     let mut fields = vec![
         ("bones".to_owned(), sprite_bones_to_yaml(bones)?),
-        ("spriteID".to_owned(), UnityYamlNode::string(sprite_id.clone())),
+        (
+            "spriteID".to_owned(),
+            UnityYamlNode::string(sprite_id.clone()),
+        ),
     ];
     if importer_node_has_field(target_layout, "vertices") {
         fields.push((
@@ -663,9 +666,7 @@ fn sprite_bones_to_yaml(bones: &[SpriteBoneData]) -> Result<UnityYamlNode, Box<d
     Ok(sequence)
 }
 
-fn sprite_bone_vertices_to_yaml(
-    vertices: &[[f32; 2]],
-) -> Result<UnityYamlNode, Box<dyn Error>> {
+fn sprite_bone_vertices_to_yaml(vertices: &[[f32; 2]]) -> Result<UnityYamlNode, Box<dyn Error>> {
     let mut sequence = empty_sprite_sequence();
     for vertex in vertices {
         sequence.push(sprite_point_node(*vertex)?)?;
@@ -681,9 +682,7 @@ fn sprite_bone_indices_to_yaml(indices: &[i16]) -> Result<UnityYamlNode, Box<dyn
     Ok(sequence)
 }
 
-fn sprite_bone_weights_to_yaml(
-    weights: &[BoneWeight4],
-) -> Result<UnityYamlNode, Box<dyn Error>> {
+fn sprite_bone_weights_to_yaml(weights: &[BoneWeight4]) -> Result<UnityYamlNode, Box<dyn Error>> {
     let mut sequence = empty_sprite_sequence();
     for weight in weights {
         let mut node =
@@ -692,7 +691,10 @@ fn sprite_bone_weights_to_yaml(
             node.insert_field(format!("weight[{index}]"), float_node(*value))?;
         }
         for (index, value) in weight.indices.iter().enumerate() {
-            node.insert_field(format!("boneIndex[{index}]"), signed_node(i64::from(*value)))?;
+            node.insert_field(
+                format!("boneIndex[{index}]"),
+                signed_node(i64::from(*value)),
+            )?;
         }
         sequence.push(node)?;
     }
@@ -1126,9 +1128,7 @@ fn read_sprite_bone(value: &SerializedValue) -> Result<UnscaledSpriteBone, Box<d
         .transpose()?;
     let guid = strict_sprite_field(value, "guid")?
         .map(|value| match value {
-            SerializedValue::StringBytes(bytes) => {
-                Ok(String::from_utf8_lossy(bytes).into_owned())
-            }
+            SerializedValue::StringBytes(bytes) => Ok(String::from_utf8_lossy(bytes).into_owned()),
             other => Err(invalid_sprite_data(format!(
                 "SpriteBone.guid has kind {}, expected string",
                 sprite_value_kind(other)
@@ -1189,9 +1189,9 @@ fn strict_sprite_field<'a>(
     name: &str,
 ) -> Result<Option<&'a SerializedValue>, Box<dyn Error>> {
     let scope = sprite_value_scope(value)?;
-    scope
-        .unique_field(name)
-        .map_err(|error| invalid_sprite_data(format!("could not read Sprite field {name}: {error}")))
+    scope.unique_field(name).map_err(|error| {
+        invalid_sprite_data(format!("could not read Sprite field {name}: {error}"))
+    })
 }
 
 fn strict_required_sprite_field<'a>(
@@ -1251,8 +1251,9 @@ fn read_sprite_bone_geometry(
     pixels_to_units: f32,
     source_rect_size: [f32; 2],
 ) -> Result<SpriteBoneGeometry, Box<dyn Error>> {
-    let mesh = MeshView::from_render_data_value(render_data, version, endian)
-        .map_err(|error| invalid_sprite_data(format!("could not read SpriteRenderData: {error}")))?;
+    let mesh = MeshView::from_render_data_value(render_data, version, endian).map_err(|error| {
+        invalid_sprite_data(format!("could not read SpriteRenderData: {error}"))
+    })?;
     let decoded = match mesh.vertex_data {
         Some(vertex_data) => VertexDataBlob::from_parts(
             vertex_data.channels,
@@ -1263,7 +1264,9 @@ fn read_sprite_bone_geometry(
             endian,
         )
         .and_then(|blob| blob.read_channels_for_mesh_merge())
-        .map_err(|error| invalid_sprite_data(format!("could not decode Sprite vertex data: {error}")))?,
+        .map_err(|error| {
+            invalid_sprite_data(format!("could not decode Sprite vertex data: {error}"))
+        })?,
         None => None,
     };
     let mut geometry = SpriteBoneGeometry::default();
@@ -1285,7 +1288,9 @@ fn read_sprite_bone_geometry(
         .try_reserve_exact(mesh.index_buffer.len() / 2)
         .map_err(|_| invalid_sprite_data("could not allocate Sprite bone indices"))?;
     for pair in mesh.index_buffer.chunks_exact(2) {
-        geometry.indices.push(i16::from_le_bytes([pair[0], pair[1]]));
+        geometry
+            .indices
+            .push(i16::from_le_bytes([pair[0], pair[1]]));
     }
     Ok(geometry)
 }
@@ -1640,8 +1645,8 @@ mod tests {
         read_sprite_bone_geometry, read_sprite_bones, read_sprite_physics_shape,
         read_sprite_texture_link, select_prefab_importer, sprite_export_id_for_ordinal,
         truncate_execution_order, PrefabImporterBranch, SpriteAlignment, SpriteFacts,
-        SpriteImportMode, SpriteImporterDecision, SpriteOutlineTransform, SPRITE_MESH_TYPE_FULL_RECT,
-        TEXTURE_IMPORTER_TYPE_SPRITE,
+        SpriteImportMode, SpriteImporterDecision, SpriteOutlineTransform,
+        SPRITE_MESH_TYPE_FULL_RECT, TEXTURE_IMPORTER_TYPE_SPRITE,
     };
     use super::{plugin_importer, texture_importer};
     use crate::export::unity_yaml::{UnityYamlNode, UnityYamlNodeKind, UnityYamlScalar};
@@ -2114,10 +2119,7 @@ mod tests {
             .unwrap();
         for name in ["vertices", "indices", "edges", "weights"] {
             sprite_sheet
-                .insert_field(
-                    name,
-                    UnityYamlNode::sequence(UnityYamlSequenceStyle::Block),
-                )
+                .insert_field(name, UnityYamlNode::sequence(UnityYamlSequenceStyle::Block))
                 .unwrap();
         }
         sprite_sheet
@@ -2238,8 +2240,9 @@ mod tests {
             UnityYamlNodeKind::Scalar(UnityYamlScalar::String(value))
                 if value == "00112233445566778899aabbccddeeff"
         ));
-        let UnityYamlNodeKind::Sequence { items: vertices, .. } =
-            &field(sheet, "vertices").kind
+        let UnityYamlNodeKind::Sequence {
+            items: vertices, ..
+        } = &field(sheet, "vertices").kind
         else {
             panic!("SpriteSheet.vertices must be a sequence");
         };
@@ -2247,8 +2250,7 @@ mod tests {
             &field(&vertices[0], "x").kind,
             UnityYamlNodeKind::Scalar(UnityYamlScalar::Float32(value)) if *value == 6.0
         ));
-        let UnityYamlNodeKind::Sequence { items: indices, .. } =
-            &field(sheet, "indices").kind
+        let UnityYamlNodeKind::Sequence { items: indices, .. } = &field(sheet, "indices").kind
         else {
             panic!("SpriteSheet.indices must be a sequence");
         };
@@ -2260,8 +2262,7 @@ mod tests {
             panic!("SpriteSheet.edges must be a sequence");
         };
         assert!(edges.is_empty());
-        let UnityYamlNodeKind::Sequence { items: weights, .. } =
-            &field(sheet, "weights").kind
+        let UnityYamlNodeKind::Sequence { items: weights, .. } = &field(sheet, "weights").kind
         else {
             panic!("SpriteSheet.weights must be a sequence");
         };
@@ -2311,14 +2312,12 @@ mod tests {
             )
         }
 
-        fn bone(
-            name: &str,
-            parent_id: i32,
-            position: [f32; 3],
-            length: f32,
-        ) -> SerializedValue {
+        fn bone(name: &str, parent_id: i32, position: [f32; 3], length: f32) -> SerializedValue {
             SerializedValue::Struct(vec![
-                field("name", SerializedValue::StringBytes(name.as_bytes().to_vec())),
+                field(
+                    "name",
+                    SerializedValue::StringBytes(name.as_bytes().to_vec()),
+                ),
                 field(
                     "position",
                     vector(&[("x", position[0]), ("y", position[1]), ("z", position[2])]),
@@ -2428,7 +2427,11 @@ mod tests {
         };
         let mut data = Vec::new();
         for (position, weights, indices) in [
-            ([1.0f32, 2.0, 0.0], [0.5f32, 0.25, 0.25, 0.0], [0i32, 1, 2, 0]),
+            (
+                [1.0f32, 2.0, 0.0],
+                [0.5f32, 0.25, 0.25, 0.0],
+                [0i32, 1, 2, 0],
+            ),
             ([4.0f32, 5.0, 0.0], [1.0f32, 0.0, 0.0, 0.0], [3i32, 0, 0, 0]),
         ] {
             for value in position.into_iter().chain(weights) {
@@ -2471,14 +2474,9 @@ mod tests {
             ),
         ]);
 
-        let geometry = read_sprite_bone_geometry(
-            &render_data,
-            version,
-            EndianType::Little,
-            2.0,
-            [10.0, 6.0],
-        )
-        .unwrap();
+        let geometry =
+            read_sprite_bone_geometry(&render_data, version, EndianType::Little, 2.0, [10.0, 6.0])
+                .unwrap();
         assert_eq!(geometry.vertices, vec![[7.0, 7.0], [13.0, 13.0]]);
         assert_eq!(geometry.indices, vec![0, 1, -1]);
         assert_eq!(geometry.weights.len(), 2);
