@@ -2644,11 +2644,12 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 
 | Field | Finding |
 |---|---|
-| Status | Static source-to-merge trace on 2026-10-13; candidate implementation gap, not yet reproduced with a serialized fixture or export. |
+| Status | Resolved for the partial-channel merge contract on 2026-10-13. This was a stale static candidate, not an observed serialized-asset difference. |
 | Source behavior | `VertexDataBlob.ReadData` writes each recognized channel to its corresponding out array, then returns `vertices is not null`. `MeshExtensions.ReadData` ignores that boolean, keeps those out arrays, and fills only missing arrays from `CompressedMesh.Decompress` with `??=`. `MeshData.TryMakeFromMesh` checks for positions only after this merge. |
-| Rust route and candidate root cause | `vertex_data_blob.rs::read_data` returns `Some(mesh)` only when `vertices_set` is true; otherwise it returns `None`, even if a non-position channel was decoded into `mesh`. `mesh.rs::read_mesh_data` passes that `None` into `MeshParts`, so `mesh_data.rs::try_make_from_parts` cannot use those decoded channels alongside positions supplied by compressed data. A payload with compressed positions and an uncompressed normal/UV/skin channel is the discriminating case. |
-| Evidence boundary | The frozen source and Rust call chains were inspected; no serialized input bytes, TypeTree fixture, reference runtime output, Rust test, or project export was run for this candidate. Do not treat it as an observed sample difference or confirmed valid-Unity asset case. |
-| Validation required | Build a controlled serialized fixture with compressed positions plus a non-position-only vertex-data channel, run both source and Rust merge paths, and compare channel values. If the difference reproduces, retain partial decoded channels independently of the position-presence result and add the regression before full validation. |
+| Rust route and correction | `vertex_data_blob.rs::read_data` keeps the source boolean contract. `read_channels_for_mesh_merge` separately returns decoded channels when either positions or any other supported channel is present, and `mesh.rs::read_mesh_data` passes them into `mesh_data.rs::try_make_from_parts`, where compressed positions fill the missing position channel. This generic route was already present in `e80eb73`; the current audit adds the discriminating regression. |
+| Regression evidence | `non_position_vertex_blob_channels_merge_with_compressed_positions` verifies that `read_data()` is still `None` without positions, while decoded normals survive and merge with compressed positions. GitHub Actions run `38478285253` passes the full Linux and Windows workspace test/build jobs. |
+| Evidence boundary | This is a generated Unity 2022.3 `VertexDataBlob` test plus source-code trace. No serialized TypeTree fixture, frozen-source runtime output, exported project, or user-sample difference was produced. Close only the partial-channel merge contract; do not treat the broader Mesh feature as complete. |
+| Remaining validation | Other vertex-channel combinations, Unity-version layouts, and serialized TypeTree-to-export integration remain open under `RES-MESH-VIEW-001` / `RES-MODEL-001`. |
 
 ## DIFF-PRODUCT-GUI-001 — Browser product runtime and workflows are not implemented
 
