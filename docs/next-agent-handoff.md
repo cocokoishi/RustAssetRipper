@@ -223,3 +223,13 @@ The Unity 5.6 RenderSettings regression in src/main_tests_05.rs and its source f
 - The formal feature-parity report is target/feature-parity-report-20261013-container-audit.json. It exits 1 because the gate is open: 393 rows, 368 verified, 25 non-verified, zero duplicate IDs, zero malformed rows.
 - No project export was produced. tools/audit-project-documents.ps1 and tools/check-project-references.ps1, Unity Editor import/runtime, and UABEA were not run. No Unity license status was tested. The non-Windows frozen-source runtime comparison remains unrun.
 - Next: investigate RES-MATERIAL-EXPORT-001's documented coverage gap for multiple non-null saved texture pointers. Trace bytes through TypeTree decoding, cross-file reference resolution, pointer mapping, and emitted Material YAML before changing code; add a source-backed generic regression if the path exposes a coverage or implementation gap. Keep heavy Cargo validation on GitHub Actions and preserve public-repository privacy and staging restrictions.
+
+## 2026-10-13 checkpoint - Material saved-property pointer coverage
+
+- Phase 1 remains open; Phase 2 input inspection is still locked. No user-provided input, UABEA, or Unity Editor was used.
+- Code commit 20c798c adds a generated class-21 project-export regression for two non-null saved texture PPtrs in separate external files; f56c80f fixes one changed-line formatting issue. Both were pushed normally to codex/mesh-partial-channel-20261013.
+- GitHub Actions run 38481770880 passed on Ubuntu and Windows: workspace tests (Ubuntu 1,742 library + 128 CLI; Windows 1,744 library + 128 CLI; one ignored library test per platform), warnings-denied Clippy, release builds, changed-Rust formatting, and public-repository hygiene.
+- The test confirms distinct source PPtrs map to their own exported Texture2D GUIDs and preserves map order. The exact source-runtime comparison still covers only one non-null pointer; RES-MATERIAL-EXPORT-001 remains implemented but unverified.
+- The latest formal parity report is target/feature-parity-report-20261013-container-audit.json: 393 rows, 368 verified, 25 non-verified, no duplicate IDs or malformed rows. Its exit 1 is expected while the Phase 1 gate is open.
+- No persistent export output was produced. Project-document/reference audits, Unity Editor import/runtime, and UABEA remain unrun; no Unity license status was tested.
+- Next: continue the Phase 1 material audit by obtaining an independent source-runtime result for multiple saved texture PPtrs or broaden version/map coverage. Trace the serialized value, graph edge, pointer identity, and YAML output before any production edit. Keep full Cargo checks on GitHub Actions and preserve privacy/staging rules.
