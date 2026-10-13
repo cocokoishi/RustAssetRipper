@@ -1978,6 +1978,42 @@ mod tests {
     }
 
     #[test]
+    fn fsb5_vorbis_parser_reads_versioned_headers_metadata_and_aligned_packets() {
+        for (version, base_header_size) in [(0u32, 64usize), (1, 60)] {
+            let mut data = vec![0u8; base_header_size];
+            data[..4].copy_from_slice(b"FSB5");
+            data[4..8].copy_from_slice(&version.to_le_bytes());
+            data[8..12].copy_from_slice(&1u32.to_le_bytes());
+            data[12..16].copy_from_slice(&29u32.to_le_bytes());
+            data[20..24].copy_from_slice(&67u32.to_le_bytes());
+            data[24..28].copy_from_slice(&15u32.to_le_bytes());
+
+            // FSB5 sample header: 12,345 samples, a 64-byte data offset encoded in
+            // 32-byte units, stereo, 44.1 kHz, and a following metadata chain.
+            data.extend_from_slice(&[0x31, 0x01, 0, 0, 0xE4, 0xC0, 0, 0]);
+            data.extend_from_slice(&[0x03, 0, 0, 0x02, 6]); // channels override, next chunk
+            data.extend_from_slice(&[0x09, 0, 0, 0x04]); // 32 kHz override, next chunk
+            data.extend_from_slice(&32_000u32.to_le_bytes());
+            data.extend_from_slice(&[0x08, 0, 0, 0x16]); // Vorbis setup CRC, final chunk
+            data.extend_from_slice(&0xA722_97FFu32.to_le_bytes());
+            data.extend_from_slice(&[0u8; 64]);
+            data.extend_from_slice(&[1, 0, 0]); // one length-prefixed one-byte packet
+
+            let sample = super::Fsb5VorbisSample::parse(&data).unwrap();
+            assert_eq!(sample.channels, 6);
+            assert_eq!(sample.sample_rate, 32_000);
+            assert_eq!(sample.sample_count, 12_345);
+            assert_eq!(sample.setup_crc32, 0xA722_97FF);
+            assert_eq!(sample.packet_data, &[1, 0, 0][..]);
+            assert!(super::vorbis_lookup::VORBIS_LOOKUP.contains_key(&sample.setup_crc32));
+
+            let mut packets = super::FsbVorbisPacketReader::new(sample.packet_data);
+            assert_eq!(packets.next_packet().unwrap(), Some(&[0][..]));
+            assert_eq!(packets.next_packet().unwrap(), None);
+        }
+    }
+
+    #[test]
     fn exporter_warnings_name_the_asset_like_the_source() {
         assert_eq!(
             native_audio_empty_warning("Music"),

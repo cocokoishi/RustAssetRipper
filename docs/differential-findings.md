@@ -526,8 +526,8 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Input evidence | Probe `Temp/opencode/audioprobe` drove real `AudioClip.Create` instances with `AudioData`/`Type` set through the shipped `TryDecode` (SDK 10.0.401): the empty early message, typed `wav`/`ogg` passthrough with raw bytes, and the unmapped-type `audioClip` default — four rows committed as `src/export/audio_decode_fixture.txt`. Probe `Temp/opencode/audioprops` pinned the `IAudioClip` properties, the per-version gates (3.5 inline+typed, 5.0+ resource), and the `FmodSoundType`/`FmodSoundFormat` discriminants (`src/resources/audio_generated_api_fixture.txt`). The magic/diagnostic branches are reachable only through resource-backed 5.0+ clips, so they stay source-read. |
 | Source-derived behavior | On 3.5 layouts `Has_Type` is version-true, so `TryDecode` always takes the typed path there; the magic checks apply to untyped (resource-backed) data. The unknown-byte diagnostic fills with U+00D8 (`'Ø'`), not ASCII `'O'`: the prior Rust port used the wrong fill and its test encoded it. Fixed to the source literal with the test corrected. |
 | Root cause | The fill-character deviation predates this increment (wrong by one codepoint in `diagnostic_printable`); caught while tracing the diagnostic path for the CLI error. |
-| Rust change | `resources::audio::{AudioClipView, fmod_sound_type_raw_extension}` (presence-driven gates, source-order resolution, lazy integrity check); `export::audio_export::try_decode_audio` composing the reference order with exact messages; `export-audio` CLI with inline and streamed-resource resolution. `FSB5`/Vorbis stay explicit errors. |
-| Regression evidence | `export::audio_export::tests::try_decode_matches_the_reference_runtime` asserts all four probed rows; the corrected fill test pins U+00D8; seven `export-audio` CLI tests cover typed/tracker passthrough, streamed resolution, empty/unknown/FSB5 failures, the class-83 guard, and overwrite refusal. |
+| Rust change | `resources::audio::{AudioClipView, fmod_sound_type_raw_extension}` (presence-driven gates, source-order resolution, lazy integrity check); `export::audio_export::try_decode_audio` composing the reference order with exact messages; `export-audio` CLI with inline and streamed-resource resolution. At this finding's original implementation snapshot, `FSB5`/Vorbis were explicit errors; the bounded Rust decoder was added later in commit `72fdab1` and is not validated by these reference-runtime rows. |
+| Regression evidence | `export::audio_export::tests::try_decode_matches_the_reference_runtime` asserts all four probed rows; the corrected fill test pins U+00D8; seven `export-audio` CLI tests cover typed/tracker passthrough, streamed resolution, empty/unknown/FSB5 failures, the class-83 guard, and overwrite refusal. Those CLI checks cover FSB5 error paths only; the later success path has no portable positive fixture. |
 | Remaining comparison | Only four decode shapes were probed; `OggToWav` could not load in the probe sandbox (NAudio closure mismatch) and stays source-read. No Unity-produced clip has been exported. |
 
 ## DIFF-SHADER-PARSED-001 - parsed-form dummy property rendering and template selection
@@ -2480,7 +2480,7 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 
 | Field | Finding |
 |---|---|
-| Input and reference | 青岚山河卷 `Nijika Lost Kitten (Bocchi the Rock).ogg` (FSB5 Vorbis remux); Ogg page/packet splitter over both outputs. |
+| Input and reference | 青岚山河卷 `音频片段.ogg` (FSB5 Vorbis remux); Ogg page/packet splitter over both outputs. |
 | Before-fix difference | 1.6M/1.9M bytes differ from byte 22 (page checksums onward). |
 | Analysis | Both files carry 6,729 packets with identical headers (identification, comment, setup) and bit-identical audio-packet streams — Rust remuxes original packets verbatim; only page grouping differs. |
 | Verification | Packet-stream SHA-256 equality; `AE_Leaves`-class byte proof does not apply here — classified content-EXACT, framing differs. |
@@ -2490,10 +2490,10 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 
 | Field | Finding |
 |---|---|
-| Input and reference | 青岚山河卷 `Door.cs`; frozen `EmptyScript.cs` global raw-string template. |
+| Input and reference | 青岚山河卷 `脚本片段.cs`; frozen `EmptyScript.cs` global raw-string template. |
 | Before-fix difference | One blank comment line: source `\t\t\t`, Rust empty (2,698 vs 2,695 bytes, the only diff). |
 | Rust change | Global template line restored to `\t\t\t`; test expectation corrected to source truth. |
-| Verification | `Door.cs` byte-identical in r22; template unit tests green. |
+| Verification | `脚本片段.cs` byte-identical in r22; template unit tests green. |
 | Limits | None known. Unity Editor import/runtime and UABEA were not run. |
 
 ## DIFF-OPAQUE-NORMALMAP-001 - DXT5nm unpack trigger value
@@ -2616,9 +2616,20 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Before-fix difference | Rust r8 exported a stray `青瓷凝光.mat` and pointed one class-23 and one class-114 document at it (fileID 2100000, generated GUID, type 2); the frozen source points both at builtin-extra fileID 10303/FGUID and emits no such asset. Cause: `predefined_engine_material_target` applied its table only for `2022.3 patch >= 11`, while the shader table applied unconditionally to every version. |
 | Source behavior (probed) | The embedded blob carries 114 ordered band keys. `bandjson 2022.3.6f1` selects `2022.2.15f1`; `bandjson 2022.3.22f1` selects `2022.3.11f1` — the same nearest-key-at-or-below rule as the frozen selector, verified live. Projecting both bands to the committed TSV row format reproduces the committed material rows exactly from the 2022.2.15f1 band (15/15) and the committed shader rows exactly from the 2022.3.11f1 band (202/202). The two bands' material rows are mutually byte-identical; shader rows differ in 7 instances (fileID 111 properties; fileIDs 112/114/15313/15314/15315 only in 2022.3.11f1). DefaultResources pathID-to-type rows are identical, so the class-ID validation table needs no band split. |
 | Rust change | `select_engine_assets_band` ports the exact source band selection over embedded `engine_asset_bands.tsv` (ordered with `FactoryUnityVersion::source_order_bits`, the frozen `GetBits` order). Material/Shader lookups read band-keyed tables and return `None` for unprobed bands. Old version-named TSVs are replaced by band-keyed fixtures; the probe project is committed (its `bin`/`obj` outputs stay ignored). The shader reverse-name path stays band-independent with justification. |
-| Verification | Routing tests, `export::` suite, warnings-denied Clippy, release build, and the r9 replay with per-class byte-exact and GUID-normalized audits are recorded in the validation-log entry above, together with the 松月竹庭 r7 regression replay (Cube pointer preserved, Cat_Ear byte-identical, source-vs-r7 comparison identical-or-better than r6 on every metric). |
+| Verification | Routing tests, `export::` suite, warnings-denied Clippy, release build, and the r9 replay with per-class byte-exact and GUID-normalized audits are recorded in the validation-log entry above, together with the 松月竹庭 r7 regression replay (Cube pointer preserved, 纹理资源 byte-identical, source-vs-r7 comparison identical-or-better than r6 on every metric). |
 | Limits | Only the 2022.2.15f1 and 2022.3.11f1 bands have embedded tables; versions selecting other bands get no predefined redirect (documented debt, fail-open to normal export). Non-null `m_NavMeshData`, float last-digit prints, the lighting path, and PlayableDirector bindings remain open. Unity Editor import/runtime and UABEA were not run. |
 
+
+## DIFF-AUDIO-FSB5-RECONSTRUCTION-001 — Bounded FSB5 Vorbis reconstruction lacks a reusable positive regression
+
+| Field | Finding |
+|---|---|
+| Status | The Rust success path exists, but broad format parity remains implemented-but-unverified under `RES-AUDIO-001`. |
+| Rust scope | `src/export/audio_export.rs::Fsb5VorbisSample::parse` and `decode_fsb5_vorbis` accept FSB5 versions 0/1, exactly one stream, sound format 15 (Vorbis), and setup CRCs present in `src/export/audio_export/vorbis_lookup.rs`. Metadata overrides, stream offsets, packet lengths, sample counts, Ogg framing, and decoded-output bounds are handled by the Rust path. |
+| Independent structural cross-check | The header-size, format, sample-header, metadata-chunk, and packet-framing branches were checked against the independent [vgmstream FSB5 parser](https://github.com/vgmstream/vgmstream/blob/master/src/meta/fsb5.c), [python-fsb5 binary template](https://github.com/HearthSim/python-fsb5/blob/master/FSB5.bt), and [vgmstream FSB Vorbis packet reader](https://github.com/vgmstream/vgmstream/blob/master/src/coding/vorbis_custom_utils_fsb.c). This is a source-level structural cross-check, not a differential run. The setup-header lookup table is vendored from fsbex with its license retained; it is data, not a runtime decoder dependency. |
+| Existing output evidence | `DIFF-OPAQUE-OGG-FRAMING-001` records one historical source/Rust output pair with identical Ogg packet streams. That case demonstrates a successful remux for one input, but its input is not a reusable generic test fixture and it does not establish broad format or Unity import parity. |
+| Coverage gap | Existing end-to-end tests exercise FSB5 failures. The new generated parser-only fixture pins versions 0/1, a 32-byte-aligned sample offset, channel/rate metadata overrides, setup CRC extraction, and size-prefixed packet boundaries; its synthetic packet is not valid Vorbis audio and the test does not exercise successful reconstruction. No independent decoder has validated reconstructed output from a retained generated fixture. |
+| Result and next step | Do not describe FSB5 as wholly deferred or claim complete support. Keep `RES-AUDIO-001` open. Add a redistributable generic positive fixture with independent packet/decode expectations, then broaden versions, sample layouts, and stream cases before changing the parity status. Unity import/runtime was not run. |
 ## DIFF-AUDIO-OGG-WAV-001 — PreferWav Vorbis Ogg to IEEE-float WAV (conversion path fixed)
 
 | Field | Finding |

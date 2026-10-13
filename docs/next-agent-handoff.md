@@ -233,3 +233,14 @@ The Unity 5.6 RenderSettings regression in src/main_tests_05.rs and its source f
 - The latest formal parity report is target/feature-parity-report-20261013-container-audit.json: 393 rows, 368 verified, 25 non-verified, no duplicate IDs or malformed rows. Its exit 1 is expected while the Phase 1 gate is open.
 - No persistent export output was produced. Project-document/reference audits, Unity Editor import/runtime, and UABEA remain unrun; no Unity license status was tested.
 - Next: continue the Phase 1 material audit by obtaining an independent source-runtime result for multiple saved texture PPtrs or broaden version/map coverage. Trace the serialized value, graph edge, pointer identity, and YAML output before any production edit. Keep full Cargo checks on GitHub Actions and preserve privacy/staging rules.
+
+
+## 2026-10-13 checkpoint - FSB5 decoder scope and generated parser fixture
+
+- Phase 1 remains open; Phase 2 remains locked. No user input, UABEA, or Unity Editor was used.
+- `RES-AUDIO-001` now records the existing bounded Rust FSB5/Vorbis route: versions 0/1, one stream, format 15, and setup CRCs in the vendored table. The route has no runtime Fmod5Sharp dependency. Existing historical packet-identity evidence covers one successful input only; there is no portable positive decode fixture.
+- Added parser-only regression `fsb5_vorbis_parser_reads_versioned_headers_metadata_and_aligned_packets`. It constructs version 0/1 headers and verifies data-offset units, channel/rate metadata overrides, setup CRC extraction, and packet length framing. Its synthetic one-byte packet is not valid Vorbis audio. The full decoder remains unverified.
+- Latest parity audit: `target/feature-parity-report-20261013-fsb5-audit.json`, 393 rows, 368 verified, 25 non-verified, zero duplicate IDs, zero malformed rows; expected exit 1 and Phase 1 OPEN.
+- Latest pre-change Actions run 38482526230 succeeded on Ubuntu and Windows. Current commit has not yet run Actions. Keep Cargo tests, Clippy, and release builds on GitHub Actions due host performance limits.
+- Next: after Actions pass, build a reusable positive FSB5 fixture from generic generated audio and an independently sourced packet/decode expectation. If a redistributable independent reference fixture cannot be produced, record the concrete limitation and continue the next high-value Phase 1 gap. Do not promote audio parity based on the parse-only test.
+- Unity Editor import/runtime, UABEA, project-output audits, and the successful decoder path were not run. Preserve privacy and staging rules; do not stage `GOAL.TXT`, `cleanup_manifest.txt`, or `tools/probes/*/packages/`.
