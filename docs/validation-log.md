@@ -3,6 +3,7 @@
 ## 2026-10-14 Eighteen baselines; texture overages need source-side accounting
 
 - Two more baselines with saved inventories: large avatar exact on anim/png/mat/controller/cs/ogg with heavy sub-document output (98 state, 72 blendtree) and a 16-vs-24 shader gap; mid world exact on anim/mat/controller/cs/ogg/unity with a 131-vs-121 texture overage alongside cubemaps and sprite pairs — PNG outputs can exceed Texture2D counts, so future diffs must attribute image outputs to cubemap/sprite sources too, not just class-28. All observations, not verdicts.
+- Actions run `38551140274` is fully green on both platforms (docs-only change), including the public-repository hygiene job.
 - Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No sample content committed; outputs quarantined in gitignored scratch. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 Sixteen baselines; largest material gap noted
