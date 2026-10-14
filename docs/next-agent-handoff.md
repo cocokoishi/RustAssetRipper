@@ -1,5 +1,11 @@
 # RustAssetRipper hand-off — 2026-10-10
 
+## Latest current checkpoint — 2026-10-14 (AV11 converges)
+
+- Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public (only class IDs/counts/field names in docs; audit outputs quarantined).
+- VRC-AV11 r1: CONVERGED (two proven-equivalent Avatars; zero unpaired, 1606 paired). Converged set: AV02-AV11, W01, W02 (+AV01 with only known Avatar style). Next: advance the corpus (W03-W11 worlds pending).
+- No product code changed this round (docs only).
+
 ## Latest current checkpoint — 2026-10-14 (AV10 converges)
 
 - Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public (only class IDs/counts/field names in docs; audit outputs quarantined).
