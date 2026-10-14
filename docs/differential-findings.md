@@ -1,5 +1,9 @@
 # Source behavior and differential findings
 
+## DIFF-UNIVERSAL-HEADERS-2018-001 — editor headers backfilled for all classes (fixed)
+
+The per-class key census showed 12 more classes missing the same four editor headers on 2018.4 (components, controller, avatar, audio, light, renderer-adjacent, constraint). Fixed by generalizing the backfill: every non-stripped document without an editor tree now gets the universal headers, with class-1/4 extras unchanged and insertion skipping present fields. Re-audit: two classes resolve fully; all twelve gain exact headers with zero regressions. Remaining diffs in those classes are field-level (renderer GI sets, mesh/animator/light/constraint extras, version stamps), queued individually. Status: fixed and validated on the reporting sample.
+
 ## DIFF-PREFAB-HEADERS-2018-001 — prefab/scene editor headers for unported versions (fixed)
 
 All 83 prefab GameObjects and 83 Transforms differed by missing editor headers: the editor TypeTree path only covers 5.6/2022.3, so 2018.4 fell back to minimal converted payloads. Reference output proves 2018.4 (and 2019.4 scenes) share the 2018.3 header sets. Fixed with a document-level header backfill (front headers, tag-to-string replacement, icon/navmesh/static fields, root order, euler hints) applied when no editor tree was used, with per-field leniency and loud failure only on non-mapping bodies. Re-audit: classes 1 and 4 go from 83 diffs each to 83/83 exact with no regressions. Status: fixed and validated on the reporting sample; versions other than 2018.4/2019.4 stay gated.

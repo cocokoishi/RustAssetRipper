@@ -1,5 +1,6 @@
 use super::super::object_conversion::{
-    apply_game_object_header_backfill, prefab_header_backfill_version,
+    apply_game_object_header_backfill, apply_generic_header_backfill,
+    prefab_header_backfill_version,
 };
 use crate::export::unity_yaml::{
     UnityYamlDocument, UnityYamlMappingStyle, UnityYamlNode, UnityYamlScalar, UnityYamlWriteLimits,
@@ -98,4 +99,33 @@ fn game_object_backfill_applies_static_mark() {
         .expect("backfill succeeds");
     let output = render(&document);
     assert!(output.contains("m_StaticEditorFlags: 4294967295"));
+}
+
+#[test]
+fn generic_backfill_inserts_universal_headers_only() {
+    let mut body = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    body.insert_field("serializedVersion", signed(3)).unwrap();
+    body.insert_field("m_Enabled", signed(1)).unwrap();
+    let mut document = UnityYamlDocument::object(33, 43, "MeshFilter", body, false)
+        .expect("test component document builds");
+    apply_generic_header_backfill(&mut document).expect("backfill succeeds");
+    // A second pass is a no-op: insertion skips fields already present.
+    apply_generic_header_backfill(&mut document).expect("backfill is idempotent");
+    let output = render(&document);
+    key_order(
+        &output,
+        &[
+            "serializedVersion",
+            "m_ObjectHideFlags",
+            "m_CorrespondingSourceObject",
+            "m_PrefabInstance",
+            "m_PrefabAsset",
+            "m_Enabled",
+        ],
+    );
+    assert_eq!(
+        output.match_indices("m_ObjectHideFlags").count(),
+        1,
+        "headers are not duplicated"
+    );
 }

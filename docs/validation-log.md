@@ -1,5 +1,11 @@
 # Validation log
 
+## 2026-10-14 Universal header backfill; 13 classes remain
+
+- The key census found 12 more classes missing the same four headers. Fixed by generalizing the backfill to all classes (idempotent, tested). Formatting and Clippy (warnings-denied locally) clean; release rebuilt.
+- Fresh replay plus re-audit: real-diff classes 15 to 13 with zero unpaired files and no regressions; the twelve gain exact headers while their field-level diffs (renderer GI, mesh/animator/light/constraint extras, stamps) queue next.
+- Local checks: `git diff --check` exit 0; `cargo check`/`cargo clippy` clean; module tests green. Full validation via GitHub Actions after push. Sample input read-only; outputs quarantined. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Prefab editor headers fixed; 15 classes remain
 
 - All 83 prefab GameObjects and 83 Transforms missed editor headers because the editor path covers 5.6/2022.3 only. Fixed with a document-level backfill for 2018.4/2019.4 (headers, tag replacement, static marking, root order, euler hints), pinned by 3 new unit tests. Formatting and Clippy (warnings-denied locally) clean; release rebuilt.
