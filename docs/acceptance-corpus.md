@@ -41,7 +41,10 @@ IDs are stable: `VRC-AV##`/`VRC-W##` by (kind, size). Container facts come
 from header-only byte reads (magic, format version, version strings); no
 sample content was opened for this ledger. All four Unity revisions
 (2019.4.31f1, 2022.3.6f1, 2022.3.22f1, 6000.0.60f1) have TPK rows, so no
-version-routing blocker exists at the TypeTree level.
+version-routing blocker exists at the TypeTree level. Class-to-file count
+gaps are expected on both sides through engine-asset redirects; see
+`DIFF-ENGINE-REDIRECT-001` for the mechanism and the future diff rule
+(files plus per-asset redirect sets, never count equality).
 
 ## Per-sample acceptance state
 

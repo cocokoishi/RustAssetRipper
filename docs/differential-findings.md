@@ -1,5 +1,9 @@
 # Source behavior and differential findings
 
+## DIFF-ENGINE-REDIRECT-001 — engine-asset redirects explain file-count gaps (rule recorded)
+
+The frozen `EngineAssetsExporter.TryCreateCollection` does not export every Material/Shader/Texture as a file: assets from engine files (`unity_default_resources`, `unity_builtin_extra`) redirect to predefined GUIDs via `SingleRedirectExportCollection`, font materials/textures are excluded from that path by name, and cache-hit sprites/textures redirect to internal predefined pointers. So class counts legitimately exceed file counts on the reference side, and the Rust port mirrors all of it (`redirect_collection.rs` with `SingleRedirect`, `guid_policy.rs` predefined GUIDs, `special_names` engine-file gates, version-banded predefined shader/material tables in `object_routing.rs`, redirect collections marked non-exportable, engine-file reference fixtures). Diff rule for future Rust-vs-ref comparisons: assert exported files PLUS per-asset redirect sets (PathID to predefined GUID), never file-count-equals-class-count. Status: mechanism confirmed statically on both sides; per-asset redirect parity awaits Rust exports. The corpus shader/material/texture shortfalls are consistent with redirects and stay observations.
+
 ## DIFF-CONTROLLER-SUBDOC-IDS-001 — controller sub-doc IDs and emission order (fixed)
 
 玉京烟霞 r14 reproduced the defect: the same AnimatorController sub-documents were emitted in allocator order with IDs beginning 7000000000, while frozen source emitted FetchEditorHierarchy order with GetPseudoRandomExportId(class, childIndex). Source AddAsset skips the root controller, so the first child uses seed 0. The frozen extension and actual TriggerHoldDetect source output established the order and IDs (machine 1107709254077376921, state 1102730242686860875, transition 1101724804207875695); this was not inferred from names or hashes.
