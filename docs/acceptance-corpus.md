@@ -57,7 +57,7 @@ gaps are expected on both sides through engine-asset redirects; see
 | VRC-AV05 | probe done | decode 216/216 OK | done: 281 files; 69/69 anim, 28/28 ogg, 6/6 png, 8/8 mat, 7/7 controller, 11/11 cs, inner 2022.3.22f1; 2 shader vs 3 class-48 (observation) | pending | parse+decode-OK; export pending |
 | VRC-AV06 | probe done | decode 3394/3394 OK | done: 2067 files; 623/623 anim, 26/26 mat, 9/9 controller, 18/18 cs, 3/3 ogg, inner 2022.3.22f1; 248 png vs 249 class-28, 8 shader vs 12 class-48 (observations); 992 class-114 noted | pending | parse+decode-OK; export pending |
 | VRC-AV07 | probe done | decode 1373/1373 OK | done: 1205 files; 499/499 anim, 41/41 png, 9/9 mat, 8/8 controller, 11/11 cs, inner 2022.3.22f1; 7 shader vs 8 class-48 (observation); 4 blendtree + 1 state sub-docs noted | pending | parse+decode-OK; export pending |
-| VRC-AV08 | probe done | decode 1364/1364 OK | pending | pending | parse+decode-OK; export pending |
+| VRC-AV08 | probe done | decode 1364/1364 OK | done: 712 files; 179/179 anim, 52/52 png, 9/9 controller, 13/13 cs, 9/9 ogg; 27 mat vs 28 class-21, 8 shader vs 12 class-48 (observations); 40 meshes and Parent/Rotation constraint families noted | pending | parse+decode-OK; export pending |
 | VRC-AV09 | probe done | decode 3827/3827 OK | pending | pending | parse+decode-OK; export pending |
 | VRC-AV10 | probe done | decode 6529/6529 OK | pending | pending | parse+decode-OK; export pending |
 | VRC-AV11 | probe done | decode 6461/6461 OK | pending | pending | parse+decode-OK; export pending |
@@ -66,7 +66,7 @@ gaps are expected on both sides through engine-asset redirects; see
 | VRC-W03 | probe done | decode 2274/2274 OK | done: 1080 files; 7/7 anim, 44/44 cs, 3/3 controller, 4/4 ogg, 1 unity, 37 prefab; 43 mat vs 46 class-21, 43 shader vs 63 class-48, 169 texture files vs 173 class-28 (observations); class-213 x91 noted | pending | parse+decode-OK; export pending |
 | VRC-W04 | probe done | decode 15871/15871 OK | done: 787 files; 30/30 anim, 6/6 controller, 38/38 cs, 1 unity; 107 mat vs 111 class-21, 101 texture files vs 108 class-28, 9 shader vs 16 class-48 (observations); big class-222/224 families and engine class LightingSettings noted | pending | parse+decode-OK; export pending |
 | VRC-W05 | probe done | decode 1441/1441 OK | done: 637 files; 2/2 anim, 1/1 controller, 27/27 cs, 3/3 ogg, 1 unity, 1 renderTexture; 27 mat vs 29 class-21, 104 texture files vs 103 class-28, 36 shader vs 43 class-48 (observations); recurring engine classes (Lighting/Parent/Position/Rotation constraints) identified | pending | parse+decode-OK; export pending |
-| VRC-W06 | probe done | decode 426664/426664 OK | pending | pending | parse+decode-OK; export pending |
+| VRC-W06 | probe done | decode 426664/426664 OK | done: 9679 files; 169/169 anim, 708/708 png, 60/60 controller, 53/53 cs, 28/28 ogg, 1 unity, 1 overrideController; 888 mat vs 890 class-21, 139 shader vs 169 class-48 (observations); 103K GameObjects, one class-29 Crunch texture, SpriteAtlas/Aim/LookAt engine classes identified | pending | parse+decode-OK; export pending |
 | VRC-W07 | probe done | decode 42222/42222 OK | pending | pending | parse+decode-OK; export pending |
 | VRC-W08 | probe done | decode 1993/1993 OK | pending | pending | parse+decode-OK; export pending |
 | VRC-W09 | probe done | decode 10587/10587 OK | pending | pending | parse+decode-OK; export pending |
