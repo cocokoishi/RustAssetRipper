@@ -1,5 +1,10 @@
 # Validation log
 
+## 2026-10-14 Full-corpus factory triage (637216/637216 OK, zero failures)
+
+- Extended the probe with per-object `materialize_object` through embedded reference layouts: every one of the 637216 decoded corpus objects also constructs (counts match decode exactly). Ledger gained a factory section. Honest caveats kept: triage grade, construction-OK is not export-OK, values unvalidated, workspace/collections/export and reference side untouched.
+- Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. Sample inputs read-only; no sample content committed. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Full-corpus decode sweep (637216/637216 OK, zero failures)
 
 - Swept per-object payload decode across all 22 corpus samples with the rlib-linked probe: 28771 avatar objects plus 608445 world objects, every one decodes without error (fmt-7/8, 2018/2019/2022/6000 inner versions, TypeTree-present files, dense MonoBehaviour/animation spreads, one unknown raw type, one 421913-object single file). Ledger rows updated to parse+decode-OK; export/reference/diff legs unchanged (pending). Same honest caveats: triage grade, decode-OK is not semantic-OK, factory/workspace/export untouched.

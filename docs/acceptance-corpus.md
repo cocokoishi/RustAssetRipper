@@ -110,6 +110,14 @@ stale-rlib success paths match HEAD for these APIs, but decode-OK is not
 semantic-OK (values unvalidated); factory/workspace/export untouched.
 Next: reference-side runs, then export replay once a binary strategy exists.
 
+## Factory triage (22 samples, 637216/637216 OK)
+
+Extended the probe again with per-object `materialize_object` through the
+embedded reference layouts (2022.3 PC platform facts): every decoded object
+also constructs, 637216/637216 with zero failures, matching decode counts
+exactly. Construction-OK is not export-OK (workspace/collections/export
+untouched) and values remain unvalidated. Next: reference-side runs.
+
 ## Open tooling gaps
 
 - Runnable Rust binary from HEAD: no CI artifact upload exists (workflow is
