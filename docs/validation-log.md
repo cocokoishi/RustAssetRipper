@@ -3,6 +3,7 @@
 ## 2026-10-14 Redirect mechanism confirmed quantitatively (reference side)
 
 - Structural GUID census over a world baseline's export (535 defined GUIDs from sidecars vs 518 distinct referenced GUIDs): exactly 3 dangling targets — the unity-builtin-extra predefined GUID x79, the unity-default-resources predefined GUID x20, and one band-predefined GUID x2. Redirected assets emit no files or sidecars by design, which is why the earlier sidecar-side scan found zero. This confirms `DIFF-ENGINE-REDIRECT-001` with real numbers: class-to-file gaps in that export are substantially engine redirects, and future Rust-vs-ref diffs must compare redirect sets, not counts. No sample content read beyond GUID tokens; nothing committed from outputs.
+- Actions run `38555746508` is fully green on both platforms (docs-only change), including the public-repository hygiene job.
 - Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 Full corpus baselined (22/22); new shapes catalogued
