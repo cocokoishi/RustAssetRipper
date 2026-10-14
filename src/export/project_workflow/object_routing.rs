@@ -1196,8 +1196,10 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                 TextureImporterLayout::for_project_version(project_version).is_some();
             let cubemap_importer_supported = class_id
                 != crate::resources::texture::CUBEMAP_CLASS_ID
-                || TextureImporterLayout::for_project_version(project_version)
-                    == Some(TextureImporterLayout::Unity2022_3);
+                || matches!(
+                    TextureImporterLayout::for_project_version(project_version),
+                    Some(TextureImporterLayout::Unity2022_3 | TextureImporterLayout::Unity2018_4)
+                );
             let texture_route_supported = texture_importer_supported
                 && cubemap_importer_supported
                 && ((texture_image_exportable && lightmap_scene_directory.is_none())

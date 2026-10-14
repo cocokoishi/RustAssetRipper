@@ -196,11 +196,12 @@ pub fn plan_texture_project_export_for_source_version(
     )
 }
 
-/// Plans the source TextureExportCollection image route for a Unity 2022.3 Cubemap.
+/// Plans the source TextureExportCollection image route for a Cubemap.
 ///
 /// Cubemap faces are exported as one vertically stacked image; its importer reconstructs the six
-/// faces when Unity imports the PNG. Other importer versions stay on the existing explicit
-/// fallback until their cubemap metadata layouts are source-pinned.
+/// faces when Unity imports the PNG. The 2022.3 layout and the 2018.4 v7 body are source-pinned;
+/// other importer versions stay on the existing explicit fallback until their cubemap metadata
+/// layouts have equivalent evidence.
 pub fn plan_cubemap_project_export_for_source_version(
     root: &SerializedValue,
     project_version: SceneUnityVersion,
@@ -208,9 +209,10 @@ pub fn plan_cubemap_project_export_for_source_version(
     settings: &ExportSettingsFile,
     asset_bundle_name: Option<&str>,
 ) -> Result<TextureProjectPlan, Box<dyn Error>> {
-    if TextureImporterLayout::for_project_version(project_version)
-        != Some(TextureImporterLayout::Unity2022_3)
-    {
+    if !matches!(
+        TextureImporterLayout::for_project_version(project_version),
+        Some(TextureImporterLayout::Unity2022_3 | TextureImporterLayout::Unity2018_4)
+    ) {
         return Err(invalid_data(format!(
             "Cubemap TextureImporter serialization is not source-pinned for Unity {}.{}",
             project_version.major, project_version.minor
@@ -471,7 +473,15 @@ fn texture_importer(
             return texture_importer_v4_2017(&facts, asset_bundle_name, sprite_mesh_type, false);
         }
         TextureImporterLayout::Unity2018_2 => {
-            return texture_importer_v7(&facts, asset_bundle_name, sprite_mesh_type, true, true, 7);
+            return texture_importer_v7(
+                &facts,
+                asset_bundle_name,
+                sprite_mesh_type,
+                true,
+                true,
+                7,
+                is_cubemap,
+            );
         }
         TextureImporterLayout::Unity2018_3 => {
             return texture_importer_v7(
@@ -481,6 +491,7 @@ fn texture_importer(
                 false,
                 true,
                 7,
+                is_cubemap,
             );
         }
         TextureImporterLayout::Unity2018_4 => {
@@ -491,6 +502,7 @@ fn texture_importer(
                 false,
                 true,
                 9,
+                is_cubemap,
             );
         }
         TextureImporterLayout::Unity2019_4 | TextureImporterLayout::Unity2022_3 => {}
@@ -813,6 +825,7 @@ fn texture_importer_v7(
     has_name: bool,
     has_psd_remove_matte_option: bool,
     serialized_version: i64,
+    is_cubemap: bool,
 ) -> Result<UnityYamlNode, Box<dyn Error>> {
     let mut importer = mapping(vec![("serializedVersion", signed(serialized_version))])?;
     if has_name {
@@ -834,13 +847,13 @@ fn texture_importer_v7(
     )?;
     for (name, value) in [
         ("grayScaleToAlpha", signed(0)),
-        ("generateCubemap", signed(6)),
+        ("generateCubemap", signed(if is_cubemap { 5 } else { 6 })),
         ("cubemapConvolution", signed(0)),
         ("seamlessCubemap", signed(0)),
         ("textureFormat", signed(i64::from(facts.format))),
         ("maxTextureSize", signed(i64::from(facts.max_texture_size))),
         ("textureSettings", texture_settings(facts)?),
-        ("nPOTScale", signed(0)),
+        ("nPOTScale", signed(if is_cubemap { 1 } else { 0 })),
         ("lightmap", signed(0)),
         ("compressionQuality", signed(50)),
         ("spriteMode", signed(1)),
@@ -855,7 +868,7 @@ fn texture_importer_v7(
         ("alphaIsTransparency", signed(1)),
         ("spriteTessellationDetail", signed(-1)),
         ("textureType", signed(if facts.normal_map { 1 } else { 0 })),
-        ("textureShape", signed(1)),
+        ("textureShape", signed(if is_cubemap { 2 } else { 1 })),
         ("singleChannelComponent", signed(0)),
         ("maxTextureSizeSet", signed(0)),
         ("compressionQualitySet", signed(0)),
@@ -1639,10 +1652,20 @@ mod tests {
             Some(TextureImporterLayout::Unity2018_4)
         );
         let facts = v7_facts();
-        let seven = texture_importer_v7(&facts, None, 1, false, true, 7).unwrap();
-        let nine = texture_importer_v7(&facts, None, 1, false, true, 9).unwrap();
+        let seven = texture_importer_v7(&facts, None, 1, false, true, 7, false).unwrap();
+        let nine = texture_importer_v7(&facts, None, 1, false, true, 9, false).unwrap();
         assert_eq!(signed_scalar(mapping_field(&seven, "serializedVersion")), 7);
         assert_eq!(signed_scalar(mapping_field(&nine, "serializedVersion")), 9);
         assert_eq!(without_version_stamp(&seven), without_version_stamp(&nine));
+        // Cubemap bodies reuse the v7 shape with the cubemap field values the
+        // reference writes for converted cubemaps.
+        let cube = texture_importer_v7(&facts, None, 1, false, true, 9, true).unwrap();
+        assert_eq!(signed_scalar(mapping_field(&cube, "serializedVersion")), 9);
+        assert_eq!(signed_scalar(mapping_field(&cube, "generateCubemap")), 5);
+        assert_eq!(signed_scalar(mapping_field(&cube, "nPOTScale")), 1);
+        assert_eq!(signed_scalar(mapping_field(&cube, "textureShape")), 2);
+        let flat = texture_importer_v7(&facts, None, 1, false, true, 9, false).unwrap();
+        assert_eq!(signed_scalar(mapping_field(&flat, "generateCubemap")), 6);
+        assert_eq!(signed_scalar(mapping_field(&flat, "textureShape")), 1);
     }
 }

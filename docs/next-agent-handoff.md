@@ -1,5 +1,11 @@
 # RustAssetRipper hand-off — 2026-10-10
 
+## Latest current checkpoint — 2026-10-14 (cubemap route fixed)
+
+- Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public (only class IDs/counts/field names in docs; audit outputs quarantined).
+- VRC-AV03 r6: zero unpaired files; all binaries packet/pixel-clean. Next: paired-content diffs, starting with the 13 materials (then transforms/cascades).
+- Local checks: `git diff --check` exit 0; cargo check/clippy + module tests green. Full validation via GitHub Actions after push.
+
 ## Latest current checkpoint — 2026-10-14 (audio body fixed)
 
 - Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public (only class IDs/counts/field names in docs; audit outputs quarantined).

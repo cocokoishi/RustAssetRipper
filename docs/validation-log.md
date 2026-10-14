@@ -1,5 +1,11 @@
 # Validation log
 
+## 2026-10-14 Cubemap route fixed; only paired-content diffs remain
+
+- The lone cubemap fell back for two pinned gates plus texture-only v7 cubemap fields. Fixed by opening both gates to the 2018_4 layout and parameterizing the three cubemap fields after the reference sidecar, pinned by body unit tests. A loud planning failure on the first attempt (second gate found by the honest error) was fixed in the same round. Formatting and Clippy clean locally; release rebuilt.
+- Fresh replay plus re-audit: zero unpaired files project-wide; the cubemap sidecar matches and its PNG is pixel-identical with the other 24. Remaining: paired-content diffs only (materials, transforms, cascades). No regressions.
+- Local checks: `git diff --check` exit 0; `cargo check`/`cargo clippy` clean; module tests green. Full validation via GitHub Actions after push. Sample input read-only; outputs quarantined. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Audio importer body fixed; cubemap and content diffs remain
 
 - The OGG sidecar differed in shape, not just IDs: 2018.4 writes stamp 6 with six-field settings and top-level preload, versus Rust's 2022.3 shape. Fixed with a dedicated 2018.4 builder dispatched by project version, pinned by a shape unit test. Formatting and Clippy clean locally; release rebuilt.

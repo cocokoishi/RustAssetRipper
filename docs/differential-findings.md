@@ -1,5 +1,9 @@
 # Source behavior and differential findings
 
+## DIFF-CUBEMAP-ROUTE-2018-001 — cubemap importer route for 2018.4 (fixed)
+
+The lone cubemap fell back to raw bytes because the cubemap importer gate and the cubemap plan gate both pinned 2022.3 only, and the shared v7 body hardcoded texture-only cubemap fields. Fixed by opening both gates to the 2018_4 layout and parameterizing the v7 cubemap fields (generateCubemap, nPOTScale, textureShape) after the reference cubemap sidecar, pinned by body unit tests. Re-audit: zero unpaired files project-wide, the cubemap sidecar matches, and its PNG is pixel-identical (128x768 face strip). Status: fixed and validated on the reporting sample; 2018.2/2018.3 cubemaps stay gated for lack of a verifying sample.
+
 ## DIFF-AUDIO-IMPORTER-2018-001 — 2018.4 AudioImporter is its own shape (fixed)
 
 The OGG sidecar differed beyond guids/timestamps: 2018.4 writes stamp 6, six-field sample settings with no nested versions, and top-level preloadAudioData, while Rust emitted the 2022.3 shape (stamp 7, nested versions, no top-level preload). Fixed with a dedicated 2018.4 builder dispatched by project version, pinned by a shape unit test. Re-audit clears the OGG sidecar diff; audio stays packet-identical. Status: fixed and validated on the reporting sample.
