@@ -4,6 +4,7 @@
 
 - Missing externals no longer refuse the export (loud warning plus missing markers at three layers); builtins on table-less versions resolve as engine assets with unknown class. The inspect summary lists externals per file. Formatting and Clippy (warnings-denied locally) clean; release rebuilt.
 - Fresh replay plus re-audit on the 2019.4 world: real-diff classes 6 to 1 (mesh/camera/renderer/audio all resolve; cookie pointer byte-identical) with zero unpaired files and no regressions. NavMeshSettings needs a struct-default mechanism (open).
+- The 2019.4 audio decode path changed one streamed-audio refusal message (refusal behavior preserved, assertion updated). Actions run `38643113362` is fully green on both platforms, including warnings-denied Clippy, the release build, changed-line formatting, and the public-repository hygiene job.
 - Local checks: `git diff --check` exit 0; `cargo check`/`cargo clippy` clean; module tests green. Full validation via GitHub Actions after push. Sample input read-only; outputs quarantined. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 Controller root fixed; AV03 converges
