@@ -1,5 +1,11 @@
 # RustAssetRipper hand-off — 2026-10-10
 
+## Latest current checkpoint — 2026-10-14 (second avatar clean)
+
+- Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public (only class IDs/counts/field names in docs; audit outputs quarantined).
+- Avatar VRC-AV02 audited: only the known flow-style Avatar doc differs (values verified identical); PNGs pixel-identical; no product change. Next: first replay plus audit of the following sample in acceptance order.
+- Local checks: `git diff --check` exit 0. No local Cargo run (no product change). Full validation via GitHub Actions after push.
+
 ## Latest current checkpoint — 2026-10-14 (smallest world fully clean)
 
 - Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public (only class IDs/counts/field names in docs; audit outputs quarantined).
