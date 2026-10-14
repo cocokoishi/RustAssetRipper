@@ -3,6 +3,7 @@
 ## 2026-10-14 FSB5 rebuild-side output limit enforcement
 
 - Gap: the byte limit was proven only on the WAV conversion side; the rebuilt-Ogg enforcement arm (`DecodedDataLimitExceeded` from the rebuild writer) had no coverage. New test decodes the stereo silent container once to measure its exact rebuilt size, then asserts an exact-fit limit succeeds and one byte less fails loudly with the offending limit attached.
+- Actions run `38498812274` is fully green on both platforms (new limit test included), with warnings-denied Clippy, release builds, changed-line formatting, and repository hygiene.
 - Local checks: `git diff --check` exit 0; single-file `rustfmt --check` clean. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No user input was read; Phase 1 remains open and Phase 2 remains locked. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 Ogg writer structural coverage (lacing, fragmentation, grouping)
