@@ -3,6 +3,7 @@
 ## 2026-10-14 CRN export-project integration test
 
 - New: `export_project_emits_crn_texture_png_and_importer` drives the same hand-built CRN fixture through the full `export-project` pipeline in-process, then walks the output tree (no assumed layout) to assert exactly one PNG with the 512x512 RGBA envelope plus its `TextureImporter` sidecar. This answers the open collection-admission question empirically: if the texture is skipped or misrouted, CI reports the actual file list.
+- Actions run `38527418353` is fully green on both platforms first try: lib 1,765 passed/1 ignored and CLI 131 passed including the new project test, with warnings-denied Clippy, release builds, changed-line formatting, and repository hygiene. Collection admission, importer planning, and the `.meta` sidecar all work for the bare CRN fixture with no fixture change needed.
 - Local checks: single-file `rustfmt --check` clean in the new region (remaining hunks pre-existing), `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No user input was read; Phase 1 remains open and Phase 2 remains locked. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 Parity rows updated for CLI integration evidence
