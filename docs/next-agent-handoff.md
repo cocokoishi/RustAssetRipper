@@ -1,5 +1,11 @@
 # RustAssetRipper hand-off — 2026-10-10
 
+## Latest current checkpoint — 2026-10-14 (semantic audit, 1 diff left)
+
+- Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public (audit JSON stays quarantined in gitignored scratch; only counts/class IDs in docs).
+- Smallest-avatar semantic audit: zero unpaired docs, thousands exact, PNGs pixel-identical, one auxiliary known-acceptable. Next blocker: the single class-90 Avatar document difference (key in quarantined audit JSON).
+- Local checks: `git diff --check` exit 0. Product validation via GitHub Actions after push.
+
 ## Latest current checkpoint — 2026-10-14 (first Rust replay: parity)
 
 - Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public. Sample input read-only; outputs quarantined in gitignored scratch.

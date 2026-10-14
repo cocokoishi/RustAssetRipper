@@ -1,5 +1,10 @@
 # Validation log
 
+## 2026-10-14 First semantic audit: near-equivalence, one Avatar diff
+
+- Ran the repo audit toolchain pairing reference vs Rust exports by stable identity with per-side GUID resolution: zero unpaired documents on either side; thousands of documents byte-exact (including all 906 animation clips, 5 controllers, and the MonoBehaviour/controller-state families); six classes equivalent after GUID-path mapping; all 104 byte-differing PNGs verified pixel-identical (dimensions and format match, zero errors), so image differences are encoder-only. Exactly one real content difference remains: a single class-90 Avatar document. The sole Rust-only additional file is the implementation's own auxiliary path map (known-acceptable by design). No sample content committed; only counts and class IDs recorded.
+- Local checks: `git diff --check` exit 0. Product validation via GitHub Actions after push. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 First Rust replay: structural parity on smallest avatar
 
 - HEAD binary `export-project` on the smallest avatar exited 0 into a fresh gitignored directory: 1057 asset files (all with importer metadata), 36.6MB, project version 2022, one class-142 baseline object correctly unwritten. The output tree is 2120 files with a per-extension histogram identical to the reference baseline in every row (1057 meta, 906 anim, 104 png, 29 asset, 11 cs, 5 controller, prefab/mat/shader/text/configs). Open question (not a failure): the CLI reports 9780 objects vs 2753 file objects, presumably including generated members; semantic content diffing (paired by stable identity per the recorded discipline) is next.
