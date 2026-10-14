@@ -1,5 +1,11 @@
 # RustAssetRipper hand-off — 2026-10-10
 
+## Latest current checkpoint — 2026-10-14 (AV10 converges)
+
+- Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public (only class IDs/counts/field names in docs; audit outputs quarantined).
+- VRC-AV10 r1: CONVERGED (only proven-equivalent Avatar; zero unpaired, 1657 paired). Converged set: AV02-AV10, W01, W02 (+AV01 with only known Avatar style). Audit tooling hits the Windows path limit on very long repository file names; map a drive letter to the outputs root and run the audit through it. Next: advance the corpus.
+- No product code changed this round (docs only).
+
 ## Latest current checkpoint — 2026-10-14 (AV09 converges)
 
 - Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public (only class IDs/counts/field names in docs; audit outputs quarantined).
