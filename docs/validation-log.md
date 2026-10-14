@@ -3,6 +3,7 @@
 ## 2026-10-14 Real-sample decode triage (4067/4067 OK, zero failures)
 
 - Extended the inventory probe with per-object payload decode across the same four samples: 2753 + 1008 + 260 + 46 objects, every one decodes without error, including dense class-74/114 spreads and the unknown raw type. Ledger updated. Honest caveats recorded: stale-rlib triage grade, decode-OK is not semantic-OK, factory/workspace/export untouched, reference side still pending.
+- Actions run `38532447234` is fully green on both platforms (docs-only change), including the public-repository hygiene job.
 - Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. Sample inputs read-only; no sample content committed. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 First real-sample structural triage (4 samples, zero errors)
