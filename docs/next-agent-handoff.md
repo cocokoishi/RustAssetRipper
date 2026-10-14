@@ -1,5 +1,11 @@
 # RustAssetRipper hand-off — 2026-10-10
 
+## Latest current checkpoint — 2026-10-14 (HEAD binary ready)
+
+- Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public. Sample inputs read-only; nothing committed from them or outputs.
+- HEAD release binary built locally in ~10min with no machine impact; gate replays unblocked. Next: first Rust export replay (smallest avatar) plus semantic diff vs its reference baseline.
+- Local checks: `git diff --check` exit 0. Product validation via GitHub Actions after push.
+
 ## Latest current checkpoint — 2026-10-14 (prior program found, build on)
 
 - Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public. One corpus ID confirmed against the prior alias set; other cross-walks need owner reconciliation (hashes bridge). Pre-existing probable-original-names flagged for owner adjudication; no new exposures added.

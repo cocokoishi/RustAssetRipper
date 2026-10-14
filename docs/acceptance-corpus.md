@@ -138,12 +138,11 @@ untouched) and values remain unvalidated. Next: reference-side runs.
 
 ## Open tooling gaps
 
-- Runnable Rust binary from HEAD: prior sessions ran local release builds
-  on this machine repeatedly (Oct 11-13 replays) and disk has since
-  recovered, so a background `cargo build --release --locked --bin
-  assetripper-rs` was started in-session; gate replays unblock when it
-  lands. The CI-artifact alternative stays available if local builds prove
-  too heavy (needs owner approval for the workflow change).
+- Runnable Rust binary from HEAD: RESOLVED — background release build
+  finished clean in ~10min with no machine impact
+  (`target/release/assetripper-rs.exe`, gitignored). Gate replays proceed
+  from the next round; the CI-artifact alternative is shelved unless local
+  builds regress.
 - Reference export driver: done (scratch headless driver, 22/22 baselines).
 
 ## Corpus reconciliation notes (anonymous)

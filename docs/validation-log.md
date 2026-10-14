@@ -1,5 +1,10 @@
 # Validation log
 
+## 2026-10-14 HEAD release binary built locally in 10m27s
+
+- Background `cargo build --release --locked --bin assetripper-rs` finished clean: `target/release/assetripper-rs.exe` (15MB) reports version 0.1.0. Gate-level Rust export replays are now unblocked with a HEAD binary; first replay plus reference-vs-Rust semantic diff is the next round's work. Machine stayed responsive throughout (no intervention needed); disk impact to be checked before large replays.
+- Local checks: `git diff --check` exit 0. Validation of product code continues via GitHub Actions after push. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Prior acceptance program found; binary build restarted
 
 - Reading current repo docs overturned two working assumptions: prior sessions ran a deep real-sample program (six alias-named samples, dozens of export replays with a locally built release binary, full audit toolchain, per-class differential findings) and the alias set is larger than the stale snapshot suggested. Consequences recorded in the ledger: one corpus ID confirmed against the prior set by exact size plus inner version; other cross-walks unconfirmed (small object-count deltas noted, possibly conventions or updates); pre-existing probable-original-names in Oct 11-13 evidence flagged for owner adjudication with no unilateral history action; no new exposures added. Since local release builds have direct precedent on this machine and disk recovered, a background HEAD release build was started; gate replays unblock when it lands.
