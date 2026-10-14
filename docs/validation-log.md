@@ -3,6 +3,7 @@
 ## 2026-10-14 Crunch guard-arm regression (no new fixtures)
 
 - Gap: the production CRN wrapper's mismatch arms had no coverage; only the success hashes and the version-gate table were pinned. New test drives the committed `classic_dxt1.crn` fixture with caller-arg variations plus a garbage header: face-count, serialized-dimension, codec-agreement, and header-validity mismatches each fail with their own loud reason instead of mis-decoding.
+- Correction: the first version typed the helper dims as `u32` against `usize` fields; CI refused it with `E0308` and the helper now takes `usize`.
 - Local checks: `git diff --check` exit 0; single-file `rustfmt --check` clean. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No user input was read; Phase 1 remains open and Phase 2 remains locked. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 Stale-claim sweep: CRUNCH fixtures and FSB5/audio coverage statements

@@ -1003,9 +1003,9 @@ mod tests {
         let version = UnityVersion::parse("2017.2.0f1").unwrap();
         fn image(
             texture_format: i32,
-            width: u32,
-            height: u32,
-            depth: u32,
+            width: usize,
+            height: usize,
+            depth: usize,
             data: &[u8],
         ) -> TextureImage<'_> {
             TextureImage {
