@@ -3,6 +3,7 @@
 ## 2026-10-14 Short-input sweep across all texture decoders
 
 - Gap: `decode_texture` dispatches to 60+ format decoders with no input-length gate; no test faced any decoder with truncated input. New test drives one discriminant per decoder on both the texture-format and graphics-format routes (50 + 44 entries) with 0/1/7-byte inputs at valid 4x4 dimensions: every call must fail loudly, never panic and never silently accept. If CI reports a panic or an `Ok`, the offending decoder needs a length guard next.
+- Actions run `38513072127` is fully green on both platforms: lib 1,764 passed/1 ignored (decoder sweep green — no panics, no silent accepts, so no guard needed), CLI 128 passed, warnings-denied Clippy, release builds, changed-line formatting, and repository hygiene.
 - Local checks: `git diff --check` exit 0; single-file `rustfmt --check` clean. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No user input was read; Phase 1 remains open and Phase 2 remains locked. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 Hostile Ogg inputs stay panic-free and well-formed
