@@ -15,12 +15,14 @@
 //! facts so the source shapes stay auditable without a managed collection.
 //!
 //! `generate_mesh_outlines` ports the source `MeshOutlineGenerator`
-//! over caller-provided vertices and triangles. The caller still owns versioned
-//! `VertexData`/index-buffer extraction and the subsequent PPU, pivot, and atlas
-//! packing transforms. `GeneratePhysicsShape` and the `SetBoneGeometry` body
-//! (including its `VertexDataBlob` reads and vertex/index/weight copies) remain
-//! open. The source itself carries a `#warning TODO` for `Edges`; it does not
-//! generate that list.
+//! over caller-provided vertices and triangles. `fill_sprite_metadata` ports the
+//! `FillSpriteMetaData` decision kernel (coordinates, `Custom` alignment, outline,
+//! physics-shape, and bone gates with PPU scaling). The texture project route owns
+//! versioned `VertexData`/index-buffer extraction and the subsequent PPU, pivot,
+//! and atlas packing transforms, and the importer path serializes the resulting
+//! outline, physics-shape, bone, and geometry fields. The source itself carries
+//! a `#warning TODO` for `Edges`; it does not generate that list, and neither
+//! do we.
 //!
 //! Also ported is the `SpriteProcessor.ProcessSprite` offset recalculation (pivot
 //! offset and texture-rect offset over caller facts); the atlas detachment and the
