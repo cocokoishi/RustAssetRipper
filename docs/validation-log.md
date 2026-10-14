@@ -3,6 +3,7 @@
 ## 2026-10-14 First semantic audit: near-equivalence, one Avatar diff
 
 - Ran the repo audit toolchain pairing reference vs Rust exports by stable identity with per-side GUID resolution: zero unpaired documents on either side; thousands of documents byte-exact (including all 906 animation clips, 5 controllers, and the MonoBehaviour/controller-state families); six classes equivalent after GUID-path mapping; all 104 byte-differing PNGs verified pixel-identical (dimensions and format match, zero errors), so image differences are encoder-only. Exactly one real content difference remains: a single class-90 Avatar document. The sole Rust-only additional file is the implementation's own auxiliary path map (known-acceptable by design). No sample content committed; only counts and class IDs recorded.
+- Actions run `38564110708` is fully green on both platforms (docs-only change), including the public-repository hygiene job.
 - Local checks: `git diff --check` exit 0. Product validation via GitHub Actions after push. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 First Rust replay: structural parity on smallest avatar
