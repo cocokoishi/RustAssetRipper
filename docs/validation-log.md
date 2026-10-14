@@ -1,5 +1,10 @@
 # Validation log
 
+## 2026-10-14 Three more reference baselines (observations, not verdicts)
+
+- Reference exports done for three more samples (all structural counts only): smallest-2018-inner avatar 144 files (png/anim/cs/ogg exact vs class counts; 13 materials vs 14 class-21 and 8 shaders vs 10 class-48 noted as observations), oldest world 37 files (unity/ogg/png/cs exact), second avatar 473 files (class breakdown pending). Ledger rows updated. All gaps stay observations until Rust-side exports exist to compare against.
+- Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No sample content committed; outputs quarantined in gitignored scratch. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Reference export driver green; first baseline (VRC-AV01)
 
 - Scratch headless driver (`target/acceptance-driver/`, `ExportHandler.LoadProcessAndExport`, default config) built clean (Release, 0 warnings) after adding `ImplicitUsings`; restore had passed against the warm cache. First reference export of the smallest avatar completed: 2120 files (1057 `.meta`, 906 `.anim`, 104 `.png`, 29 `.asset`, 11 `.cs`, 5 `.controller`, plus prefab/material/shader/text/configs), mirroring the Rust-side class inventory essentially one-to-one. Second baseline (smallest world) also done: 478 files with 1 unity scene, 1 ogg, and 102 png against 104 class-28 (a 2-texture gap noted as a reference-side observation only; it becomes a comparison item when the Rust export exists). Outputs quarantined in gitignored scratch.
