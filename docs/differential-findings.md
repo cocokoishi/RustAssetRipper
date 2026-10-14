@@ -1,5 +1,9 @@
 # Source behavior and differential findings
 
+## DIFF-PREFAB-HEADERS-2018-001 — prefab/scene editor headers for unported versions (fixed)
+
+All 83 prefab GameObjects and 83 Transforms differed by missing editor headers: the editor TypeTree path only covers 5.6/2022.3, so 2018.4 fell back to minimal converted payloads. Reference output proves 2018.4 (and 2019.4 scenes) share the 2018.3 header sets. Fixed with a document-level header backfill (front headers, tag-to-string replacement, icon/navmesh/static fields, root order, euler hints) applied when no editor tree was used, with per-field leniency and loud failure only on non-mapping bodies. Re-audit: classes 1 and 4 go from 83 diffs each to 83/83 exact with no regressions. Status: fixed and validated on the reporting sample; versions other than 2018.4/2019.4 stay gated.
+
 ## DIFF-MATERIAL-HEADERS-2018-001 — 2018.4 materials share the 2018.3 header set (fixed)
 
 All 13 material documents differed by four missing leading editor fields: the version match for class-21 header insertion had no 2018.4 arm and fell through silently. Reference output proves 2018.4 carries the 2018.3/2019.4 set. Fixed by extracting the version mapping into a tested helper with the 2018.4 arm. Re-audit: materials go fully exact-or-GUID-mapped with zero diffs. Status: fixed and validated on the reporting sample.

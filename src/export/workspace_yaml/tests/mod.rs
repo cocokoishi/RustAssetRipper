@@ -39,6 +39,7 @@ const TRANSFORM_PATH_ID: i64 = 43;
 mod assignment_order;
 mod generated_assets;
 mod object_and_reference_integrity;
+mod prefab_header_backfill;
 mod streamed_resources;
 mod support;
 

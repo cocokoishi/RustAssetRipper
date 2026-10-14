@@ -23,7 +23,7 @@ use super::super::streamed_assets::{
     has_streamed_yaml_asset_field, prepare_streamed_yaml_asset, StreamedYamlAssetError,
     StreamedYamlAssetKind, StreamedYamlAssetPreparation,
 };
-use super::super::unity_yaml::UnityYamlDocument;
+use super::super::unity_yaml::{UnityYamlDocument, UnityYamlNodeKind};
 use super::super::value_yaml::{
     serialized_object_value_to_unity_yaml_document, UnityYamlObjectConversionError,
     UnityYamlObjectConversionHints, UnityYamlObjectConversionLimits, UnityYamlObjectFieldMode,
@@ -847,7 +847,7 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
         if let Some(error) = pointer_error {
             return Err(error);
         }
-        let document = document.map_err(UnityYamlWorkspaceExportError::Conversion)?;
+        let mut document = document.map_err(UnityYamlWorkspaceExportError::Conversion)?;
         if generated_component_overlay.is_some() && !generated_component_pointer_seen {
             return Err(
                 UnityYamlWorkspaceExportError::GeneratedComponentOverlayInvariant {
@@ -915,6 +915,29 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
                     ),
                 });
             }
+        }
+        if matches!(class_id, 1 | 4)
+            && editor_manager_type_tree.is_none()
+            && !document.root.stripped
+            && prefab_header_backfill_version(unity_version.major, unity_version.minor)
+        {
+            let backfill = if class_id == 1 {
+                apply_game_object_header_backfill(
+                    &mut document,
+                    export_root,
+                    game_object_static_mark,
+                )
+            } else {
+                apply_transform_header_backfill(
+                    &mut document,
+                    export_root,
+                    source,
+                    file_index,
+                    object.object_index,
+                    reference_graph,
+                )
+            };
+            backfill.map_err(|message| scene_editor_format_error(source, class_id, message))?;
         }
         Ok(Some(document))
     }
@@ -1628,34 +1651,7 @@ fn apply_game_object_editor_format(
     source_root: &SerializedValue,
     static_mark: bool,
 ) -> Result<(), String> {
-    let tag_id = match source_root
-        .unique_field_in_base_chain("m_Tag")
-        .map_err(|error| format!("could not inspect GameObject.m_Tag: {error}"))?
-    {
-        Some(SerializedValue::I8(value)) => i32::from(*value),
-        Some(SerializedValue::U8(value)) => i32::from(*value),
-        Some(SerializedValue::I16(value)) => i32::from(*value),
-        Some(SerializedValue::U16(value)) => i32::from(*value),
-        Some(SerializedValue::I32(value)) => *value,
-        Some(SerializedValue::U32(value)) => i32::try_from(*value)
-            .map_err(|_| format!("GameObject.m_Tag value {value} exceeds Int32"))?,
-        Some(value) => {
-            return Err(format!(
-                "GameObject.m_Tag has value {value:?}, expected an integer"
-            ));
-        }
-        None => return Err("source GameObject has no m_Tag field".to_owned()),
-    };
-    let tag_name = match tag_id {
-        0 => "Untagged".to_owned(),
-        1 => "Respawn".to_owned(),
-        2 => "Finish".to_owned(),
-        3 => "EditorOnly".to_owned(),
-        5 => "MainCamera".to_owned(),
-        6 => "Player".to_owned(),
-        7 => "GameController".to_owned(),
-        value => format!("unknown_{value}"),
-    };
+    let tag_name = game_object_tag_name(source_root)?;
     let tag_string = editor_root
         .unique_field_in_base_chain_mut("m_TagString")
         .map_err(|error| format!("could not inspect GameObject.m_TagString: {error}"))?
@@ -1771,6 +1767,259 @@ pub(super) fn game_object_static_mark(
             };
             renderer_static_batch_marks(&payload.root)
         })
+}
+
+/// Prefab/scene editor headers for versions without a ported editor TypeTree.
+///
+/// Reference output proves 2018.4 and 2019.4 share the 2018.3 GameObject and
+/// Transform header sets; other versions stay on the fail-open plain route
+/// until their sets have equivalent evidence.
+pub(super) fn prefab_header_backfill_version(major: u32, minor: u32) -> bool {
+    matches!((major, minor), (2018, 4) | (2019, 4))
+}
+
+fn yaml_body_entries(
+    document: &mut UnityYamlDocument,
+) -> Result<
+    &mut Vec<(
+        crate::export::unity_yaml::UnityYamlNode,
+        crate::export::unity_yaml::UnityYamlNode,
+    )>,
+    String,
+> {
+    let UnityYamlNodeKind::Mapping { entries, .. } = &mut document.root.kind else {
+        return Err("Unity YAML document root is not a mapping".to_owned());
+    };
+    let (_, body) = entries
+        .first_mut()
+        .ok_or_else(|| "Unity YAML document root has no class body entry".to_owned())?;
+    let UnityYamlNodeKind::Mapping { entries, .. } = &mut body.kind else {
+        return Err("Unity YAML class body is not a mapping".to_owned());
+    };
+    Ok(entries)
+}
+
+fn yaml_field_index(
+    entries: &[(
+        crate::export::unity_yaml::UnityYamlNode,
+        crate::export::unity_yaml::UnityYamlNode,
+    )],
+    name: &str,
+) -> Option<usize> {
+    use crate::export::unity_yaml::{UnityYamlNodeKind, UnityYamlScalar};
+
+    entries.iter().position(|(key, _)| match &key.kind {
+        UnityYamlNodeKind::Scalar(UnityYamlScalar::PlainString(key)) => key == name,
+        _ => false,
+    })
+}
+
+fn yaml_plain_node(name: &str) -> crate::export::unity_yaml::UnityYamlNode {
+    crate::export::unity_yaml::UnityYamlNode::plain_string(name)
+}
+
+fn yaml_null_pptr_node() -> crate::export::unity_yaml::UnityYamlNode {
+    use crate::export::unity_yaml::{UnityYamlMappingStyle, UnityYamlNode, UnityYamlScalar};
+
+    let mut pointer = UnityYamlNode::mapping(UnityYamlMappingStyle::Flow);
+    pointer
+        .insert_field("fileID", UnityYamlNode::scalar(UnityYamlScalar::Signed(0)))
+        .expect("null PPtr mapping accepts fileID");
+    pointer
+}
+
+fn game_object_tag_name(source_root: &SerializedValue) -> Result<String, String> {
+    let tag_id = match source_root
+        .unique_field_in_base_chain("m_Tag")
+        .map_err(|error| format!("could not inspect GameObject.m_Tag: {error}"))?
+    {
+        Some(SerializedValue::I8(value)) => i32::from(*value),
+        Some(SerializedValue::U8(value)) => i32::from(*value),
+        Some(SerializedValue::I16(value)) => i32::from(*value),
+        Some(SerializedValue::U16(value)) => i32::from(*value),
+        Some(SerializedValue::I32(value)) => *value,
+        Some(SerializedValue::U32(value)) => i32::try_from(*value)
+            .map_err(|_| format!("GameObject.m_Tag value {value} exceeds Int32"))?,
+        Some(value) => {
+            return Err(format!(
+                "GameObject.m_Tag has value {value:?}, expected an integer"
+            ));
+        }
+        None => return Err("source GameObject has no m_Tag field".to_owned()),
+    };
+    Ok(match tag_id {
+        0 => "Untagged".to_owned(),
+        1 => "Respawn".to_owned(),
+        2 => "Finish".to_owned(),
+        3 => "EditorOnly".to_owned(),
+        5 => "MainCamera".to_owned(),
+        6 => "Player".to_owned(),
+        7 => "GameController".to_owned(),
+        value => format!("unknown_{value}"),
+    })
+}
+
+/// Completes a converted GameObject document with the 2018.4/2019.4 editor
+/// headers when no editor TypeTree was applied. Missing source fields select
+/// no completion for that field rather than failing the export; the core
+/// conversion already succeeded and Unity defaults the absent metadata.
+pub(super) fn apply_game_object_header_backfill(
+    document: &mut UnityYamlDocument,
+    source_root: &SerializedValue,
+    static_mark: bool,
+) -> Result<(), String> {
+    use crate::export::unity_yaml::{UnityYamlNode, UnityYamlScalar};
+
+    let entries = yaml_body_entries(document)?;
+    let mut insert_at = match yaml_field_index(entries, "serializedVersion") {
+        Some(index) => index + 1,
+        None => 0,
+    };
+    for (name, value) in [
+        (
+            "m_ObjectHideFlags",
+            UnityYamlNode::scalar(UnityYamlScalar::Unsigned(0)),
+        ),
+        ("m_CorrespondingSourceObject", yaml_null_pptr_node()),
+        ("m_PrefabInstance", yaml_null_pptr_node()),
+        ("m_PrefabAsset", yaml_null_pptr_node()),
+    ] {
+        if yaml_field_index(entries, name).is_none() {
+            entries.insert(insert_at, (yaml_plain_node(name), value));
+            insert_at += 1;
+        }
+    }
+    if let Some(index) = yaml_field_index(entries, "m_Tag") {
+        entries.remove(index);
+        entries.insert(
+            index,
+            (
+                yaml_plain_node("m_TagString"),
+                UnityYamlNode::string(game_object_tag_name(source_root)?),
+            ),
+        );
+    }
+    let tag_string_at = yaml_field_index(entries, "m_TagString");
+    if tag_string_at.is_none() {
+        if let (Some(name_at), Ok(tag_name)) = (
+            yaml_field_index(entries, "m_Name"),
+            game_object_tag_name(source_root),
+        ) {
+            entries.insert(
+                name_at + 1,
+                (
+                    yaml_plain_node("m_TagString"),
+                    UnityYamlNode::string(tag_name),
+                ),
+            );
+        }
+    }
+    if let Some(index) = yaml_field_index(entries, "m_TagString") {
+        let mut at = index + 1;
+        for (name, value) in [
+            ("m_Icon", yaml_null_pptr_node()),
+            (
+                "m_NavMeshLayer",
+                UnityYamlNode::scalar(UnityYamlScalar::Unsigned(0)),
+            ),
+        ] {
+            if yaml_field_index(entries, name).is_none() {
+                entries.insert(at, (yaml_plain_node(name), value));
+                at += 1;
+            }
+        }
+    }
+    match yaml_field_index(entries, "m_StaticEditorFlags") {
+        Some(index) => {
+            if static_mark {
+                let (_, value) = &mut entries[index];
+                if matches!(
+                    value.kind,
+                    crate::export::unity_yaml::UnityYamlNodeKind::Scalar(
+                        UnityYamlScalar::Unsigned(_)
+                    )
+                ) {
+                    *value = UnityYamlNode::scalar(UnityYamlScalar::Unsigned(u32::MAX as u64));
+                }
+            }
+        }
+        None => {
+            entries.insert(
+                yaml_field_index(entries, "m_IsActive").unwrap_or(entries.len()),
+                (
+                    yaml_plain_node("m_StaticEditorFlags"),
+                    UnityYamlNode::scalar(UnityYamlScalar::Unsigned(if static_mark {
+                        u32::MAX as u64
+                    } else {
+                        0
+                    })),
+                ),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Completes a converted Transform document with the 2018.4/2019.4 editor
+/// headers when no editor TypeTree was applied. Unresolvable fields select no
+/// completion, mirroring the GameObject backfill above.
+pub(super) fn apply_transform_header_backfill(
+    document: &mut UnityYamlDocument,
+    source_root: &SerializedValue,
+    source: ExportAssetIdentity,
+    file_index: usize,
+    object_index: usize,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+) -> Result<(), String> {
+    use crate::export::unity_yaml::{UnityYamlMappingStyle, UnityYamlNode, UnityYamlScalar};
+
+    let entries = yaml_body_entries(document)?;
+    let mut insert_at = match yaml_field_index(entries, "serializedVersion") {
+        Some(index) => index + 1,
+        None => 0,
+    };
+    for (name, value) in [
+        (
+            "m_ObjectHideFlags",
+            UnityYamlNode::scalar(UnityYamlScalar::Unsigned(0)),
+        ),
+        ("m_CorrespondingSourceObject", yaml_null_pptr_node()),
+        ("m_PrefabInstance", yaml_null_pptr_node()),
+        ("m_PrefabAsset", yaml_null_pptr_node()),
+    ] {
+        if yaml_field_index(entries, name).is_none() {
+            entries.insert(insert_at, (yaml_plain_node(name), value));
+            insert_at += 1;
+        }
+    }
+    if yaml_field_index(entries, "m_RootOrder").is_none() {
+        if let Ok(root_order) = calculate_scene_transform_root_order(
+            source_root,
+            source,
+            file_index,
+            object_index,
+            reference_graph,
+        ) {
+            entries.push((
+                yaml_plain_node("m_RootOrder"),
+                UnityYamlNode::scalar(UnityYamlScalar::Signed(i64::from(root_order))),
+            ));
+        }
+    }
+    if yaml_field_index(entries, "m_LocalEulerAnglesHint").is_none() {
+        if let Ok(Some(rotation)) = source_root.unique_field_in_base_chain("m_LocalRotation") {
+            if let Ok(rotation) = read_scene_quaternion(rotation, "Transform.m_LocalRotation") {
+                let euler = crate::resources::quaternion::euler_hint_from_rotation(rotation);
+                let mut hint = UnityYamlNode::mapping(UnityYamlMappingStyle::Flow);
+                for (axis, value) in [("x", euler[0]), ("y", euler[1]), ("z", euler[2])] {
+                    hint.insert_field(axis, UnityYamlNode::scalar(UnityYamlScalar::Float32(value)))
+                        .expect("euler hint mapping accepts axis fields");
+                }
+                entries.push((yaml_plain_node("m_LocalEulerAnglesHint"), hint));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn apply_transform_editor_format(

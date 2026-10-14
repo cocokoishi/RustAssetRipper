@@ -1,5 +1,11 @@
 # Validation log
 
+## 2026-10-14 Prefab editor headers fixed; 15 classes remain
+
+- All 83 prefab GameObjects and 83 Transforms missed editor headers because the editor path covers 5.6/2022.3 only. Fixed with a document-level backfill for 2018.4/2019.4 (headers, tag replacement, static marking, root order, euler hints), pinned by 3 new unit tests. Formatting and Clippy (warnings-denied locally) clean; release rebuilt.
+- Fresh replay plus re-audit: classes 1 and 4 go 83-diff to 83/83 exact; zero unpaired files; no regressions.
+- Local checks: `git diff --check` exit 0; `cargo check`/`cargo clippy` clean; module tests green. Full validation via GitHub Actions after push. Sample input read-only; outputs quarantined. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Material headers fixed; transforms remain
 
 - All 13 material documents missed four leading editor fields: the class-21 version match had no 2018.4 arm. Fixed by extracting the mapping into a tested helper (new regression test green) with the 2018.4 arm sharing the 2018.3 set. Formatting and Clippy clean locally; release rebuilt.
