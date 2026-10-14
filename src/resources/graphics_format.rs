@@ -257,4 +257,23 @@ mod tests {
             "GraphicsFormat value 152 is out of range"
         );
     }
+
+    /// No GraphicsFormat converts to a Crunch TextureFormat. The frozen
+    /// `ToTextureFormat` arms map compressed layouts to their plain
+    /// equivalents (DXT1/3/5, ETC1/2, EAC, ASTC) and never emit 28, 29, 64,
+    /// or 65, so Texture3D/array routes can never reach the Crunch decoder
+    /// through this conversion. This pins that contract across the whole
+    /// enum domain (0 through 151) against future table edits.
+    #[test]
+    fn graphics_format_conversion_never_yields_crunched_texture_format() {
+        use crate::resources::texture_format::is_crunched;
+        for format in 0..=151 {
+            if let Ok(texture_format) = to_texture_format(format) {
+                assert!(
+                    !is_crunched(texture_format),
+                    "GraphicsFormat {format} converts to crunched TextureFormat {texture_format}"
+                );
+            }
+        }
+    }
 }
