@@ -1059,7 +1059,7 @@ mod tests {
             assert_eq!(
                 convert_to_bitmap_with_unity_version(
                     &image(texture_format, width, height, depth, bytes),
-                    Some(version.clone())
+                    Some(version)
                 ),
                 Err(TextureConvertError::CrunchDecodeFailed { reason }),
                 "{name}"
