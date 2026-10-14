@@ -4,6 +4,7 @@
 
 - Finding: the non-Crunch converter allocated its output with `vec![0; pixel_bytes]` directly, while the Crunch path next to it uses `try_reserve_exact` plus `AllocationFailed`. Hostile dimensions inside the `TextureTooLarge` bound (up to 2 GiB) would abort the process on allocation failure instead of failing loudly like the reference's catchable exception. Sibling `vec![0; ...]` sites are test helpers with fixed small sizes, not production paths.
 - Fix: allocate with `try_reserve_exact` mapping to `AllocationFailed`, then fill; the OOM-failure arm itself is not deterministically testable, but existing success-path tests cover the changed lines and CI guards regressions. The `layer_bytes` arithmetic needs no guard: the earlier zero-dimension reject plus the checked `pixel_bytes` bound keep every product in range.
+- Actions run `38513958896` is fully green on both platforms (allocation fix in place, all existing converter tests green), with warnings-denied Clippy, release builds, changed-line formatting, and repository hygiene.
 - Local checks: `git diff --check` exit 0; single-file `rustfmt --check` clean. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No user input was read; Phase 1 remains open and Phase 2 remains locked. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 Short-input sweep across all texture decoders
