@@ -1,5 +1,12 @@
 # Validation log
 
+## 2026-10-14 Sprite non-YAML route narrowing (stale triage corrected, no code change)
+
+- Stale-claim check: `DIFF-SPRITE-NON-YAML-IMPORTER-001` (2026-10-13 triage) described the route as unwired with a literal-`false` decision and scalar-only apply. That matched the Oct-12 wiring (`b9cf233`), but later work superseded it: `2363613` drives the decision from the export mode, and the texture planning route in `project_workflow/object_routing.rs` now runs fact collection (with `GetMainExportID` +2/step export IDs), mode decision, importer apply, and sheet metadata including the ID/name table, plus outline/shape/bone/atlas follow-ups. Verified by reading the current call chain; unit coverage spans every helper.
+- Change: narrowed the DIFF entry (title, status, new dated note) and the `EXP-SETTINGS-APPLY-001` parenthetical from "not wired" to "wired with verification open". The required controlled export comparison never ran, so the entry stays open. The dated Oct-13 triage log and the dated Oct-12 completion audit are left as history.
+- Parity integrity after the row-text edit: `parity-report.ps1` recognizes 393/393 rows with zero malformed rows, zero duplicate IDs, and 25 non-verified (unchanged; no status was touched).
+- Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No user input was read; Phase 1 remains open and Phase 2 remains locked. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 YAML string-quoting predicate matches the frozen source exactly
 
 - Audit: `string_needs_quotes` checked arm-for-arm against the frozen `IllegalStringsRegex` plus its null-or-empty-plain rule: leading/trailing whitespace, `-`/dash-space, indicator-first characters, trailing colon, `:`/`@` before whitespace, and the (unreachable, control-gated) newline arms all agree. Unicode semantics agree too (`.NET IsControl`/`IsWhiteSpace` equal the `Cc`/`White_Space` properties used). The shared holes stay shared: empty, numeric-looking, bool-looking, and ` #` strings emit plain in both, and neither normalizes them.

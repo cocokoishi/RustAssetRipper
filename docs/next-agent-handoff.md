@@ -1,5 +1,11 @@
 # RustAssetRipper hand-off — 2026-10-10
 
+## Latest current checkpoint — 2026-10-14 (sprite triage narrowing, no code change)
+
+- Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Phase 1 open, Phase 2 locked; no user input, Unity, or UABEA used.
+- Stale-claim check on `DIFF-SPRITE-NON-YAML-IMPORTER-001`: the Oct-13 "unwired" triage was accurate then but later wiring (`2363613` mode-driven decision, full collect/decide/apply/sheet/table route in `object_routing.rs`) superseded it. Narrowed the DIFF entry and the parity parenthetical to "wired with verification open"; the controlled export comparison still never ran. Dated history left untouched.
+- Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push.
+
 ## Latest current checkpoint — 2026-10-14 (YAML quoting predicate verified)
 
 - Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Phase 1 open, Phase 2 locked; no user input, Unity, or UABEA used.
