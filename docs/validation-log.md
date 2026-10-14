@@ -4,6 +4,7 @@
 
 - Empty block-sequence items keep the baseline trailing space (mapping empties still drop it); regression test added. Formatting and Clippy (warnings-denied locally) clean; release rebuilt.
 - Fresh replay plus re-audit on the 2022.3 avatar: zero real-diff classes except the Avatar doc, proven content-identical modulo style (strict token equality over 4415 chars); zero unpaired files. Converged samples hold by exhaustion (no empty items in any of their YAML outputs).
+- Actions run `38649216925` is fully green on both platforms (empty-item spacing), including warnings-denied Clippy, the release build, changed-line formatting, and the public-repository hygiene job.
 - Local checks: `git diff --check` exit 0; `cargo check`/`cargo clippy` clean; full workspace suite green. Full validation via GitHub Actions after push. Sample input read-only; outputs quarantined. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 AV02 converges on current binary
