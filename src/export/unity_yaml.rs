@@ -1417,6 +1417,40 @@ mod tests {
     }
 
     #[test]
+    fn plain_string_edges_match_the_source_predicate_exactly() {
+        // Arm-for-arm with the frozen `IllegalStringsRegex` plus its
+        // null-or-empty-plain rule. The shared holes (empty, numeric-looking,
+        // bool-looking, and ` #` strings stay plain in both) are pinned as
+        // parity, not endorsed as ideal YAML.
+        for value in [
+            "", "123", "1.5", "true", "null", "~", "0x10", "a # b", ".inf", "yes", "a'b",
+        ] {
+            assert!(!string_needs_quotes(value), "{value:?} stays plain");
+        }
+        for value in [
+            " leading",
+            "trailing ",
+            "-",
+            "- x",
+            ":lead",
+            "a:",
+            "a: b",
+            "@ b",
+            "a@ b",
+            "#c",
+            "'lead",
+        ] {
+            assert!(string_needs_quotes(value), "{value:?} needs quotes");
+        }
+        // An empty string emits bare (reads back as null in both).
+        let body = mapping(&[("m_Name", UnityYamlNode::string(""))]);
+        assert_eq!(
+            write_unity_yaml_mapping(&body, UnityYamlWriteLimits::default()).unwrap(),
+            "m_Name: \n"
+        );
+    }
+
+    #[test]
     fn writes_baseline_object_document_header_block_fields_and_quoted_strings() {
         let body = mapping(&[
             (

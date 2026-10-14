@@ -1,5 +1,11 @@
 # Validation log
 
+## 2026-10-14 YAML string-quoting predicate matches the frozen source exactly
+
+- Audit: `string_needs_quotes` checked arm-for-arm against the frozen `IllegalStringsRegex` plus its null-or-empty-plain rule: leading/trailing whitespace, `-`/dash-space, indicator-first characters, trailing colon, `:`/`@` before whitespace, and the (unreachable, control-gated) newline arms all agree. Unicode semantics agree too (`.NET IsControl`/`IsWhiteSpace` equal the `Cc`/`White_Space` properties used). The shared holes stay shared: empty, numeric-looking, bool-looking, and ` #` strings emit plain in both, and neither normalizes them.
+- New regression `plain_string_edges_match_the_source_predicate_exactly` pins eleven plain and eleven quoting cases plus bare-empty emission, so neither silent sanitizing nor silent widening can drift from the reference.
+- Local checks: `git diff --check` exit 0; single-file `rustfmt --check` clean. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No user input was read; Phase 1 remains open and Phase 2 remains locked. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Export path traversal surface audit (source-faithful; parity pinned)
 
 - Audit: asset-derived export paths were traced through file-name fixing (separators neutralized), the unique-name planner, and the diagnostic/script planners. File names cannot carry separators; collection directories are planner constants. Two planners pass hostile shapes through exactly like the frozen source: unknown names stay fully verbatim and unreadable names keep separators/dots through path fixing, so a `../../` asset name plans an escaping path in both implementations. Script namespaces cannot form `..` components (every dot becomes a separator) but can form empty ones. Exploitation needs a malicious bundle, and unknown assets additionally need the non-default unreadable-assets export enabled.
