@@ -6,6 +6,7 @@
 - `DIFF-AUDIO-FSB5-RECONSTRUCTION-001` limited table-backed proof to stereo/mono and asked to broaden layouts; both stale after the surround/rejection/rebuild/checksum increments. `RES-AUDIO-001` claimed no production-table lookup test and listed unknown CRCs as open; corrected to four-layout table coverage plus loud-rejection regressions, keeping real-audio decode, multi-stream banks, other codecs, and versions past 0/1 open.
 - No statuses changed: both rows stay non-verified. Dated history untouched; only living claims updated.
 - Parity integrity after the row-text edits: `parity-report.ps1` recognizes 393/393 rows with zero malformed rows and zero duplicate IDs.
+- Actions run `38506019231` is fully green on both platforms (docs-only change), with warnings-denied Clippy, release builds, changed-line formatting, and repository hygiene.
 
 ## 2026-10-14 Sprite non-YAML route narrowing (stale triage corrected, no code change)
 
