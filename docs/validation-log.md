@@ -3,6 +3,7 @@
 ## 2026-10-14 Second avatar audited; flow-style rule holds
 
 - HEAD-binary replay plus audit of the next avatar in acceptance order: zero unpaired documents, everything exact or GUID-mapped except the single class-90 Avatar document, which shows the same flow/block signature (section maps and float counts identical); ordered per-section floats verified identical (pose 5358/5358, default-pose 3930/3930, human 1033/1033, skeleton 1441/1441), so `DIFF-AVATAR-FLOW-001` now rests on two samples. All 28 differing PNGs pixel-identical. No new root cause; no product change.
+- Actions run `38577239877` is fully green on both platforms (docs-only change), including the public-repository hygiene job.
 - Local checks: `git diff --check` exit 0. No local Cargo run needed (no product change). Full validation via GitHub Actions after push. Sample input read-only; outputs quarantined. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 GameObject static marking fixed; world fully clean
