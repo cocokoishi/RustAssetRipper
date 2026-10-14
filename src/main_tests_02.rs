@@ -1325,8 +1325,96 @@
         )
         .unwrap();
         assert_eq!(fs::read(&output_path).unwrap(), content);
+        // streaming round-trip above; FSB5 remux coverage follows at EOF.
         assert!(String::from_utf8(status)
             .unwrap()
             .contains("Wrote a it audio from SerializedFile 0 PathID 42"));
+        drop(input);
+    }
+
+    #[test]
+    fn export_audio_remuxes_silent_fsb5_to_ogg_and_wav() {
+        // The silent stereo FSB5 container from the decode suite (version 1,
+        // one stream, Vorbis mode, table setup 0xA72297FF, two zero packets)
+        // embedded as inline clip bytes: Default export remuxes the rebuilt
+        // Ogg while PreferWav converts it to a 128-frame silent WAV.
+        fn silent_stereo_fsb5_container() -> Vec<u8> {
+            let mut fsb5 = vec![0u8; 60];
+            fsb5[..4].copy_from_slice(b"FSB5");
+            fsb5[4..8].copy_from_slice(&1u32.to_le_bytes());
+            fsb5[8..12].copy_from_slice(&1u32.to_le_bytes());
+            fsb5[12..16].copy_from_slice(&16u32.to_le_bytes());
+            fsb5[20..24].copy_from_slice(&6u32.to_le_bytes());
+            fsb5[24..28].copy_from_slice(&15u32.to_le_bytes());
+            let sample_header = (u64::from(128u32) << 34) | (1u64 << 5) | (8u64 << 1) | 1;
+            fsb5.extend_from_slice(&sample_header.to_le_bytes());
+            fsb5.extend_from_slice(&[0x08, 0, 0, 0x16]);
+            fsb5.extend_from_slice(&0xA722_97FFu32.to_le_bytes());
+            fsb5.extend_from_slice(&[1u8, 0, 0, 1, 0, 0]);
+            fsb5
+        }
+
+        let directory = TestInputDirectory::new_root();
+        let serialized_path = directory.join("main.assets");
+        let ogg_path = directory.join("clip.ogg");
+        let wav_path = directory.join("clip.wav");
+        fs::write(
+            &serialized_path,
+            make_audio_clip_file(&silent_stereo_fsb5_container(), None),
+        )
+        .unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![
+                serialized_path.clone(),
+                ogg_path.clone(),
+                wav_path.clone(),
+            ],
+            subdirectories: Vec::new(),
+        };
+
+        let mut status = Vec::new();
+        super::export_audio_to(
+            std::slice::from_ref(&serialized_path),
+            0,
+            42,
+            super::SettingsAudioFormat::Default,
+            &ogg_path,
+            &mut status,
+        )
+        .unwrap();
+        let ogg = fs::read(&ogg_path).unwrap();
+        assert_eq!(&ogg[..4], b"OggS");
+        let mut reader = ogg::PacketReader::new(std::io::Cursor::new(ogg.as_slice()));
+        let mut packets = Vec::new();
+        while let Some(packet) = reader.read_packet().unwrap() {
+            packets.push(packet.data);
+        }
+        assert_eq!(packets.len(), 5);
+        assert_eq!(packets[3], [0]);
+        assert_eq!(packets[4], [0]);
+        assert!(String::from_utf8(status).unwrap().contains(
+            "Wrote a ogg audio from SerializedFile 0 PathID 42"
+        ));
+
+        let mut status = Vec::new();
+        super::export_audio_to(
+            std::slice::from_ref(&serialized_path),
+            0,
+            42,
+            super::SettingsAudioFormat::PreferWav,
+            &wav_path,
+            &mut status,
+        )
+        .unwrap();
+        let wav = fs::read(&wav_path).unwrap();
+        assert_eq!(u32::from_le_bytes(wav[46..50].try_into().unwrap()), 128);
+        assert_eq!(wav.len(), 58 + 128 * 4 * 2);
+        for sample in wav[58..].chunks_exact(4) {
+            assert_eq!(f32::from_le_bytes(sample.try_into().unwrap()), 0.0);
+        }
+        assert!(String::from_utf8(status).unwrap().contains(
+            "Wrote a wav audio from SerializedFile 0 PathID 42"
+        ));
         drop(input);
     }
