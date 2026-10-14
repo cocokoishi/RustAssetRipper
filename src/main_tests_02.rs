@@ -1393,9 +1393,9 @@
         assert_eq!(packets.len(), 5);
         assert_eq!(packets[3], [0]);
         assert_eq!(packets[4], [0]);
-        assert!(String::from_utf8(status).unwrap().contains(
-            "Wrote a ogg audio from SerializedFile 0 PathID 42"
-        ));
+        assert!(String::from_utf8(status)
+            .unwrap()
+            .contains("Wrote a ogg audio from SerializedFile 0 PathID 42"));
 
         let mut status = Vec::new();
         super::export_audio_to(
@@ -1413,8 +1413,8 @@
         for sample in wav[58..].chunks_exact(4) {
             assert_eq!(f32::from_le_bytes(sample.try_into().unwrap()), 0.0);
         }
-        assert!(String::from_utf8(status).unwrap().contains(
-            "Wrote a wav audio from SerializedFile 0 PathID 42"
-        ));
+        assert!(String::from_utf8(status)
+            .unwrap()
+            .contains("Wrote a wav audio from SerializedFile 0 PathID 42"));
         drop(input);
     }
