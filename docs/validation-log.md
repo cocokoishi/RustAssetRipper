@@ -1,5 +1,10 @@
 # Validation log
 
+## 2026-10-14 Baselines reach seven; shader/material skip pattern noted
+
+- Three more reference baselines with class-level comparison notes (Rust inventories saved locally): second avatar exact on anim/png/controller/cs/mat/ogg with 6 shaders vs 8 class-48; fourth avatar exact on anim/png/mat/controller/cs/ogg with 13 shaders vs 19 class-48 plus renderTexture outputs and paired unknown raw types; third world exact on anim/cs/controller/ogg/unity with material/texture near-matches and a large 43-vs-63 shader gap. The shader shortfall recurs across samples (content-dependent, not constant); materials mostly exact with small gaps. All stay observations: the next static task is reading the reference exporter skip rules so future Rust-vs-ref diffs assert the right thing.
+- Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No sample content committed; outputs quarantined in gitignored scratch. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Three more reference baselines (observations, not verdicts)
 
 - Reference exports done for three more samples (all structural counts only): smallest-2018-inner avatar 144 files (png/anim/cs/ogg exact vs class counts; 13 materials vs 14 class-21 and 8 shaders vs 10 class-48 noted as observations), oldest world 37 files (unity/ogg/png/cs exact), second avatar 473 files (class breakdown pending). Ledger rows updated. All gaps stay observations until Rust-side exports exist to compare against.

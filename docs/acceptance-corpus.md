@@ -48,9 +48,9 @@ version-routing blocker exists at the TypeTree level.
 | ID | Rust replay | Inventory | Reference export | Semantic diff | Verdict |
 |----|-------------|-----------|------------------|---------------|---------|
 | VRC-AV01 | probe done | done: 2 nodes, 1 file (2022.3.22f1, tree), 2753 objs, 1.5MB resource node; decode 2753/2753 OK | done: 2120 files, class-mirroring counts | pending | parse+decode-OK; export pending |
-| VRC-AV02 | probe done | decode 642/642 OK | done: 473 files, class counts pending | pending | parse+decode-OK; export pending |
+| VRC-AV02 | probe done | decode 642/642 OK | done: 473 files; 156/156 anim, 28/28 png, 9/9 controller, 15/15 cs, 8/8 mat, 1 ogg; 6 shader vs 8 class-48 (observation) | pending | parse+decode-OK; export pending |
 | VRC-AV03 | probe done | done: 3 nodes, 1 file (inner 2018.4.20f1, tree), 260 objs, 16MB resource node; decode 260/260 OK | done: 144 files; 25/25 png, 9/9 anim, 4/4 cs, 1 ogg; 13 mat vs 14 class-21 and 8 shader vs 10 class-48 (observations) | pending | parse+decode-OK; export pending |
-| VRC-AV04 | probe done | decode 1952/1952 OK | pending | pending | parse+decode-OK; export pending |
+| VRC-AV04 | probe done | decode 1952/1952 OK | done: 1191 files; 370/370 anim, 67/67 png, 40/40 mat, 9/9 controller, 14/14 cs, 4/4 ogg; 13 shader vs 19 class-48, plus 4 renderTexture and paired raw types 1818360608/9 (observations) | pending | parse+decode-OK; export pending |
 | VRC-AV05 | probe done | decode 216/216 OK | pending | pending | parse+decode-OK; export pending |
 | VRC-AV06 | probe done | decode 3394/3394 OK | pending | pending | parse+decode-OK; export pending |
 | VRC-AV07 | probe done | decode 1373/1373 OK | pending | pending | parse+decode-OK; export pending |
@@ -60,7 +60,7 @@ version-routing blocker exists at the TypeTree level.
 | VRC-AV11 | probe done | decode 6461/6461 OK | pending | pending | parse+decode-OK; export pending |
 | VRC-W01 | probe done | done: 3 nodes, 2 files (2022.3.22f1, trees), 1008 objs, 243KB resource node; decode 1008/1008 OK | done: 478 files incl 1 unity, 1 ogg, 102 png vs 104 class-28 (observation, not a verdict) | pending | parse+decode-OK; export pending |
 | VRC-W02 | probe done | done: fmt-7 bundle, 3 nodes, 2 files (2019.4.31f1, trees), 46 objs, 12MB resource node; decode 46/46 OK | done: 37 files incl 1 unity, 1 ogg, 2/2 png, 5/5 cs | pending | parse+decode-OK; export pending |
-| VRC-W03 | probe done | decode 2274/2274 OK | pending | pending | parse+decode-OK; export pending |
+| VRC-W03 | probe done | decode 2274/2274 OK | done: 1080 files; 7/7 anim, 44/44 cs, 3/3 controller, 4/4 ogg, 1 unity, 37 prefab; 43 mat vs 46 class-21, 43 shader vs 63 class-48, 169 texture files vs 173 class-28 (observations); class-213 x91 noted | pending | parse+decode-OK; export pending |
 | VRC-W04 | probe done | decode 15871/15871 OK | pending | pending | parse+decode-OK; export pending |
 | VRC-W05 | probe done | decode 1441/1441 OK | pending | pending | parse+decode-OK; export pending |
 | VRC-W06 | probe done | decode 426664/426664 OK | pending | pending | parse+decode-OK; export pending |
