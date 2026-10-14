@@ -1,5 +1,11 @@
 # RustAssetRipper hand-off — 2026-10-10
 
+## Latest current checkpoint — 2026-10-14 (reference driver building)
+
+- Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public. Sample inputs read-only; nothing committed from them.
+- Headless reference driver authored in gitignored scratch; restore green, Release build running in background. Next: collect build, first reference export, quarantine outputs locally.
+- Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push.
+
 ## Latest current checkpoint — 2026-10-14 (factory triage 637216/637216)
 
 - Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public. Sample inputs read-only; nothing committed from them.

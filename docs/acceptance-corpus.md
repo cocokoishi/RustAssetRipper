@@ -126,5 +126,5 @@ untouched) and values remain unvalidated. Next: reference-side runs.
   through rlib-linked probes with a documented staleness caveat; gate-level
   replays need a binary strategy (deferred decision, no permission changes
   without authorization).
-- Reference export driver: no headless frozen-source export driver exists
-  yet; comparison runs need one (deferred build).
+- Reference export driver: scratch headless driver authored (gitignored);
+  restore green, single-threaded Release build running in background.

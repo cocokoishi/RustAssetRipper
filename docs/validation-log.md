@@ -1,5 +1,10 @@
 # Validation log
 
+## 2026-10-14 Headless reference export driver (restore green, build running)
+
+- Authored a scratch headless driver (gitignored `target/acceptance-driver/`, never committed): one-call `ExportHandler.LoadProcessAndExport` with default `FullConfiguration` over argv inputs into an output dir. `dotnet restore` green in ~2s against the warm NuGet cache (17-project closure); single-threaded Release build started in background. First reference run (smallest avatar) plus output quarantine rules land next round.
+- Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No sample content committed; frozen source untouched (build outputs land in its standard ignored dirs). Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Full-corpus factory triage (637216/637216 OK, zero failures)
 
 - Extended the probe with per-object `materialize_object` through embedded reference layouts: every one of the 637216 decoded corpus objects also constructs (counts match decode exactly). Ledger gained a factory section. Honest caveats kept: triage grade, construction-OK is not export-OK, values unvalidated, workspace/collections/export and reference side untouched.
