@@ -3,6 +3,7 @@
 ## 2026-10-14 Twenty baselines; largest shader gap noted
 
 - Two more baselines with saved inventories: largest avatar exact on anim/cs/controller/ogg with sub-document output and small texture/material gaps plus a 27-vs-37 shader gap; mid-large world exact on anim/controller/cs/ogg/unity with a terrainlayer output and the largest shader gap so far (72 vs 103). Texture overages and gaps both recur; shader gaps scale with content size. All observations, not verdicts.
+- Actions run `38552655534` is fully green on both platforms (docs-only change), including the public-repository hygiene job.
 - Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No sample content committed; outputs quarantined in gitignored scratch. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 Eighteen baselines; texture overages need source-side accounting
