@@ -4,6 +4,7 @@
 
 - A probe over all 161 table setups found two-packet silent sequences for surround layouts too (64 coupling-free setups under 6/8 channels; 128/128 sequences decode to 128 zero frames). The end-to-end table-backed test now covers stereo, mono, 5.1, and 7.1 containers through `decode_fsb5_vorbis`, each asserting bit-identical rebuilt packets and exact-silence WAV output. New rejection test pins loud parse failures for bad signatures, unsupported versions, and truncated base headers.
 - Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No user input was read; Phase 1 remains open and Phase 2 remains locked. Unity import/runtime and UABEA were NOT RUN.
+- Actions run `38495448575` is fully green on both platforms: lib 1,750 passed/1 ignored (extended layout cases plus the new rejection test), CLI 128 passed, warnings-denied Clippy, release builds, changed-line formatting, and repository hygiene.
 
 ## 2026-10-14 Privacy remediation in current sources (no history rewritten)
 
