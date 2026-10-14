@@ -1575,3 +1575,87 @@
         let meta = fs::read_to_string(&meta_path).unwrap();
         assert!(meta.contains("TextureImporter:"), "{meta}");
     }
+
+    #[test]
+    fn export_project_emits_fsb5_audio_ogg_and_importer() {
+        // The project audio binary route is 2022.3-gated, so this uses a
+        // 2022.3-versioned AudioClip fixture carrying the silent stereo FSB5
+        // bytes from the decode suite; tree walk asserts one remuxed Ogg plus
+        // its audio sidecar instead of assuming a layout.
+        fn silent_stereo_fsb5_container() -> Vec<u8> {
+            let mut fsb5 = vec![0u8; 60];
+            fsb5[..4].copy_from_slice(b"FSB5");
+            fsb5[4..8].copy_from_slice(&1u32.to_le_bytes());
+            fsb5[8..12].copy_from_slice(&1u32.to_le_bytes());
+            fsb5[12..16].copy_from_slice(&16u32.to_le_bytes());
+            fsb5[20..24].copy_from_slice(&6u32.to_le_bytes());
+            fsb5[24..28].copy_from_slice(&15u32.to_le_bytes());
+            let sample_header = (u64::from(128u32) << 34) | (1u64 << 5) | (8u64 << 1) | 1;
+            fsb5.extend_from_slice(&sample_header.to_le_bytes());
+            fsb5.extend_from_slice(&[0x08, 0, 0, 0x16]);
+            fsb5.extend_from_slice(&0xA722_97FFu32.to_le_bytes());
+            fsb5.extend_from_slice(&[1u8, 0, 0, 1, 0, 0]);
+            fsb5
+        }
+
+        let directory = TestInputDirectory::new_root();
+        let source_path = directory.join("fsb5-audio.assets");
+        let output_root = directory.join("project-fsb5-audio");
+        fs::write(
+            &source_path,
+            make_audio_clip_file_with_version(
+                &silent_stereo_fsb5_container(),
+                None,
+                b"2022.3.0f1\0",
+            ),
+        )
+        .unwrap();
+        let _input_guard = TestInputDirectory {
+            directory,
+            files: vec![source_path.clone()],
+            subdirectories: Vec::new(),
+        };
+
+        super::run(
+            [
+                std::ffi::OsString::from("export-project"),
+                output_root.clone().into_os_string(),
+                source_path.clone().into_os_string(),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+
+        fn collect_files(path: &std::path::Path, files: &mut Vec<PathBuf>) {
+            for entry in fs::read_dir(path).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if entry.file_type().unwrap().is_dir() {
+                    collect_files(&path, files);
+                } else {
+                    files.push(path);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        collect_files(&output_root, &mut files);
+        let oggs: Vec<_> = files
+            .iter()
+            .filter(|path| path.extension().is_some_and(|ext| ext == "ogg"))
+            .collect();
+        assert_eq!(oggs.len(), 1, "expected exactly one Ogg in {files:?}");
+        let ogg = fs::read(oggs[0]).unwrap();
+        assert_eq!(&ogg[..4], b"OggS");
+        let mut reader = ogg::PacketReader::new(std::io::Cursor::new(ogg.as_slice()));
+        let mut packets = Vec::new();
+        while let Some(packet) = reader.read_packet().unwrap() {
+            packets.push(packet.data);
+        }
+        assert_eq!(packets.len(), 5);
+        assert_eq!(packets[3], [0]);
+        assert_eq!(packets[4], [0]);
+        let mut meta_path = oggs[0].clone();
+        meta_path.as_mut_os_string().push(".meta");
+        let meta = fs::read_to_string(&meta_path).unwrap();
+        assert!(meta.contains("AudioImporter:"), "{meta}");
+    }

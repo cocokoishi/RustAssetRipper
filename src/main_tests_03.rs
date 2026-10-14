@@ -1407,6 +1407,14 @@
     }
 
     fn make_audio_clip_file(data: &[u8], sound_type: Option<i32>) -> Vec<u8> {
+        make_audio_clip_file_with_version(data, sound_type, b"3.5.0f1\0")
+    }
+
+    fn make_audio_clip_file_with_version(
+        data: &[u8],
+        sound_type: Option<i32>,
+        version: &[u8],
+    ) -> Vec<u8> {
         let mut strings = Vec::new();
         let clip_type = push_type_tree_string(&mut strings, "AudioClip");
         let empty_name = push_type_tree_string(&mut strings, "");
@@ -1450,7 +1458,7 @@
         let padding = (4 - payload.len() % 4) % 4;
         payload.resize(payload.len() + padding, 0);
         assert!(payload.len().is_multiple_of(4), "payload is 4-byte aligned");
-        finish_single_object_file(b"3.5.0f1\0", 83, &nodes, &strings, &payload, 42)
+        finish_single_object_file(version, 83, &nodes, &strings, &payload, 42)
     }
 
     fn make_streamed_audio_clip_file(

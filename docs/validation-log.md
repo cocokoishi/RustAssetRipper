@@ -1,5 +1,10 @@
 # Validation log
 
+## 2026-10-14 FSB5 export-project integration test
+
+- New: `export_project_emits_fsb5_audio_ogg_and_importer` covers the 2022.3-gated project audio binary route end to end. Groundwork: `make_audio_clip_file` was refactored into a version-parameterized `make_audio_clip_file_with_version` (existing 3.5 callers byte-identical), and the test uses a 2022.3 fixture with the silent stereo FSB5 bytes. Tree-walk asserts find one remuxed Ogg (magic plus 5 packets with zero audio payloads) and its `AudioImporter` sidecar. If routing declines the binary path, CI reports the actual file list.
+- Local checks: single-file `rustfmt --check` clean in the new regions (remaining hunks pre-existing), `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No user input was read; Phase 1 remains open and Phase 2 remains locked. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 CRN export-project integration test
 
 - New: `export_project_emits_crn_texture_png_and_importer` drives the same hand-built CRN fixture through the full `export-project` pipeline in-process, then walks the output tree (no assumed layout) to assert exactly one PNG with the 512x512 RGBA envelope plus its `TextureImporter` sidecar. This answers the open collection-admission question empirically: if the texture is skipped or misrouted, CI reports the actual file list.
