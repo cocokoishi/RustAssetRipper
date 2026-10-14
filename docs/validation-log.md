@@ -4,6 +4,7 @@
 
 - Mesh editor layout adds default-true MeshOptimized (data proven byte-absent) and keeps the m_DataSize blob name (an unconditional alias renamed it wrongly at every version). Fixed with a table row plus alias removal (tests corrected). Formatting and Clippy (warnings-denied locally) clean; release rebuilt.
 - Fresh replay plus re-audit: real-diff classes 3 to 2 (43 resolves fully) with zero unpaired files and no regressions.
+- Actions run `38628940272` failed one workspace test (`streamed_mesh_bytes` pinned the old blob name); fixed the assertion and verified the full workspace suite locally (1787 lib tests green). Rerun `38630712499` is fully green on both platforms, including warnings-denied Clippy, the release build, changed-line formatting, and the public-repository hygiene job. Lesson recorded: run the full workspace suite locally before pushing.
 - Local checks: `git diff --check` exit 0; `cargo check`/`cargo clippy` clean; module tests green. Full validation via GitHub Actions after push. Sample input read-only; outputs quarantined. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 Class field deltas fixed; 3 classes remain
