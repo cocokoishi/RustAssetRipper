@@ -1,5 +1,9 @@
 # Source behavior and differential findings
 
+## DIFF-YAML-EMPTY-ITEM-001 — empty sequence items keep the dash space (fixed)
+
+Empty block-sequence items differed by a trailing space (reference `- ` vs Rust `-`). The frozen sequence emitter writes the dash and its space immediately, so empty children keep it; only mapping values drop the pending space (`k:`). Proven by source plus a full-output survey (reference: 15 spaced dashes, 0 bare, 0 spaced colons). Fixed in the shared emitter with a regression test. Status: fixed and validated on the reporting sample; converged samples contain no empty items (exhaustion survey), so they are unaffected.
+
 ## DIFF-EXTERNAL-REFS-2019-001 — missing dependencies and engine resources (fixed)
 
 A 2019.4 world references its sibling bundle plus `Library/unity default resources` for a light cookie and a manager asset. The export refused the whole project at the PPtr completeness gate. The reference tolerates absent externals (missing markers) and resolves builtins as predefined engine assets, so the Rust pipeline now does the same at three layers: the project gate warns loudly and continues on missing dependencies (other unresolvable kinds still fail closed), per-object validation matches, and the YAML writer emits missing-reference pointers keeping the target PathID. Builtin default-resource references on versions without a frozen path-to-class row resolve as engine assets with an unknown class (export pointers carry no class; sprite atlas validation fails closed on it). The inspect summary now lists external identifiers per file. Status: fixed and validated; the reporting sample's cookie pointer matches the reference byte-for-byte.

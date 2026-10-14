@@ -1,5 +1,11 @@
 # RustAssetRipper hand-off — 2026-10-10
 
+## Latest current checkpoint — 2026-10-14 (AV05 converges)
+
+- Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public (only class IDs/counts/field names in docs; audit outputs quarantined).
+- VRC-AV05 r2: CONVERGED (only proven-equivalent Avatar; zero unpaired). Converged set: AV02, AV03, AV05, W01, W02 (+AV01 with only known Avatar style). Emitter change proven blast-free by exhaustion (no empty items in any converged YAML). Next: advance the corpus.
+- Local checks: `git diff --check` exit 0; cargo check/clippy (-D warnings locally) + full workspace suite green. Full validation via GitHub Actions after push.
+
 ## Latest current checkpoint — 2026-10-14 (AV02 converges)
 
 - Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public (only class IDs/counts/field names in docs; audit outputs quarantined).

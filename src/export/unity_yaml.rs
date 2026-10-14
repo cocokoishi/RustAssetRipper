@@ -757,7 +757,11 @@ impl UnityYamlEmitter {
         for item in items {
             if style != UnityYamlSequenceStyle::Flow {
                 self.write_char('-')?;
-                self.write_whitespace();
+                // The baseline sequence writer emits the dash and its space
+                // immediately, so empty items keep the trailing space (`- `).
+                // A delayed whitespace would be dropped for empty children
+                // (mapping values intentionally drop it: `k:`).
+                self.write_char(' ')?;
                 if item.node_type() == UnityYamlNodeType::Sequence {
                     self.increase_indent()?;
                 }
@@ -1558,6 +1562,24 @@ mod tests {
         assert_eq!(
             write_unity_yaml_documents(&[document], UnityYamlWriteLimits::default()).unwrap(),
             "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n--- !u!1 &10\nGameObject:\n  m_Component:\n  - component: {fileID: 45}\n"
+        );
+    }
+
+    #[test]
+    fn writes_empty_block_sequence_items_with_baseline_trailing_space() {
+        // The baseline sequence writer emits the dash and its space
+        // immediately, so empty items keep the trailing space while empty
+        // mapping values drop it.
+        let mut items = UnityYamlNode::sequence(UnityYamlSequenceStyle::Block);
+        items.push(UnityYamlNode::string(String::new())).unwrap();
+        items.push(UnityYamlNode::string("x".to_owned())).unwrap();
+        let document =
+            UnityYamlDocument::object(1, 12, "Holder", mapping(&[("names", items)]), false)
+                .unwrap();
+
+        assert_eq!(
+            write_unity_yaml_documents(&[document], UnityYamlWriteLimits::default()).unwrap(),
+            "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n--- !u!1 &12\nHolder:\n  names:\n  - \n  - x\n"
         );
     }
 
