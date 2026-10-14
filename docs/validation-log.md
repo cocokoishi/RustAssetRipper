@@ -3,6 +3,7 @@
 ## 2026-10-14 FSB5 export-audio integration test (ogg remux + wav)
 
 - New: `export_audio_remuxes_silent_fsb5_to_ogg_and_wav` reuses the existing `make_audio_clip_file` fixture helper with the silent stereo FSB5 container bytes from the decode suite (no new fixture file needed). Default export asserts Ogg magic, exactly 5 remuxed packets with zero audio payloads, and the status line; PreferWav asserts 128-frame fact, exact WAV length, all-zero samples, and its status line. This closes the FSB5 CLI-output remainder for both export formats at the `export-audio` level.
+- Actions run `38524965732` is fully green on both platforms: lib 1,765 passed/1 ignored and CLI 130 passed including the new test, with warnings-denied Clippy, release builds, changed-line formatting, and repository hygiene. (First run caught only a changed-line formatting nit in two status asserts, fixed by matching the file's chain style.)
 - Local checks: single-file `rustfmt --check` clean in the new region (remaining hunks pre-existing), `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No user input was read; Phase 1 remains open and Phase 2 remains locked. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 CRN texture export-texture integration test
