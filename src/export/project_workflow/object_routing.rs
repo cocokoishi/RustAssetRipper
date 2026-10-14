@@ -1110,10 +1110,19 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                         } else {
                             decoded_bytes
                         };
-                        let audio_importer = audio_importer_yaml_2022_3(
-                            view,
-                            payload.and_then(object_asset_bundle_name).as_deref(),
-                        )?;
+                        let audio_importer = if project_version.major == 2018
+                            && project_version.minor == 4
+                        {
+                            crate::export::project_workflow::audio_asset::audio_importer_yaml_2018_4(
+                                view,
+                                payload.and_then(object_asset_bundle_name).as_deref(),
+                            )?
+                        } else {
+                            audio_importer_yaml_2022_3(
+                                view,
+                                payload.and_then(object_asset_bundle_name).as_deref(),
+                            )?
+                        };
                         audio_binary_export = Some(AudioBinaryExportDetails {
                             bytes,
                             collection_extension,

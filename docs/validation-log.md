@@ -1,5 +1,11 @@
 # Validation log
 
+## 2026-10-14 Audio importer body fixed; cubemap and content diffs remain
+
+- The OGG sidecar differed in shape, not just IDs: 2018.4 writes stamp 6 with six-field settings and top-level preload, versus Rust's 2022.3 shape. Fixed with a dedicated 2018.4 builder dispatched by project version, pinned by a shape unit test. Formatting and Clippy clean locally; release rebuilt.
+- Fresh replay plus re-audit: the OGG sidecar matches (additional diffs 4 to 3); audio stays packet-identical (76/76). Remaining: the raw cubemap route and paired-content diffs. No regressions.
+- Local checks: `git diff --check` exit 0; `cargo check`/`cargo clippy` clean; module tests green. Full validation via GitHub Actions after push. Sample input read-only; outputs quarantined. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Importer version stamp fixed; audio body and cubemap remain
 
 - The 25 PNG sidecar diffs reduced to a single integer: reference writes TextureImporter `serializedVersion: 9` for 2018.4 while Rust's shared v7 body stamped 7. Fixed with a dedicated 2018_4 layout variant reusing the v7 body (same pattern as the shared 2019_4/2022_3 arm), pinned by a stamp-plus-body-parity test. Condition tests, formatting, and Clippy clean locally; release rebuilt.

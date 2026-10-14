@@ -108,6 +108,110 @@ fn audio_sample_settings_yaml(
     Ok(settings)
 }
 
+/// 2018.4 `AudioImporter` body, probe-verified against reference output:
+/// version stamp 6, six-field sample settings without nested versions, and
+/// the preload flag at the top level instead of inside the settings.
+pub(super) fn audio_importer_yaml_2018_4(
+    view: &crate::resources::audio::AudioClipView,
+    asset_bundle_name: Option<&str>,
+) -> Result<crate::export::unity_yaml::UnityYamlNode, Box<dyn Error>> {
+    use crate::export::unity_yaml::{UnityYamlMappingStyle, UnityYamlNode, UnityYamlSequenceStyle};
+
+    let mut importer = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    audio_importer_insert(&mut importer, "serializedVersion", audio_integer(6))?;
+    audio_importer_insert(
+        &mut importer,
+        "externalObjects",
+        UnityYamlNode::mapping(UnityYamlMappingStyle::Flow),
+    )?;
+
+    let default_settings = audio_sample_settings_yaml_2018_4(
+        view.load_type.unwrap_or(0),
+        view.compression_format.unwrap_or(0),
+    )?;
+    audio_importer_insert(&mut importer, "defaultSettings", default_settings)?;
+    audio_importer_insert(
+        &mut importer,
+        "platformSettingOverrides",
+        UnityYamlNode::mapping(UnityYamlMappingStyle::Flow),
+    )?;
+    for (field, value) in [
+        ("forceToMono", false),
+        ("normalize", false),
+        ("preloadAudioData", view.preload_audio_data.unwrap_or(false)),
+        ("loadInBackground", view.load_in_background.unwrap_or(false)),
+        ("ambisonic", view.ambisonic.unwrap_or(false)),
+        ("3D", view.is_3d.unwrap_or(false)),
+    ] {
+        audio_importer_insert(
+            &mut importer,
+            field,
+            audio_integer(if value { 1 } else { 0 }),
+        )?;
+    }
+
+    let mut preview_data = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    audio_importer_insert(
+        &mut preview_data,
+        "previewData",
+        UnityYamlNode::sequence(UnityYamlSequenceStyle::Flow),
+    )?;
+    audio_importer_insert(&mut preview_data, "origSize", audio_integer(0))?;
+    audio_importer_insert(&mut preview_data, "compSize", audio_integer(0))?;
+    audio_importer_insert(&mut importer, "previewData", preview_data)?;
+
+    let mut output = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    audio_importer_insert(
+        &mut output,
+        "outputSettings",
+        audio_sample_settings_yaml_2018_4(0, 0)?,
+    )?;
+    audio_importer_insert(&mut output, "outputContainerFormat", audio_integer(0))?;
+    audio_importer_insert(
+        &mut output,
+        "editorOutputSettings",
+        audio_sample_settings_yaml_2018_4(0, 0)?,
+    )?;
+    audio_importer_insert(&mut output, "editorOutputContainerFormat", audio_integer(0))?;
+    audio_importer_insert(&mut importer, "output", output)?;
+    audio_importer_insert(&mut importer, "userData", UnityYamlNode::string(""))?;
+    audio_importer_insert(
+        &mut importer,
+        "assetBundleName",
+        UnityYamlNode::string(asset_bundle_name.unwrap_or_default()),
+    )?;
+    audio_importer_insert(
+        &mut importer,
+        "assetBundleVariant",
+        UnityYamlNode::string(""),
+    )?;
+    Ok(importer)
+}
+
+fn audio_sample_settings_yaml_2018_4(
+    load_type: i32,
+    compression_format: i32,
+) -> Result<crate::export::unity_yaml::UnityYamlNode, Box<dyn Error>> {
+    use crate::export::unity_yaml::{UnityYamlMappingStyle, UnityYamlNode};
+
+    let mut settings = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    audio_importer_insert(
+        &mut settings,
+        "loadType",
+        audio_integer(i64::from(load_type)),
+    )?;
+    audio_importer_insert(&mut settings, "sampleRateSetting", audio_integer(0))?;
+    audio_importer_insert(&mut settings, "sampleRateOverride", audio_integer(0))?;
+    audio_importer_insert(
+        &mut settings,
+        "compressionFormat",
+        audio_integer(i64::from(compression_format)),
+    )?;
+    audio_importer_insert(&mut settings, "quality", audio_integer(0))?;
+    audio_importer_insert(&mut settings, "conversionMode", audio_integer(0))?;
+    Ok(settings)
+}
+
 fn audio_integer(value: i64) -> crate::export::unity_yaml::UnityYamlNode {
     crate::export::unity_yaml::UnityYamlNode::scalar(
         crate::export::unity_yaml::UnityYamlScalar::Signed(value),
@@ -426,4 +530,81 @@ fn audio_yaml_null_pointer() -> Result<crate::export::unity_yaml::UnityYamlNode,
             invalid_project(format!("AudioClip base PPtr cannot be built: {error}"))
         })?;
     Ok(pointer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::export::unity_yaml::{UnityYamlNodeKind, UnityYamlScalar};
+
+    fn test_view() -> crate::resources::audio::AudioClipView {
+        crate::resources::audio::AudioClipView {
+            name: None,
+            audio_data: None,
+            resource: None,
+            sound_type: None,
+            format: None,
+            compression_format: Some(1),
+            load_type: Some(0),
+            preload_audio_data: Some(true),
+            load_in_background: Some(false),
+            ambisonic: Some(false),
+            is_3d: Some(false),
+        }
+    }
+
+    fn child<'a>(
+        node: &'a crate::export::unity_yaml::UnityYamlNode,
+        name: &str,
+    ) -> &'a crate::export::unity_yaml::UnityYamlNode {
+        let UnityYamlNodeKind::Mapping { entries, .. } = &node.kind else {
+            panic!("expected a YAML mapping")
+        };
+        entries
+            .iter()
+            .find_map(|(key, value)| match &key.kind {
+                UnityYamlNodeKind::Scalar(UnityYamlScalar::PlainString(key)) if key == name => {
+                    Some(value)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing YAML field {name:?}"))
+    }
+
+    fn has_child(node: &crate::export::unity_yaml::UnityYamlNode, name: &str) -> bool {
+        let UnityYamlNodeKind::Mapping { entries, .. } = &node.kind else {
+            panic!("expected a YAML mapping")
+        };
+        entries.iter().any(|(key, _)| match &key.kind {
+            UnityYamlNodeKind::Scalar(UnityYamlScalar::PlainString(key)) => key == name,
+            _ => false,
+        })
+    }
+
+    fn signed(node: &crate::export::unity_yaml::UnityYamlNode) -> i64 {
+        let UnityYamlNodeKind::Scalar(UnityYamlScalar::Signed(value)) = &node.kind else {
+            panic!("expected a signed YAML scalar")
+        };
+        *value
+    }
+
+    #[test]
+    fn audio_importer_2018_4_shape_matches_reference() {
+        // Probe-verified against 2018.4 reference output: version stamp 6,
+        // six-field sample settings without nested versions, and the preload
+        // flag at the top level.
+        let importer = audio_importer_yaml_2018_4(&test_view(), None).unwrap();
+        assert_eq!(signed(child(&importer, "serializedVersion")), 6);
+        assert_eq!(signed(child(&importer, "preloadAudioData")), 1);
+        let default_settings = child(&importer, "defaultSettings");
+        assert_eq!(signed(child(default_settings, "compressionFormat")), 1);
+        assert!(!has_child(default_settings, "serializedVersion"));
+        assert!(!has_child(default_settings, "preloadAudioData"));
+        let output = child(&importer, "output");
+        for group in ["outputSettings", "editorOutputSettings"] {
+            let settings = child(output, group);
+            assert!(!has_child(settings, "serializedVersion"));
+            assert!(!has_child(settings, "preloadAudioData"));
+        }
+    }
 }

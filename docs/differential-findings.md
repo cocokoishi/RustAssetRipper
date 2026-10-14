@@ -1,5 +1,9 @@
 # Source behavior and differential findings
 
+## DIFF-AUDIO-IMPORTER-2018-001 — 2018.4 AudioImporter is its own shape (fixed)
+
+The OGG sidecar differed beyond guids/timestamps: 2018.4 writes stamp 6, six-field sample settings with no nested versions, and top-level preloadAudioData, while Rust emitted the 2022.3 shape (stamp 7, nested versions, no top-level preload). Fixed with a dedicated 2018.4 builder dispatched by project version, pinned by a shape unit test. Re-audit clears the OGG sidecar diff; audio stays packet-identical. Status: fixed and validated on the reporting sample.
+
 ## DIFF-GAMEOBJECT-STATIC-001 — editor static marking mirrored (fixed)
 
 Four world GameObject documents wrote `m_StaticEditorFlags: 0` where the reference writes all-bits-set. Root cause: the frozen `EditorFormatConverter` marks a renderer's GameObject `uint.MaxValue` when its static-batch info is non-default (or subset indices non-empty on older layouts), and Rust's editor-format pipeline converted tags but never marked. Fix computes the mark from attached renderer components through the reference graph at assignment time (renderer classes 23/96/120/137/199/212, exact `IsDefault` semantics) and sets the editor field, failing loudly when the field is absent. Re-audit: class 1 goes 168-exact-plus-4-diffs to 172/172 exact with zero unpaired documents anywhere and no regressions. Status: fixed and validated on the reporting sample.
