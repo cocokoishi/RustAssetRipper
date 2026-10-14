@@ -1,5 +1,10 @@
 # Validation log
 
+## 2026-10-14 Surround WAV conversion coverage
+
+- Gap: WAV conversion was proven on stereo/mono fixtures only; no test ran the writer past two channels. New test decodes the 5.1 silent container through Ogg rebuild into WAV and pins the multichannel header (6 channels, 44,100 Hz, byte rate, 24-byte block alignment, 32-bit depth, 128-frame fact chunk, data length, total length) plus exact-silence data.
+- Local checks: `git diff --check` exit 0; single-file `rustfmt --check` clean. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No user input was read; Phase 1 remains open and Phase 2 remains locked. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 FSB5 rebuild-side output limit enforcement
 
 - Gap: the byte limit was proven only on the WAV conversion side; the rebuilt-Ogg enforcement arm (`DecodedDataLimitExceeded` from the rebuild writer) had no coverage. New test decodes the stereo silent container once to measure its exact rebuilt size, then asserts an exact-fit limit succeeds and one byte less fails loudly with the offending limit attached.

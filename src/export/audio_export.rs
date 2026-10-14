@@ -2433,6 +2433,33 @@ mod tests {
     }
 
     #[test]
+    fn surround_silent_decode_converts_to_multichannel_silent_wav() {
+        // The 5.1 silent container exercises the WAV writer past stereo:
+        // six channels, matching block alignment, a 128-frame fact chunk,
+        // and exact-silence data.
+        let fsb5 = silent_table_backed_container(2, 9, 0x070B_A3B6);
+        let (rebuilt_ogg, _) = super::decode_fsb5_vorbis(&fsb5, 1024 * 1024).unwrap();
+        let wav = super::convert_ogg_to_wav_with_limit(&rebuilt_ogg, 1024 * 1024).unwrap();
+        assert_eq!(&wav[..4], b"RIFF");
+        assert_eq!(&wav[8..12], b"WAVE");
+        assert_eq!(u16::from_le_bytes(wav[22..24].try_into().unwrap()), 6);
+        assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()), 44_100);
+        assert_eq!(
+            u32::from_le_bytes(wav[28..32].try_into().unwrap()),
+            44_100 * 24
+        );
+        assert_eq!(u16::from_le_bytes(wav[32..34].try_into().unwrap()), 24);
+        assert_eq!(u16::from_le_bytes(wav[34..36].try_into().unwrap()), 32);
+        assert_eq!(u32::from_le_bytes(wav[46..50].try_into().unwrap()), 128);
+        assert_eq!(
+            u32::from_le_bytes(wav[54..58].try_into().unwrap()),
+            128 * 6 * 4
+        );
+        assert_eq!(wav.len(), 58 + 128 * 6 * 4);
+        assert!(wav[58..].iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
     fn exporter_warnings_name_the_asset_like_the_source() {
         assert_eq!(
             native_audio_empty_warning("Music"),
