@@ -4,6 +4,7 @@
 
 - The Animation component joins the 2022.3 editor tree set (TPK-probed full base). Formatting and Clippy (warnings-denied locally) clean; release rebuilt.
 - Fresh replay plus re-audit: zero real-diff classes except the Avatar doc, proven content-identical modulo style (strict token equality over 170333 chars); zero unpaired files. No other sample contains this class, so no regressions are possible.
+- Actions run `38651607158` is fully green on both platforms (Animation editor coverage), including warnings-denied Clippy, the release build, changed-line formatting, and the public-repository hygiene job.
 - Local checks: `git diff --check` exit 0; `cargo check`/`cargo clippy` clean; module tests green. Full validation via GitHub Actions after push. Sample input read-only; outputs quarantined. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 AV04 converges on current binary
