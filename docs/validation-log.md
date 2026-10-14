@@ -3,6 +3,7 @@
 ## 2026-10-14 Engine-redirect rule recorded (static, both sides)
 
 - Read the frozen `EngineAssetsExporter`: engine-file assets redirect to predefined GUIDs instead of emitting files, with font and sprite-cache variants; the Rust port mirrors every piece (redirect collections, engine GUIDs, version-banded predefined tables, non-exportable redirect claims, engine fixtures). Recorded as `DIFF-ENGINE-REDIRECT-001` with the future diff rule (files plus per-asset redirect sets, never count equality). Corpus count gaps reinterpreted accordingly; they stay observations.
+- Actions run `38542335739` is fully green on both platforms (docs-only change), including the public-repository hygiene job.
 - Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No samples opened for this finding; nothing committed from them. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 Baselines reach seven; shader/material skip pattern noted
