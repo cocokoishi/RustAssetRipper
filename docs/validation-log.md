@@ -4,6 +4,7 @@
 
 - The 25 PNG sidecar diffs reduced to a single integer: reference writes TextureImporter `serializedVersion: 9` for 2018.4 while Rust's shared v7 body stamped 7. Fixed with a dedicated 2018_4 layout variant reusing the v7 body (same pattern as the shared 2019_4/2022_3 arm), pinned by a stamp-plus-body-parity test. Condition tests, formatting, and Clippy clean locally; release rebuilt.
 - Fresh replay plus re-audit: all 25 PNG sidecars now match (additional diffs 28 to 4); PNGs remain pixel-identical and the OGG packet-identical. Remaining: the OGG sidecar body (2018.4 AudioImporter field order/content), the raw cubemap route, and paired-content diffs. No regressions.
+- Actions run `38585042710` is fully green on both platforms (importer version stamp), including warnings-denied Clippy, the release build, changed-line formatting, and the public-repository hygiene job.
 - Local checks: `git diff --check` exit 0; `cargo check`/`cargo clippy` clean; module tests green. Full validation via GitHub Actions after push. Sample input read-only; outputs quarantined. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 Inner version rules; 2018 bands plus routes land, importer bodies open
