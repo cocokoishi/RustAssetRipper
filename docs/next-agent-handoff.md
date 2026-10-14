@@ -1,5 +1,11 @@
 # RustAssetRipper hand-off — 2026-10-10
 
+## Latest current checkpoint — 2026-10-14 (texture attribution rule)
+
+- Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public. No samples opened for this static finding.
+- `DIFF-TEXTURE-ATTRIBUTION-001`: default image outputs attribute to class-28 plus cubemaps (verified on 3 baselines); sprites stay in metadata by default; raw-texture routing open. Next: Rust-side export comparison once a binary strategy exists.
+- Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push.
+
 ## Latest current checkpoint — 2026-10-14 (redirects quantified)
 
 - Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public. GUID-token census only; nothing committed from outputs.
