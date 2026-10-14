@@ -1,5 +1,10 @@
 # Validation log
 
+## 2026-10-14 AV07 converges on current binary
+
+- Fresh replay plus re-audit on the 2022.3 avatar (1373 objects, 6000-tagged bundle): 602 paired files, zero unpaired; zero real-diff classes except the Avatar doc, proven content-identical modulo style (strict token equality over 95977 chars). No product changes needed.
+- Local checks: replay exit 0; audit clean. Sample input read-only; outputs quarantined. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Animation editor coverage; AV06 converges
 
 - The Animation component joins the 2022.3 editor tree set (TPK-probed full base). Formatting and Clippy (warnings-denied locally) clean; release rebuilt.
