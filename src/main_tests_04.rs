@@ -797,7 +797,9 @@
             )
             .expect_err("declared streamed AudioClip bytes cannot be silently omitted")
             .to_string();
-            assert!(error.contains("AudioClip stream"), "{error}");
+            // 2019.4 clips take the decode path, so the refusal names the
+            // file, object, and stream from the data read.
+            assert!(error.contains("AudioClip"), "{error}");
             assert!(error.contains(expected_reason), "{error}");
 
             let audio_path = output_root.join("Assets/AudioClip/AudioFixture.audioclip");
