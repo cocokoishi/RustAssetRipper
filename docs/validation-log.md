@@ -4,6 +4,7 @@
 
 - The 2018.4 Keyframe v3 serializes seven fields; the reference editor layout adds default-0 tangentMode. Fixed with a document backfill (unit-tested), excluding MonoBehaviour managed curves. Formatting and Clippy (warnings-denied locally) clean; release rebuilt.
 - Fresh replay plus re-audit: real-diff classes 11 to 10 (82 resolves; 114 restored to clean) with zero unpaired files and no regressions.
+- Actions run `38612593220` is fully green on both platforms (keyframe tangentMode backfill), including warnings-denied Clippy, the release build, changed-line formatting, and the public-repository hygiene job.
 - Local checks: `git diff --check` exit 0; `cargo check`/`cargo clippy` clean; module tests green. Full validation via GitHub Actions after push. Sample input read-only; outputs quarantined. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 Document stamps fixed; 11 classes remain
