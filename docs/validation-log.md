@@ -1,5 +1,12 @@
 # Validation log
 
+## 2026-10-14 CRN project-integration test scoped (not started)
+
+- Next CRN code item: prove a CRN texture through `export-project` to PNG end to end (closes the "project/CLI output" remainder for single-face CRN; multi-face/mips still need fixtures that cannot be synthesized).
+- Recon: `main_tests_04` runs `export-project` in-process against temp dirs with source-generated payloads (TPK fallback) plus hand-built generation files (`make_generation_10_file*`, `PROBE_FIXTURE` SF_HEX rows with `rewrite_object_payloads` mutation). A class-28 Texture2D case needs a generated 512x512 payload (`m_TextureFormat=28`, `m_ImageData` set to the committed `classic_dxt1.crn` bytes) admitted through the same path, asserting the PNG exists with 512x512 dimensions and pixels matching the committed oracle hash plus a present importer sidecar.
+- Open design questions for the implementer: the exact generated Texture2D field set the TPK fallback materializes, inline-vs-streamed `m_ImageData` flow, and texture collection admission in `export-project`. Estimated multi-turn; no code changed here.
+- Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No user input was read; Phase 1 remains open and Phase 2 remains locked. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Meta timeCreated edges match DateTimeOffset exactly
 
 - Check: the `.meta` timestamp bounds (`-62_135_596_800`/`253_402_300_799`) equal .NET `DateTimeOffset` min/max in Unix seconds (verified by day-count arithmetic), but only interior values were tested. New test pins inclusive acceptance at both edges and rejection one second outside each.

@@ -1,5 +1,11 @@
 # RustAssetRipper hand-off — 2026-10-10
 
+## Latest current checkpoint — 2026-10-14 (CRN integration scoped)
+
+- Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Phase 1 open, Phase 2 locked; no user input, Unity, or UABEA used.
+- Scoped (not started): CRN texture through `export-project` to PNG using the `main_tests_04` in-process harness with a generated class-28 payload carrying the committed CRN bytes; asserts PNG dims/pixels/importer. Open questions on generated field set and admission recorded in the validation log. Estimated multi-turn.
+- Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push.
+
 ## Latest current checkpoint — 2026-10-14 (meta timestamp edges)
 
 - Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Phase 1 open, Phase 2 locked; no user input, Unity, or UABEA used.
