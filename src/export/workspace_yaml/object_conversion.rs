@@ -962,6 +962,16 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
                         unity_version.minor,
                     );
                 }
+                // NavMeshSettings carries a defaulted build-settings struct
+                // the 2019.4 release layout lacks.
+                if class_id == 196 {
+                    apply_navmesh_settings_backfill(
+                        &mut document,
+                        unity_version.major,
+                        unity_version.minor,
+                    )
+                    .map_err(|message| scene_editor_format_error(source, class_id, message))?;
+                }
                 apply_class_editor_field_backfill(
                     &mut document,
                     class_id,
@@ -2104,6 +2114,129 @@ pub(super) fn apply_renderer_gi_backfill(document: &mut UnityYamlDocument, major
         ),
         _ => true,
     });
+}
+
+/// Inserts the default 2019.4 NavMesh build-settings struct into
+/// NavMeshSettings documents whose serialized layout lacks it.
+///
+/// The 2019.4 release layout carries only `m_NavMeshData`; the editor layout
+/// adds `m_BuildSettings` (TPK-probed member types) and omits the prefab
+/// headers, and reference output fills Unity's default build settings.
+/// Values match the reference document exactly (cell size is one sixth).
+/// Present structs are kept, and unproven versions select no completion.
+pub(super) fn apply_navmesh_settings_backfill(
+    document: &mut UnityYamlDocument,
+    major: u32,
+    minor: u32,
+) -> Result<(), String> {
+    use crate::export::unity_yaml::UnityYamlMappingStyle;
+
+    if (major, minor) != (2019, 4) {
+        return Ok(());
+    }
+    let UnityYamlNodeKind::Mapping { entries, .. } = &mut document.root.kind else {
+        return Ok(());
+    };
+    let Some((_, body)) = entries.first_mut() else {
+        return Ok(());
+    };
+    let UnityYamlNodeKind::Mapping {
+        entries: fields, ..
+    } = &mut body.kind
+    else {
+        return Ok(());
+    };
+    if yaml_field_index(fields, "m_BuildSettings").is_some() {
+        return Ok(());
+    }
+    let failed = "could not allocate default NavMesh build settings";
+    let mut debug = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    debug
+        .insert_field("m_Flags", UnityYamlNode::scalar(UnityYamlScalar::Signed(0)))
+        .map_err(|_| failed.to_owned())?;
+    let mut settings = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    settings
+        .insert_field(
+            "serializedVersion",
+            UnityYamlNode::scalar(UnityYamlScalar::Signed(2)),
+        )
+        .map_err(|_| failed.to_owned())?;
+    for (name, value) in [
+        (
+            "agentTypeID",
+            UnityYamlNode::scalar(UnityYamlScalar::Signed(0)),
+        ),
+        (
+            "agentRadius",
+            UnityYamlNode::scalar(UnityYamlScalar::Float32(0.5)),
+        ),
+        (
+            "agentHeight",
+            UnityYamlNode::scalar(UnityYamlScalar::Float32(2.0)),
+        ),
+        (
+            "agentSlope",
+            UnityYamlNode::scalar(UnityYamlScalar::Float32(45.0)),
+        ),
+        (
+            "agentClimb",
+            UnityYamlNode::scalar(UnityYamlScalar::Float32(0.4)),
+        ),
+        (
+            "ledgeDropHeight",
+            UnityYamlNode::scalar(UnityYamlScalar::Float32(0.0)),
+        ),
+        (
+            "maxJumpAcrossDistance",
+            UnityYamlNode::scalar(UnityYamlScalar::Float32(0.0)),
+        ),
+        (
+            "minRegionArea",
+            UnityYamlNode::scalar(UnityYamlScalar::Float32(2.0)),
+        ),
+        (
+            "manualCellSize",
+            UnityYamlNode::scalar(UnityYamlScalar::Signed(0)),
+        ),
+        (
+            "cellSize",
+            UnityYamlNode::scalar(UnityYamlScalar::Float32(1.0 / 6.0)),
+        ),
+        (
+            "manualTileSize",
+            UnityYamlNode::scalar(UnityYamlScalar::Signed(0)),
+        ),
+        (
+            "tileSize",
+            UnityYamlNode::scalar(UnityYamlScalar::Signed(256)),
+        ),
+        (
+            "accuratePlacement",
+            UnityYamlNode::scalar(UnityYamlScalar::Signed(0)),
+        ),
+    ] {
+        settings
+            .insert_field(name, value)
+            .map_err(|_| failed.to_owned())?;
+    }
+    settings
+        .insert_field("debug", debug)
+        .map_err(|_| failed.to_owned())?;
+    let position = match yaml_field_index(fields, "m_NavMeshData") {
+        Some(index) => index,
+        None => fields.len(),
+    };
+    fields.insert(position, (yaml_plain_node("m_BuildSettings"), settings));
+    // The 196 editor layout carries no prefab headers, so the universal
+    // header insert is reverted here to match the reference field order.
+    fields.retain(|(key, _)| match &key.kind {
+        UnityYamlNodeKind::Scalar(UnityYamlScalar::PlainString(name)) => !matches!(
+            name.as_str(),
+            "m_CorrespondingSourceObject" | "m_PrefabInstance" | "m_PrefabAsset"
+        ),
+        _ => true,
+    });
+    Ok(())
 }
 
 /// A class-specific editor-layout delta: fields the editor layout carries

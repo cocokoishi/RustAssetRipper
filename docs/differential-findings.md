@@ -8,9 +8,9 @@ A 2019.4 world references its sibling bundle plus `Library/unity default resourc
 
 2019.4 editor layouts rename or add fields the shared backfill missed: Mesh uses an int optimization-flags field (-1) instead of the 2018.4 bool, Camera gains an axis-mode int (0), renderers gain a receive-GI int (1), and audio uses the 2018.4 decode/importer path (FSB5 resources decode to Ogg). The class delta table and the renderer GI backfill are now version-gated (unproven versions gain no fields), and the audio decode/importer gates cover 2019.4. Status: fixed and validated on the reporting sample.
 
-## DIFF-NAVMESH-DEFAULTS-2019-001 — NavMesh build-settings defaults (open)
+## DIFF-NAVMESH-DEFAULTS-2019-001 — NavMesh build-settings defaults (fixed)
 
-NavMeshSettings on 2019.4 carries a full default build-settings struct (agent dimensions, cell/tile sizes, debug flags) that the release layout lacks; the reference fills Unity defaults. This needs a struct-default insertion mechanism (the delta table handles scalars only). Values recorded from reference output; member types still to probe. Status: open, next blocker.
+NavMeshSettings on 2019.4 carries a full default build-settings struct (agent dimensions, cell/tile sizes, debug flags) that the release layout lacks; the reference fills Unity defaults. Fixed with a dedicated version-gated backfill inserting the TPK-probed struct with exact values (cell size one sixth), skipping present structs and reverting the prefab headers the 196 editor layout omits. Status: fixed and validated on the reporting sample.
 
 ## DIFF-CONTROLLER-ROOT-2018-001 — controller root release-only fields (fixed)
 

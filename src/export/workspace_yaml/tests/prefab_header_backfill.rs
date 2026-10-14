@@ -1,8 +1,8 @@
 use super::super::object_conversion::{
     apply_class_editor_field_backfill, apply_custom_data_label_backfill,
     apply_game_object_header_backfill, apply_generic_header_backfill,
-    apply_keyframe_tangent_mode_backfill, apply_renderer_gi_backfill,
-    prefab_header_backfill_version,
+    apply_keyframe_tangent_mode_backfill, apply_navmesh_settings_backfill,
+    apply_renderer_gi_backfill, prefab_header_backfill_version,
 };
 use crate::export::unity_yaml::{
     UnityYamlDocument, UnityYamlMappingStyle, UnityYamlNode, UnityYamlScalar, UnityYamlWriteLimits,
@@ -452,5 +452,69 @@ fn camera_axis_mode_slots_between_gate_fit_and_sensor_size_on_2019_4() {
     assert!(
         !render(&document).contains("m_FOVAxisMode"),
         "unproven versions gain no fields"
+    );
+}
+
+#[test]
+fn navmesh_build_settings_default_struct_slots_before_nav_mesh_data() {
+    let mut body = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    body.insert_field("serializedVersion", signed(2)).unwrap();
+    body.insert_field("m_ObjectHideFlags", signed(0)).unwrap();
+    body.insert_field("m_CorrespondingSourceObject", signed(0))
+        .unwrap();
+    body.insert_field("m_PrefabInstance", signed(0)).unwrap();
+    body.insert_field("m_PrefabAsset", signed(0)).unwrap();
+    body.insert_field("m_NavMeshData", signed(0)).unwrap();
+    let mut document = UnityYamlDocument::object(196, 56, "NavMeshSettings", body, false)
+        .expect("test NavMeshSettings document builds");
+    apply_navmesh_settings_backfill(&mut document, 2019, 4).unwrap();
+    // A second pass is a no-op: insertion skips structs already present.
+    apply_navmesh_settings_backfill(&mut document, 2019, 4).unwrap();
+    let output = render(&document);
+    key_order(
+        &output,
+        &[
+            "m_ObjectHideFlags",
+            "m_BuildSettings:",
+            "serializedVersion: 2",
+            "agentTypeID: 0",
+            "agentRadius: 0.5",
+            "agentHeight: 2",
+            "agentSlope: 45",
+            "agentClimb: 0.4",
+            "ledgeDropHeight: 0",
+            "maxJumpAcrossDistance: 0",
+            "minRegionArea: 2",
+            "manualCellSize: 0",
+            "cellSize: 0.16666667",
+            "manualTileSize: 0",
+            "tileSize: 256",
+            "accuratePlacement: 0",
+            "debug:",
+            "m_Flags: 0",
+            "m_NavMeshData",
+        ],
+    );
+    assert_eq!(
+        output.match_indices("m_BuildSettings").count(),
+        1,
+        "the settings struct is not duplicated"
+    );
+    assert!(
+        !output.contains("m_CorrespondingSourceObject")
+            && !output.contains("m_PrefabInstance")
+            && !output.contains("m_PrefabAsset"),
+        "the 196 editor layout carries no prefab headers"
+    );
+
+    // Unproven versions select no completion rather than guessing defaults.
+    let mut body = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    body.insert_field("m_NavMeshData", signed(0)).unwrap();
+    let mut document = UnityYamlDocument::object(196, 57, "NavMeshSettings", body, false)
+        .expect("test NavMeshSettings document builds");
+    apply_navmesh_settings_backfill(&mut document, 2018, 4).unwrap();
+    assert!(
+        !render(&document).contains("m_BuildSettings"),
+        "unproven versions gain no struct"
     );
 }
