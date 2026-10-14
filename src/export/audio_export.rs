@@ -2147,8 +2147,12 @@ mod tests {
 
     /// Minimal version-1 container holding two one-byte zero packets and a
     /// declared sample count of 128, mirroring the reconstruction test layout.
-    fn silent_table_backed_container(channel_code: u64, rate_code: u64, setup_crc: u32) -> Vec<u8> {
-        let packet_data = [1u8, 0, 0, 1, 0, 0];
+    fn table_backed_container(
+        channel_code: u64,
+        rate_code: u64,
+        setup_crc: u32,
+        packet_data: &[u8],
+    ) -> Vec<u8> {
         let mut fsb5 = vec![0u8; 60];
         fsb5[..4].copy_from_slice(b"FSB5");
         fsb5[4..8].copy_from_slice(&1u32.to_le_bytes());
@@ -2160,8 +2164,12 @@ mod tests {
         fsb5.extend_from_slice(&sample_header.to_le_bytes());
         fsb5.extend_from_slice(&[0x08, 0, 0, 0x16]);
         fsb5.extend_from_slice(&setup_crc.to_le_bytes());
-        fsb5.extend_from_slice(&packet_data);
+        fsb5.extend_from_slice(packet_data);
         fsb5
+    }
+
+    fn silent_table_backed_container(channel_code: u64, rate_code: u64, setup_crc: u32) -> Vec<u8> {
+        table_backed_container(channel_code, rate_code, setup_crc, &[1u8, 0, 0, 1, 0, 0])
     }
 
     #[test]
@@ -2465,6 +2473,28 @@ mod tests {
                 sample == [0, 0, 0, 0] || sample == [0, 0, 0, 0x80],
                 "non-silent sample {sample:02X?}"
             );
+        }
+    }
+
+    #[test]
+    fn hostile_audio_packets_fail_loudly_through_production_decode() {
+        // A probe over three table setups found no lewton panic across an
+        // eleven-packet hostile battery (every case errors or decodes empty
+        // at the decoder level). The production path maps decode errors to
+        // loud failures, pinned here end to end for two hostile shapes.
+        let mut long = vec![16u8, 0];
+        long.extend_from_slice(&[0xFF; 16]);
+        long.extend_from_slice(&[16u8, 0]);
+        long.extend_from_slice(&[0xFF; 16]);
+        for packet_data in [&[1u8, 0, 0xFF, 1, 0, 0xFF][..], long.as_slice()] {
+            let fsb5 = table_backed_container(1, 8, 0xA722_97FF, packet_data);
+            match super::decode_fsb5_vorbis(&fsb5, 1024 * 1024).unwrap_err() {
+                super::AudioDecodeError::Fsb5DecodeFailed { reason } => assert!(
+                    reason.contains("could not be validated"),
+                    "unexpected reason: {reason}"
+                ),
+                other => panic!("expected loud packet failure, got {other}"),
+            }
         }
     }
 
