@@ -242,9 +242,9 @@ fn renderer_gi_backfill_inserts_canonical_defaults_in_order() {
     body.insert_field("m_SortingLayerID", signed(0)).unwrap();
     let mut document = UnityYamlDocument::object(23, 46, "MeshRenderer", body, false)
         .expect("test MeshRenderer document builds");
-    apply_renderer_gi_backfill(&mut document);
+    apply_renderer_gi_backfill(&mut document, 2018, 4);
     // A second pass is a no-op: insertion skips fields already present.
-    apply_renderer_gi_backfill(&mut document);
+    apply_renderer_gi_backfill(&mut document, 2018, 4);
     let output = render(&document);
     key_order(
         &output,
@@ -274,6 +274,32 @@ fn renderer_gi_backfill_inserts_canonical_defaults_in_order() {
         !output.contains("m_AdditionalVertexStreams"),
         "additional vertex streams are removed"
     );
+    assert!(
+        !output.contains("m_ReceiveGI"),
+        "2018.4 reference output omits the receive-GI mode"
+    );
+
+    // 2019.4 adds the receive-GI mode after the lightmap scale.
+    let mut body = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    body.insert_field("serializedVersion", signed(4)).unwrap();
+    body.insert_field("m_Enabled", signed(1)).unwrap();
+    body.insert_field("m_LightProbeVolumeOverride", signed(0))
+        .unwrap();
+    body.insert_field("m_SortingLayerID", signed(0)).unwrap();
+    let mut document = UnityYamlDocument::object(23, 52, "MeshRenderer", body, false)
+        .expect("test MeshRenderer document builds");
+    apply_renderer_gi_backfill(&mut document, 2019, 4);
+    let output = render(&document);
+    key_order(
+        &output,
+        &[
+            "m_LightProbeVolumeOverride",
+            "m_ScaleInLightmap: 1",
+            "m_ReceiveGI: 1",
+            "m_PreserveUVs: 0",
+            "m_SortingLayerID",
+        ],
+    );
 }
 
 #[test]
@@ -288,7 +314,7 @@ fn class_editor_field_deltas_insert_defaults_and_drop_release_fields() {
         .unwrap();
     let mut document = UnityYamlDocument::object(95, 47, "Animator", animator, false)
         .expect("test Animator document builds");
-    apply_class_editor_field_backfill(&mut document, 95);
+    apply_class_editor_field_backfill(&mut document, 95, 2018, 4);
     let output = render(&document);
     key_order(
         &output,
@@ -310,7 +336,7 @@ fn class_editor_field_deltas_insert_defaults_and_drop_release_fields() {
     light.insert_field("m_Cookie", signed(0)).unwrap();
     let mut document = UnityYamlDocument::object(108, 48, "Light", light, false)
         .expect("test Light document builds");
-    apply_class_editor_field_backfill(&mut document, 108);
+    apply_class_editor_field_backfill(&mut document, 108, 2018, 4);
     let output = render(&document);
     key_order(
         &output,
@@ -334,7 +360,7 @@ fn class_editor_field_deltas_insert_defaults_and_drop_release_fields() {
     let mut document =
         UnityYamlDocument::object(1773428102, 49, "ParentConstraint", constraint, false)
             .expect("test ParentConstraint document builds");
-    apply_class_editor_field_backfill(&mut document, 1773428102);
+    apply_class_editor_field_backfill(&mut document, 1773428102, 2018, 4);
     let output = render(&document);
     key_order(
         &output,
@@ -345,7 +371,7 @@ fn class_editor_field_deltas_insert_defaults_and_drop_release_fields() {
     other.insert_field("m_Enabled", signed(1)).unwrap();
     let mut document = UnityYamlDocument::object(33, 50, "MeshFilter", other, false)
         .expect("test MeshFilter document builds");
-    apply_class_editor_field_backfill(&mut document, 33);
+    apply_class_editor_field_backfill(&mut document, 33, 2018, 4);
     assert!(!render(&document).contains("m_WarningMessage"));
 }
 
@@ -358,9 +384,9 @@ fn mesh_optimizer_flag_slots_before_stream_data() {
     body.insert_field("m_StreamData", stream).unwrap();
     let mut document =
         UnityYamlDocument::object(43, 51, "Mesh", body, false).expect("test Mesh document builds");
-    apply_class_editor_field_backfill(&mut document, 43);
+    apply_class_editor_field_backfill(&mut document, 43, 2018, 4);
     // A second pass is a no-op: insertion skips fields already present.
-    apply_class_editor_field_backfill(&mut document, 43);
+    apply_class_editor_field_backfill(&mut document, 43, 2018, 4);
     let output = render(&document);
     key_order(
         &output,
@@ -370,5 +396,61 @@ fn mesh_optimizer_flag_slots_before_stream_data() {
         output.match_indices("m_MeshOptimized").count(),
         1,
         "the optimizer flag is not duplicated"
+    );
+    assert!(
+        !output.contains("m_MeshOptimizationFlags"),
+        "2018.4 keeps the bool optimizer name"
+    );
+}
+
+#[test]
+fn mesh_optimization_flags_replace_optimizer_flag_on_2019_4() {
+    let mut body = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    body.insert_field("m_MeshMetrics", signed(0)).unwrap();
+    let mut stream = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    stream.insert_field("offset", signed(0)).unwrap();
+    body.insert_field("m_StreamData", stream).unwrap();
+    let mut document =
+        UnityYamlDocument::object(43, 53, "Mesh", body, false).expect("test Mesh document builds");
+    apply_class_editor_field_backfill(&mut document, 43, 2019, 4);
+    let output = render(&document);
+    key_order(
+        &output,
+        &[
+            "m_MeshMetrics",
+            "m_MeshOptimizationFlags: -1",
+            "m_StreamData",
+        ],
+    );
+    assert!(
+        !output.contains("m_MeshOptimized"),
+        "2019.4 renames the optimizer field"
+    );
+}
+
+#[test]
+fn camera_axis_mode_slots_between_gate_fit_and_sensor_size_on_2019_4() {
+    let mut body = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    body.insert_field("m_GateFitMode", signed(0)).unwrap();
+    body.insert_field("m_SensorSize", signed(0)).unwrap();
+    let mut document = UnityYamlDocument::object(20, 54, "Camera", body, false)
+        .expect("test Camera document builds");
+    apply_class_editor_field_backfill(&mut document, 20, 2019, 4);
+    let output = render(&document);
+    key_order(
+        &output,
+        &["m_GateFitMode", "m_FOVAxisMode: 0", "m_SensorSize"],
+    );
+
+    // Unproven versions select no completion rather than guessing the field.
+    let mut body = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    body.insert_field("m_GateFitMode", signed(0)).unwrap();
+    body.insert_field("m_SensorSize", signed(0)).unwrap();
+    let mut document = UnityYamlDocument::object(20, 55, "Camera", body, false)
+        .expect("test Camera document builds");
+    apply_class_editor_field_backfill(&mut document, 20, 2018, 4);
+    assert!(
+        !render(&document).contains("m_FOVAxisMode"),
+        "unproven versions gain no fields"
     );
 }

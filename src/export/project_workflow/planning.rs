@@ -497,7 +497,10 @@ pub(super) fn plan_routed_asset_files(
                         source,
                         entry.file_id,
                         entry.collection_index,
-                        None,
+                        Some(
+                            crate::export::script_hashing::UnityGuid::MISSING_REFERENCE
+                                .to_byte_array(),
+                        ),
                         limits.yaml_collection.object_conversion,
                         animation_clip_root,
                         &streamed_resources,
@@ -581,7 +584,10 @@ pub(super) fn plan_routed_asset_files(
                                 source,
                                 child.file_id,
                                 entry.collection_index,
-                                None,
+                                Some(
+                                    crate::export::script_hashing::UnityGuid::MISSING_REFERENCE
+                                        .to_byte_array(),
+                                ),
                                 limits.yaml_collection.object_conversion,
                                 &streamed_resources,
                             )?
@@ -647,7 +653,10 @@ pub(super) fn plan_routed_asset_files(
                                 identity,
                                 child.file_id,
                                 entry.collection_index,
-                                None,
+                                Some(
+                                    crate::export::script_hashing::UnityGuid::MISSING_REFERENCE
+                                        .to_byte_array(),
+                                ),
                                 limits.yaml_collection.object_conversion,
                                 &streamed_resources,
                             )?
@@ -1071,7 +1080,7 @@ pub(super) fn plan_prefab_files(
             pointer_map,
             &prefab.export_ids,
             prefab.collection_index,
-            None,
+            Some(crate::export::script_hashing::UnityGuid::MISSING_REFERENCE.to_byte_array()),
             limits.yaml_collection,
             &generated_transform_context,
         )?;
@@ -1225,7 +1234,7 @@ pub(super) fn plan_scene_files(
             pointer_map,
             &scene.exportable_assignments,
             scene.collection_index,
-            None,
+            Some(crate::export::script_hashing::UnityGuid::MISSING_REFERENCE.to_byte_array()),
             limits.yaml_collection,
             &streamed_resources,
             generated_transform_context.as_ref(),

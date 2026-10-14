@@ -1,5 +1,11 @@
 # Validation log
 
+## 2026-10-14 External refs plus 2019.4 rows fixed; NavMesh remains
+
+- Missing externals no longer refuse the export (loud warning plus missing markers at three layers); builtins on table-less versions resolve as engine assets with unknown class. The inspect summary lists externals per file. Formatting and Clippy (warnings-denied locally) clean; release rebuilt.
+- Fresh replay plus re-audit on the 2019.4 world: real-diff classes 6 to 1 (mesh/camera/renderer/audio all resolve; cookie pointer byte-identical) with zero unpaired files and no regressions. NavMeshSettings needs a struct-default mechanism (open).
+- Local checks: `git diff --check` exit 0; `cargo check`/`cargo clippy` clean; module tests green. Full validation via GitHub Actions after push. Sample input read-only; outputs quarantined. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Controller root fixed; AV03 converges
 
 - The controller root carried four release-only fields every editor layout omits. Fixed by extending the root-rebuild skip list (reads precede the drop). The Avatar doc is proven content-identical modulo YAML style (strict token equality). Formatting and Clippy (warnings-denied locally) clean; release rebuilt.

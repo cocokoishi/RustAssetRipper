@@ -641,6 +641,59 @@
     }
 
     #[test]
+    fn export_project_tolerates_missing_external_dependencies_with_missing_markers() {
+        let directory = TestInputDirectory::new_root();
+        let source_path = directory.join("main.assets");
+        let output_root = directory.join("project");
+        // The pointer names an external file that is never supplied, so the
+        // reference resolves as MissingDependency rather than InvalidFileId.
+        fs::write(
+            &source_path,
+            make_generation_10_file_with_pointer(&["other.assets"], 1, 99),
+        )
+        .unwrap();
+        fs::create_dir(&output_root).unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![source_path.clone()],
+            subdirectories: vec![output_root.clone()],
+        };
+
+        super::export_project_to(
+            &[source_path],
+            &output_root,
+            false,
+            &default_export_settings(),
+            &mut Vec::new(),
+        )
+        .expect("missing external dependencies export with missing markers");
+
+        assert_ne!(fs::read_dir(&output_root).unwrap().count(), 0);
+        // The dangling pointer exports with the baseline MissingReference
+        // GUID instead of failing the whole project.
+        let mut marker_found = false;
+        let mut stack = vec![output_root.clone()];
+        while let Some(directory) = stack.pop() {
+            for entry in fs::read_dir(&directory).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|extension| {
+                    extension == "asset"
+                        || extension == "unity"
+                        || extension == "prefab"
+                        || extension == "controller"
+                }) {
+                    let text = fs::read_to_string(&path).unwrap();
+                    marker_found |= text.contains("0000000deadbeef15deadf00d0000000");
+                }
+            }
+        }
+        assert!(marker_found, "exported project has no missing marker");
+        drop(input);
+    }
+
+    #[test]
     fn export_project_refuses_a_nonempty_output_directory_without_touching_it() {
         let directory = TestInputDirectory::new_root();
         let source_path = directory.join("main.assets");

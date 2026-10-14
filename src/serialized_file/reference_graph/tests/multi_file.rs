@@ -613,7 +613,7 @@ fn engine_resource_alias_fallback_matches_the_bundle_resolver() {
 }
 
 #[test]
-fn absent_2022_3_default_resources_resolve_only_known_tpk_path_ids() {
+fn default_resources_resolve_engine_assets_with_tpk_or_unknown_class() {
     let source_graph = graph_with_reference(&[11], 11, 1, 10202);
     for version in [
         "2022.3.0f1",
@@ -643,14 +643,36 @@ fn absent_2022_3_default_resources_resolve_only_known_tpk_path_ids() {
     source_metadata.prefix.unity_version_text = Some("2022.2.22f1".to_owned());
     let files = [named_file("main.assets", &source_metadata, &source_graph)];
     let graph = MultiFileReferenceGraph::build(&files).unwrap();
+    // Versions without a frozen path-to-class row still resolve as engine
+    // assets with an unknown class; export pointers carry no class, and the
+    // sprite atlas check fails closed on the unknown class instead of
+    // guessing.
     assert_eq!(
         graph.references()[0].resolution,
-        MultiFilePPtrResolution::MissingDependency {
+        MultiFilePPtrResolution::PredefinedEngineAsset {
             external_index: 0,
+            resource: PredefinedEngineResourceKind::DefaultResources,
             path_id: 10202,
+            class_id: 0,
         }
     );
-    assert!(!graph.is_complete());
+    assert!(graph.is_complete());
+
+    let mut source_metadata = metadata_with_external(&[11], "Library/unity default resources");
+    source_metadata.prefix.unity_version_text = Some("2019.4.31f1".to_owned());
+    let old_graph = graph_with_reference(&[11], 11, 1, 10001);
+    let files = [named_file("main.assets", &source_metadata, &old_graph)];
+    let graph = MultiFileReferenceGraph::build(&files).unwrap();
+    assert_eq!(
+        graph.references()[0].resolution,
+        MultiFilePPtrResolution::PredefinedEngineAsset {
+            external_index: 0,
+            resource: PredefinedEngineResourceKind::DefaultResources,
+            path_id: 10001,
+            class_id: 0,
+        }
+    );
+    assert!(graph.is_complete());
 
     let mut source_metadata = metadata_with_external(&[11], "Library/unity default resources");
     source_metadata.prefix.unity_version_text = Some("2022.3.22f1".to_owned());

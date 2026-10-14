@@ -119,6 +119,28 @@ pub(super) fn print_workspace_summary_with_optional_resources_to<W: io::Write>(
         collection_report.object_count,
         collection_report.external_identifier_count
     )?;
+    for (file_index, file) in workspace.files().iter().enumerate() {
+        for (external_index, identifier) in file.metadata.externals.iter().enumerate() {
+            let mut detail = format!(
+                "External: file {file_index} external {external_index}: {}",
+                identifier.path_name_origin
+            );
+            if let Some([data0, data1, data2, data3]) = identifier.guid {
+                let mut guid = String::with_capacity(32);
+                for word in [data0, data1, data2, data3] {
+                    for shift in 0..8 {
+                        let digit = ((word >> (shift * 4)) & 0x0f) as usize;
+                        guid.push(b"0123456789abcdef"[digit] as char);
+                    }
+                }
+                detail.push_str(&format!(" guid {guid}"));
+            }
+            if let Some(file_type) = identifier.file_type {
+                detail.push_str(&format!(" type {file_type}"));
+            }
+            writeln!(output, "{detail}")?;
+        }
+    };
     writeln!(
         output,
         "AnimatorController source dependencies: {} generated-collection appends modeled, {} source files deferred by incomplete TypeTree data",

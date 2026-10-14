@@ -84,14 +84,43 @@ fn validate_workspace_project_export<'inputs, 'provider, 'graph>(
                         | MultiFilePPtrResolution::PredefinedEngineAsset { .. }
                 )
             })
-            .take(4)
-            .map(|reference| format!("{reference:?}"))
+            .take(8)
             .collect::<Vec<_>>();
-        return Err(invalid_project(format!(
-            "project export requires a complete workspace PPtr scan; incomplete scans: [{}]; unresolved references: [{}]",
-            incomplete_scans.join("; "),
-            unresolved_references.join("; ")
-        )));
+        // References into external files that were not supplied resolve as
+        // MissingDependency. The reference exporter tolerates them: it emits
+        // missing-reference pointers and continues, so the Rust gate does the
+        // same loudly instead of refusing the whole export. Every other
+        // unresolvable kind (local corruption, ambiguity, invalid file IDs)
+        // still fails closed.
+        let (missing_dependencies, fatal_references): (Vec<_>, Vec<_>) =
+            unresolved_references.into_iter().partition(|reference| {
+                matches!(
+                    reference.resolution,
+                    MultiFilePPtrResolution::MissingDependency { .. }
+                )
+            });
+        if !missing_dependencies.is_empty() {
+            eprintln!(
+                "warning: project export continues with {} missing external dependenc(ies); the affected pointers export as missing references. Provide the external files as additional inputs to resolve them: [{}]",
+                missing_dependencies.len(),
+                missing_dependencies
+                    .iter()
+                    .map(|reference| format!("{reference:?}"))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            );
+        }
+        if !fatal_references.is_empty() {
+            return Err(invalid_project(format!(
+                "project export requires a complete workspace PPtr scan; incomplete scans: [{}]; unresolved references: [{}]",
+                incomplete_scans.join("; "),
+                fatal_references
+                    .iter()
+                    .map(|reference| format!("{reference:?}"))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )));
+        }
     }
     let bundle_container_original_directories = bundle_container_original_directories(
         inputs.workspace,

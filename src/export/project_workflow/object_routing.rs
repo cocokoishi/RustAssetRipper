@@ -1051,7 +1051,8 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
             let mut audio_binary_export = None;
             let audio_claim_decode = if let Some(view) = audio_view.as_ref().filter(|_| {
                 (project_version.major == 2022 && project_version.minor == 3
-                    || project_version.major == 2018 && project_version.minor == 4)
+                    || project_version.major == 2018 && project_version.minor == 4
+                    || project_version.major == 2019 && project_version.minor == 4)
                     && matches!(
                         settings.audio_export_format,
                         crate::export::settings::AudioExportFormat::Default
@@ -1112,6 +1113,7 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                         };
                         let audio_importer = if project_version.major == 2018
                             && project_version.minor == 4
+                            || project_version.major == 2019 && project_version.minor == 4
                         {
                             crate::export::project_workflow::audio_asset::audio_importer_yaml_2018_4(
                                 view,

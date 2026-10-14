@@ -464,7 +464,13 @@ pub fn meta_pointer_to_unity_yaml(
     Ok(mapping)
 }
 
-/// Convert a resolved project pointer to YAML; unresolved input pointers remain explicit errors.
+/// Convert a resolved project pointer to YAML.
+///
+/// References into external files that were not supplied export as
+/// missing-reference pointers (matching the reference exporter): the fileID
+/// keeps the target's serialized PathID so the dangling edge stays
+/// identifiable. Every other unresolvable input cause remains an explicit
+/// error.
 pub fn project_pointer_to_unity_yaml(
     resolution: &ProjectPointerResolution,
     export_version: SceneUnityVersion,
@@ -479,9 +485,19 @@ pub fn project_pointer_to_unity_yaml(
         ProjectPointerResolution::Mapped(pointer)
         | ProjectPointerResolution::MissingExportedTarget { pointer, .. } => *pointer,
         ProjectPointerResolution::UnresolvedInput(reference) => {
-            return Err(UnityYamlWriteError::UnresolvedInputReference(Box::new(
-                reference.clone(),
-            )));
+            if !matches!(
+                reference.resolution,
+                crate::serialized_file::reference_graph::MultiFilePPtrResolution::MissingDependency { .. }
+            ) {
+                return Err(UnityYamlWriteError::UnresolvedInputReference(Box::new(
+                    reference.clone(),
+                )));
+            }
+            UnityMetaPointer {
+                file_id: reference.serialized_path_id,
+                guid: ExportPointerGuid::MissingReference,
+                asset_type: UnityProjectAssetType::Internal,
+            }
         }
     };
     meta_pointer_to_unity_yaml(pointer, export_version, missing_reference_guid)
@@ -1629,9 +1645,25 @@ mod tests {
                 version("2022.3.1f1"),
                 None,
             ),
-            Err(UnityYamlWriteError::UnresolvedInputReference(Box::new(
-                unresolved
-            )))
+            Err(UnityYamlWriteError::MissingReferenceGuidRequired)
+        );
+        // With the baseline MissingReference GUID, a missing external
+        // dependency exports as a missing-reference pointer that keeps the
+        // target's serialized PathID, matching the reference exporter.
+        let missing_guid =
+            crate::export::script_hashing::UnityGuid::MISSING_REFERENCE.to_byte_array();
+        let node = project_pointer_to_unity_yaml(
+            &ProjectPointerResolution::UnresolvedInput(unresolved),
+            version("2022.3.1f1"),
+            Some(missing_guid),
+        )
+        .unwrap();
+        let document =
+            UnityYamlDocument::object(1, 1, "Pointer", mapping(&[("m_Ptr", node)]), false).unwrap();
+        assert!(
+            write_unity_yaml_documents(&[document], UnityYamlWriteLimits::default())
+                .unwrap()
+                .contains("m_Ptr: {fileID: 88, guid: 0000000deadbeef15deadf00d0000000, type: 0}")
         );
     }
 

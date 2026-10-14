@@ -251,6 +251,10 @@ pub(super) fn validate_decoded_object(
             MultiFilePPtrResolution::Null
             | MultiFilePPtrResolution::Object { .. }
             | MultiFilePPtrResolution::PredefinedEngineAsset { .. } => {}
+            // Missing external dependencies export as missing-reference
+            // pointers (warned loudly at the project gate); every other
+            // unresolvable kind still fails closed here.
+            MultiFilePPtrResolution::MissingDependency { .. } => {}
             unresolved => {
                 return Err(invalid_project(format!(
                     "file {} object {} PathID {path_id} has unresolved PPtr at {:?}: {unresolved:?}",

@@ -55,7 +55,16 @@ fn predefined_engine_asset_resolution(
         return None;
     }
     let version = source_metadata.prefix.unity_version_text.as_deref()?;
-    let class_id = default_resource_class_id(path_id, version)?;
+    // Path-to-class tables exist only for selected versions. Engine-asset
+    // export pointers carry no class (fileID keeps the PathID, GUID names
+    // the engine file, type is Internal), so table-less versions still
+    // resolve with an unknown class (0). The only class consumer (sprite
+    // atlas validation) then fails closed loudly instead of guessing.
+    let class_id = if uses_engine_resources_2022_3(version) {
+        default_resource_class_id(path_id, version)?
+    } else {
+        0
+    };
     Some(MultiFilePPtrResolution::PredefinedEngineAsset {
         external_index,
         resource: PredefinedEngineResourceKind::DefaultResources,

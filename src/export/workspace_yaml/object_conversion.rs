@@ -956,9 +956,18 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
                 // The frozen `EditorFormatConverter.Convert(IRenderer)` covers
                 // every renderer; the backfill mirrors its class set.
                 if matches!(class_id, 23 | 96 | 120 | 137 | 199 | 212) {
-                    apply_renderer_gi_backfill(&mut document);
+                    apply_renderer_gi_backfill(
+                        &mut document,
+                        unity_version.major,
+                        unity_version.minor,
+                    );
                 }
-                apply_class_editor_field_backfill(&mut document, class_id);
+                apply_class_editor_field_backfill(
+                    &mut document,
+                    class_id,
+                    unity_version.major,
+                    unity_version.minor,
+                );
             }
         }
         Ok(Some(document))
@@ -2001,7 +2010,7 @@ fn backfill_labels_in_node(node: &mut UnityYamlNode) {
 /// vertex streams that some serialized layouts carry, so those release-only
 /// fields are removed: Unity re-derives baked indices on import, and the
 /// reference output never contains them.
-pub(super) fn apply_renderer_gi_backfill(document: &mut UnityYamlDocument) {
+pub(super) fn apply_renderer_gi_backfill(document: &mut UnityYamlDocument, major: u32, minor: u32) {
     let UnityYamlNodeKind::Mapping { entries, .. } = &mut document.root.kind else {
         return;
     };
@@ -2066,6 +2075,24 @@ pub(super) fn apply_renderer_gi_backfill(document: &mut UnityYamlDocument) {
             insert_at += 1;
         }
     }
+    // 2019.4 adds the receive-GI mode after the lightmap scale; 2018.4
+    // reference output omits it, so it stays version-gated.
+    if (major, minor) == (2019, 4) && yaml_field_index(fields, "m_ReceiveGI").is_none() {
+        let position = match yaml_field_index(fields, "m_ScaleInLightmap") {
+            Some(index) => index + 1,
+            None => match yaml_field_index(fields, "m_PreserveUVs") {
+                Some(index) => index,
+                None => fields.len(),
+            },
+        };
+        fields.insert(
+            position,
+            (
+                yaml_plain_node("m_ReceiveGI"),
+                UnityYamlNode::scalar(UnityYamlScalar::Signed(1)),
+            ),
+        );
+    }
     fields.retain(|(key, _)| match &key.kind {
         UnityYamlNodeKind::Scalar(UnityYamlScalar::PlainString(name)) => !matches!(
             name.as_str(),
@@ -2091,18 +2118,21 @@ struct ClassEditorFieldDelta {
 /// One defaulted field insertion: placed after `after` when present, else
 /// before `before` when present, else appended. An empty `after` selects the
 /// `before` anchor directly (used when the predecessor is an array item with
-/// no plain mapping key).
+/// no plain mapping key). `versions` lists the backfill (major, minor) pairs
+/// the insertion is proven for; empty applies to every backfill version.
 struct ClassFieldInsert {
     name: &'static str,
     after: &'static str,
     before: &'static str,
     value: ClassFieldDefault,
+    versions: &'static [(u32, u32)],
 }
 
 /// Constructible default values for inserted editor fields.
 #[derive(Clone, Copy)]
 enum ClassFieldDefault {
     EmptyString,
+    Signed(i64),
     Float32(f32),
     Boolean(bool),
 }
@@ -2111,6 +2141,9 @@ impl ClassFieldDefault {
     fn node(self) -> UnityYamlNode {
         match self {
             ClassFieldDefault::EmptyString => UnityYamlNode::plain_string(String::new()),
+            ClassFieldDefault::Signed(value) => {
+                UnityYamlNode::scalar(UnityYamlScalar::Signed(value))
+            }
             ClassFieldDefault::Float32(value) => {
                 UnityYamlNode::scalar(UnityYamlScalar::Float32(value))
             }
@@ -2125,17 +2158,40 @@ impl ClassFieldDefault {
 /// warning message, the Light shadow metrics, and the ParentConstraint lock
 /// flag are editor defaults absent from the data; the Light baking output is
 /// a release-only struct the editor layout omits. The Mesh optimizer flag is
-/// an editor-only bool defaulting to true (both the TPK and the file's own
-/// TypeTree lack it, so the data carries no such bytes).
+/// an editor-only bool defaulting to true on 2018.4 (both the TPK and the
+/// file's own TypeTree lack it, so the data carries no such bytes); 2019.4
+/// renames it to an editor-only int defaulting to -1. The Camera axis mode
+/// is a 2019.4 editor-only int defaulting to 0.
 const CLASS_EDITOR_FIELD_DELTAS: &[ClassEditorFieldDelta] = &[
     ClassEditorFieldDelta {
-        class_id: 43,
+        class_id: 20,
         inserts: &[ClassFieldInsert {
-            name: "m_MeshOptimized",
-            after: "",
-            before: "m_StreamData",
-            value: ClassFieldDefault::Boolean(true),
+            name: "m_FOVAxisMode",
+            after: "m_GateFitMode",
+            before: "m_SensorSize",
+            value: ClassFieldDefault::Signed(0),
+            versions: &[(2019, 4)],
         }],
+        removes: &[],
+    },
+    ClassEditorFieldDelta {
+        class_id: 43,
+        inserts: &[
+            ClassFieldInsert {
+                name: "m_MeshOptimized",
+                after: "",
+                before: "m_StreamData",
+                value: ClassFieldDefault::Boolean(true),
+                versions: &[(2018, 4)],
+            },
+            ClassFieldInsert {
+                name: "m_MeshOptimizationFlags",
+                after: "",
+                before: "m_StreamData",
+                value: ClassFieldDefault::Signed(-1),
+                versions: &[(2019, 4)],
+            },
+        ],
         removes: &[],
     },
     ClassEditorFieldDelta {
@@ -2145,6 +2201,7 @@ const CLASS_EDITOR_FIELD_DELTAS: &[ClassEditorFieldDelta] = &[
             after: "m_LinearVelocityBlending",
             before: "m_HasTransformHierarchy",
             value: ClassFieldDefault::EmptyString,
+            versions: &[],
         }],
         removes: &[],
     },
@@ -2156,12 +2213,14 @@ const CLASS_EDITOR_FIELD_DELTAS: &[ClassEditorFieldDelta] = &[
                 after: "m_UseColorTemperature",
                 before: "m_Cookie",
                 value: ClassFieldDefault::Float32(0.0),
+                versions: &[],
             },
             ClassFieldInsert {
                 name: "m_ShadowAngle",
                 after: "m_ShadowRadius",
                 before: "m_Cookie",
                 value: ClassFieldDefault::Float32(0.0),
+                versions: &[],
             },
         ],
         removes: &["m_BakingOutput"],
@@ -2173,16 +2232,23 @@ const CLASS_EDITOR_FIELD_DELTAS: &[ClassEditorFieldDelta] = &[
             after: "m_IsContraintActive",
             before: "m_Sources",
             value: ClassFieldDefault::Boolean(false),
+            versions: &[],
         }],
         removes: &[],
     },
 ];
 
 /// Applies the class-specific editor-layout delta for the document's class, if
-/// any is declared. Insertions skip fields already present; removals drop
-/// release-only fields the editor layout omits. Other classes select no
-/// completion. MonoBehaviour documents are excluded by the caller.
-pub(super) fn apply_class_editor_field_backfill(document: &mut UnityYamlDocument, class_id: i32) {
+/// any is declared. Insertions skip fields already present and skip versions
+/// outside their proven list; removals drop release-only fields the editor
+/// layout omits. Other classes select no completion. MonoBehaviour documents
+/// are excluded by the caller.
+pub(super) fn apply_class_editor_field_backfill(
+    document: &mut UnityYamlDocument,
+    class_id: i32,
+    major: u32,
+    minor: u32,
+) {
     let Some(delta) = CLASS_EDITOR_FIELD_DELTAS
         .iter()
         .find(|delta| delta.class_id == class_id)
@@ -2203,6 +2269,9 @@ pub(super) fn apply_class_editor_field_backfill(document: &mut UnityYamlDocument
     };
     for insert in delta.inserts {
         if yaml_field_index(fields, insert.name).is_some() {
+            continue;
+        }
+        if !insert.versions.is_empty() && !insert.versions.contains(&(major, minor)) {
             continue;
         }
         let position = match yaml_field_index(fields, insert.after) {

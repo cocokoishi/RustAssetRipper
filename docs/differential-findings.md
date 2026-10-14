@@ -1,5 +1,17 @@
 # Source behavior and differential findings
 
+## DIFF-EXTERNAL-REFS-2019-001 — missing dependencies and engine resources (fixed)
+
+A 2019.4 world references its sibling bundle plus `Library/unity default resources` for a light cookie and a manager asset. The export refused the whole project at the PPtr completeness gate. The reference tolerates absent externals (missing markers) and resolves builtins as predefined engine assets, so the Rust pipeline now does the same at three layers: the project gate warns loudly and continues on missing dependencies (other unresolvable kinds still fail closed), per-object validation matches, and the YAML writer emits missing-reference pointers keeping the target PathID. Builtin default-resource references on versions without a frozen path-to-class row resolve as engine assets with an unknown class (export pointers carry no class; sprite atlas validation fails closed on it). The inspect summary now lists external identifiers per file. Status: fixed and validated; the reporting sample's cookie pointer matches the reference byte-for-byte.
+
+## DIFF-2019-4-EDITOR-ROWS-001 — version-split editor rows (fixed)
+
+2019.4 editor layouts rename or add fields the shared backfill missed: Mesh uses an int optimization-flags field (-1) instead of the 2018.4 bool, Camera gains an axis-mode int (0), renderers gain a receive-GI int (1), and audio uses the 2018.4 decode/importer path (FSB5 resources decode to Ogg). The class delta table and the renderer GI backfill are now version-gated (unproven versions gain no fields), and the audio decode/importer gates cover 2019.4. Status: fixed and validated on the reporting sample.
+
+## DIFF-NAVMESH-DEFAULTS-2019-001 — NavMesh build-settings defaults (open)
+
+NavMeshSettings on 2019.4 carries a full default build-settings struct (agent dimensions, cell/tile sizes, debug flags) that the release layout lacks; the reference fills Unity defaults. This needs a struct-default insertion mechanism (the delta table handles scalars only). Values recorded from reference output; member types still to probe. Status: open, next blocker.
+
 ## DIFF-CONTROLLER-ROOT-2018-001 — controller root release-only fields (fixed)
 
 The AnimatorController root carried four release-only fields the editor layout omits at every version (TPK-probed, both reference outputs confirm): the runtime clip list, the behaviour vector description, the bound behaviour list (bound into states/machines, then dropped), and the multithreaded flag. Fixed by extending the existing root-rebuild skip list; reads happen before the drop so motion/behaviour resolution is unaffected. Controller workflow tests green. Re-audit: class 91 resolves fully with no regressions. Status: fixed and validated on the reporting sample.
