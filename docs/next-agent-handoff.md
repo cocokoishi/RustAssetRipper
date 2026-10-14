@@ -1,5 +1,11 @@
 # RustAssetRipper hand-off — 2026-10-10
 
+## Latest current checkpoint — 2026-10-14 (FSB5 surround layouts and header rejection)
+
+- Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Phase 1 open, Phase 2 locked; no user input, Unity, or UABEA used.
+- Extended the table-backed FSB5 proof to 5.1/7.1 containers (silent packets, exact-silence WAV) and pinned loud failures for bad signatures, unsupported versions, and truncated headers. Probe evidence under gitignored `target/probe-fsb5-table/`, not committed. Real-audio table-backed decode still awaits Phase-2 inputs.
+- Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push.
+
 ## Latest current checkpoint — 2026-10-14 (privacy remediation in current sources)
 
 - Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Phase 1 open, Phase 2 locked; no user input, Unity, or UABEA used.

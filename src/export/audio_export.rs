@@ -2169,11 +2169,16 @@ mod tests {
         // Table-backed end-to-end proof through decode_fsb5_vorbis: the two
         // zero packets prime lewton's overlap window and then decode to 128
         // silent frames under the table setup, so the rebuilt Ogg preserves
-        // the packets and the WAV conversion yields exact silence.
-        for (channels, rate_code, setup_crc) in
-            [(2u8, 8u64, 0xA722_97FFu32), (1u8, 9u64, 0x070B_A3B6u32)]
-        {
-            let channel_code = u64::from(channels - 1);
+        // the packets and the WAV conversion yields exact silence. The stereo,
+        // mono, 5.1, and 7.1 cases cover every channel layout the table
+        // setups parse with; a probe over all 161 entries found working
+        // silent sequences for each one.
+        for (channels, channel_code, rate_code, setup_crc) in [
+            (2u8, 1u64, 8u64, 0xA722_97FFu32),
+            (1u8, 0u64, 9u64, 0x070B_A3B6u32),
+            (6u8, 2u64, 9u64, 0x070B_A3B6u32),
+            (8u8, 3u64, 8u64, 0xF337612Fu32),
+        ] {
             let fsb5 = silent_table_backed_container(channel_code, rate_code, setup_crc);
             let (rebuilt_ogg, extension) = super::decode_fsb5_vorbis(&fsb5, 1024 * 1024).unwrap();
             assert_eq!(extension, "ogg");
@@ -2214,6 +2219,36 @@ mod tests {
                 "unexpected reason: {reason}"
             ),
             other => panic!("expected table-miss failure, got {other}"),
+        }
+    }
+
+    #[test]
+    fn fsb5_parser_rejects_bad_signature_versions_and_truncation() {
+        // Signature, version, and header-length failures stay loud parse
+        // errors before any stream or audio handling runs.
+        for (input, expected) in [
+            (&b""[..], "missing FSB5 signature"),
+            (&b"XB5!"[..], "missing FSB5 signature"),
+            (&b"FSB5"[..], "truncated version"),
+        ] {
+            let error = super::Fsb5VorbisSample::parse(input).unwrap_err();
+            match error {
+                super::AudioDecodeError::Fsb5DecodeFailed { reason } => {
+                    assert!(reason.contains(expected), "unexpected reason: {reason}")
+                }
+                other => panic!("expected parse rejection, got {other}"),
+            }
+        }
+        let mut version_two = vec![0u8; 60];
+        version_two[..4].copy_from_slice(b"FSB5");
+        version_two[4..8].copy_from_slice(&2u32.to_le_bytes());
+        let error = super::Fsb5VorbisSample::parse(&version_two).unwrap_err();
+        match error {
+            super::AudioDecodeError::Fsb5DecodeFailed { reason } => assert!(
+                reason.contains("unsupported FSB5 version 2"),
+                "unexpected reason: {reason}"
+            ),
+            other => panic!("expected version rejection, got {other}"),
         }
     }
 
