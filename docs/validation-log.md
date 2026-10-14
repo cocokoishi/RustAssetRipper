@@ -4,6 +4,7 @@
 
 - Gap: `ogg_packet_lacing`, `write_fragmented_packet`, and the page-grouping heuristics had no direct coverage; production and fixture packets are all small enough to stay on the single-page path. New tests pin the lacing table (empty packets, exact-multiple terminators, the 65,025-byte maximum), a 70,000-byte fragmented packet (BOS/continued/EOS flags, `u64::MAX` granule on the non-final page, checksums, byte-exact reassembly), and multi-packet grouping (shared BOS+EOS page plus the count-heuristic flush). A checksum-validating page parser helper backs the structural assertions.
 - Local checks: `git diff --check` exit 0; single-file `rustfmt --check` clean. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No user input was read; Phase 1 remains open and Phase 2 remains locked. Unity import/runtime and UABEA were NOT RUN.
+- Actions run `38497810710` is fully green on both platforms: lib 1,754 passed/1 ignored (three new writer tests included), CLI 128 passed, warnings-denied Clippy, release builds, changed-line formatting, and repository hygiene.
 
 ## 2026-10-14 Ogg page writer audit and checksum proof
 
