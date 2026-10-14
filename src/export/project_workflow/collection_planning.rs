@@ -116,8 +116,9 @@ pub(super) fn prepare_generated_collections(
         })?;
         let renderer_inputs =
             collect_lighting_data_renderer_inputs(&scene.assignments, objects, reference_graph)?;
+        let terrain_inputs = collect_lighting_data_terrain_inputs(&scene.assignments, objects)?;
         let light_inputs = collect_lighting_data_light_inputs(&scene.assignments, objects)?;
-        validate_bounded_lighting_data_scene(hierarchy, owner_identity, &scene.assignments)?;
+        validate_bounded_lighting_data_scene(hierarchy, owner_identity)?;
         let render_settings_identity =
             scene_manager_identity(hierarchy, SceneManagerKind::RenderSettings).ok_or_else(
                 || {
@@ -184,6 +185,7 @@ pub(super) fn prepare_generated_collections(
         )?;
         let renderer_uv_mesh_targets =
             append_lighting_data_renderer_records(&type_tree, &mut root, &renderer_inputs)?;
+        append_lighting_data_terrain_records(&type_tree, &mut root, &terrain_inputs)?;
         append_lighting_data_light_records(&type_tree, &mut root, &light_inputs)?;
         let collection_index = next_collection_index;
         next_collection_index = next_collection_index

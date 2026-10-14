@@ -1,8 +1,12 @@
 # Source behavior and differential findings
 
-## DIFF-TERRAIN-LIGHTING-001 — Terrain lighting data unimplemented (open)
+## DIFF-TERRAIN-LIGHTING-001 — Terrain lighting data (implemented, pending audit)
 
-A 2022.3 world with Terrain objects fails project export loudly at the LightingData gate (class 218 has no lighting-data reader; reference emits terrain-backed renderer entries with chunk UVs plus renderer IDs). Implementing it needs the frozen LightingData terrain path plus new readers and tests. Status: open, next blocker. The refusal is fail-closed and honest; no partial project is written.
+A 2022.3 world with Terrain objects failed project export loudly at the LightingData gate. Implemented following the reference processor: terrains collect like renderers, unlightmapped ones skip, lightmapped ones emit renderer-data entries (index, dynamic, tiling offsets, dynamic/static UVs, probe hash; no UV mesh). Unit-tested for both paths. The reporting export now passes LightingData planning and reaches a deeper sprite-materialization failure, so the terrain path is exercised on real data; entry values await the full audit. Status: implemented, e2e-exercised, audit pending on atlas-packed sprites.
+
+## DIFF-ATLAS-SPRITE-001 — atlas-packed sprite geometry (open)
+
+A 2022.3 world sprite packed in a SpriteAtlas fails materialization loudly: the atlas-copy branch needs cross-object RenderDataMap reads unavailable at conversion time. The previous loud error assumed no sample uses it; this sample does. Status: open, next blocker.
 
 ## DIFF-EDITOR-COVERAGE-2022-001 — Animation joins the editor tree set (fixed)
 

@@ -123,18 +123,10 @@ pub(super) fn object_asset_name(payload: &ParsedObjectPayload) -> Option<String>
 pub(super) fn validate_bounded_lighting_data_scene(
     hierarchy: &WorkspaceSceneHierarchyScene,
     owner: WorkspaceSceneObjectIdentity,
-    assignments: &[SceneExportIdAssignment],
 ) -> Result<(), Box<dyn Error>> {
+    // Terrains flow through the dedicated terrain lighting records;
+    // unlightmapped ones are skipped like unlightmapped renderers.
     let mut unsupported_objects = Vec::new();
-    for assignment in assignments {
-        let class_id = assignment.asset.class_id;
-        if class_id == 218 {
-            unsupported_objects.push(format!(
-                "scene object {:?}:{} class {class_id} Terrain lighting data is not implemented",
-                assignment.asset.collection, assignment.asset.path_id
-            ));
-        }
-    }
     for collection in hierarchy.collections() {
         for asset in collection.scene_assets() {
             if asset.category == WorkspaceSceneAssetCategory::PrefabInstance {
@@ -145,16 +137,9 @@ pub(super) fn validate_bounded_lighting_data_scene(
             }
         }
         for candidate in collection.component_candidates() {
-            let Some(class_id) = candidate.identity.class_id else {
+            if candidate.identity.class_id.is_none() {
                 unsupported_objects.push(format!(
                     "file {} object {} has an unclassified component in the LightingDataAsset scene",
-                    candidate.identity.file_index, candidate.identity.object_index
-                ));
-                continue;
-            };
-            if class_id == 218 {
-                unsupported_objects.push(format!(
-                    "file {} object {} class {class_id} Terrain lighting data is not implemented",
                     candidate.identity.file_index, candidate.identity.object_index
                 ));
             }
@@ -298,6 +283,48 @@ pub(super) fn collect_lighting_data_renderer_inputs<'object>(
         });
     }
     Ok(renderers)
+}
+
+pub(super) fn collect_lighting_data_terrain_inputs<'object>(
+    assignments: &[SceneExportIdAssignment],
+    objects: &'object ObjectWorkspace,
+) -> Result<Vec<LightingDataTerrainInput<'object>>, Box<dyn Error>> {
+    let mut terrains = Vec::new();
+    terrains
+        .try_reserve(assignments.len())
+        .map_err(|_| invalid_project("could not allocate LightingDataAsset terrain inputs"))?;
+    for assignment in assignments
+        .iter()
+        .filter(|assignment| assignment.asset.class_id == 218)
+    {
+        let file_index = serialized_file_index(assignment.asset, "Terrain")?;
+        let object = objects
+            .get(file_index, assignment.asset.object_index)
+            .ok_or_else(|| {
+                invalid_project(format!(
+                    "LightingDataAsset Terrain {}:{} is missing from ObjectWorkspace",
+                    file_index, assignment.asset.path_id
+                ))
+            })?;
+        if object.path_id != assignment.asset.path_id || object.factory.class_id != 218 {
+            return Err(invalid_project(format!(
+                "LightingDataAsset Terrain identity mismatch at {}:{}",
+                file_index, assignment.asset.path_id
+            )));
+        }
+        let payload = object.payload.as_ref().map_err(|error| {
+            invalid_project(format!(
+                "LightingDataAsset Terrain {}:{} could not be decoded: {error}",
+                file_index, assignment.asset.path_id
+            ))
+        })?;
+        terrains.push(LightingDataTerrainInput {
+            identity: assignment.asset,
+            file_id: assignment.file_id,
+            value: &payload.root,
+        });
+    }
+    Ok(terrains)
 }
 
 pub(super) fn collect_lighting_data_light_inputs<'object>(

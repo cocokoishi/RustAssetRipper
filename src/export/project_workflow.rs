@@ -367,6 +367,13 @@ struct LightingDataRendererInput<'object> {
 }
 
 #[derive(Clone, Copy)]
+struct LightingDataTerrainInput<'object> {
+    identity: ExportAssetIdentity,
+    file_id: i64,
+    value: &'object SerializedValue,
+}
+
+#[derive(Clone, Copy)]
 struct LightingDataLightInput<'object> {
     identity: ExportAssetIdentity,
     file_id: i64,

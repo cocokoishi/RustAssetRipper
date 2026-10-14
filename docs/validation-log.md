@@ -1,5 +1,10 @@
 # Validation log
 
+## 2026-10-14 Terrain lighting implemented; W03 reaches sprite materialization
+
+- Terrain lighting records implemented per the reference processor (skip plus emit paths, unit-tested). The reporting export passes LightingData planning and now fails loudly at atlas-packed sprite materialization (a separate open gap); phase order proves the terrain path ran clean on real data. Formatting and Clippy (warnings-denied locally) clean; release rebuilt.
+- Local checks: `git diff --check` exit 0; `cargo check`/`cargo clippy` clean; module tests green. Full validation via GitHub Actions after push. Sample input read-only; outputs quarantined. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 AV01 converges; W03 blocked on Terrain lighting
 
 - AV01's Avatar doc proven content-identical modulo style (strict token equality over 54851 chars); all avatars converged.

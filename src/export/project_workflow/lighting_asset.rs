@@ -389,6 +389,107 @@ pub(super) fn append_lighting_data_renderer_records(
     Ok(uv_mesh_targets)
 }
 
+pub(super) fn append_lighting_data_terrain_records(
+    type_tree: &crate::serialized_file::metadata::TypeTree,
+    root: &mut SerializedValue,
+    terrains: &[LightingDataTerrainInput<'_>],
+) -> Result<(), Box<dyn Error>> {
+    for terrain in terrains {
+        let source_index = source_terrain_field(terrain, "m_LightmapIndex")?;
+        let lightmap_index = match source_index {
+            SerializedValue::U8(value) if *value == u8::MAX => u16::MAX,
+            SerializedValue::U8(value) => u16::from(*value),
+            SerializedValue::U16(value) => *value,
+            value => {
+                return Err(invalid_project(format!(
+                    "Terrain {:?}:{} has unsupported m_LightmapIndex value {value:?}",
+                    terrain.identity.collection, terrain.identity.path_id
+                )))
+            }
+        };
+        if lightmap_index == u16::MAX {
+            continue;
+        }
+        if terrain.file_id == 0 {
+            return Err(invalid_project(format!(
+                "lightmapped Terrain {:?}:{} has a null Scene export fileID",
+                terrain.identity.collection, terrain.identity.path_id
+            )));
+        }
+
+        let mut identifier = default_lighting_data_array_element(
+            type_tree,
+            "m_LightmappedRendererDataIDs",
+            terrain.identity.object_index,
+        )?;
+        set_lighting_data_i64_field(&mut identifier, "targetObject", terrain.file_id)?;
+        set_lighting_data_i64_field(&mut identifier, "targetPrefab", 0)?;
+        append_lighting_data_array(root, "m_LightmappedRendererDataIDs", identifier)?;
+
+        let mut data = default_lighting_data_array_element(
+            type_tree,
+            "m_LightmappedRendererData",
+            terrain.identity.object_index,
+        )?;
+        set_lighting_data_u16_field(&mut data, "lightmapIndex", lightmap_index)?;
+        set_lighting_data_u16_field(&mut data, "lightmapIndexDynamic", u16::MAX)?;
+        copy_terrain_vector_field(terrain, &mut data, "m_LightmapTilingOffset", "lightmapST")?;
+        copy_terrain_vector_field(
+            terrain,
+            &mut data,
+            "m_LightmapTilingOffsetDynamic",
+            "lightmapSTDynamic",
+        )?;
+        copy_terrain_vector_field(terrain, &mut data, "m_DynamicUVST", "terrainDynamicUVST")?;
+        copy_terrain_vector_field(
+            terrain,
+            &mut data,
+            "m_ChunkDynamicUVST",
+            "terrainChunkDynamicUVST",
+        )?;
+        copy_required_lighting_data_field(
+            terrain.value,
+            &mut data,
+            "m_ExplicitProbeSetHash",
+            "explicitProbeSetHash",
+        )?;
+        append_lighting_data_array(root, "m_LightmappedRendererData", data)?;
+    }
+    Ok(())
+}
+
+fn source_terrain_field<'value>(
+    terrain: &'value LightingDataTerrainInput<'_>,
+    name: &str,
+) -> Result<&'value SerializedValue, Box<dyn Error>> {
+    terrain
+        .value
+        .unique_field_in_base_chain(name)
+        .map_err(|error| {
+            invalid_project(format!(
+                "Terrain {:?}:{} field lookup for {name} failed: {error}",
+                terrain.identity.collection, terrain.identity.path_id
+            ))
+        })?
+        .ok_or_else(|| {
+            invalid_project(format!(
+                "Terrain {:?}:{} TypeTree has no {name} field",
+                terrain.identity.collection, terrain.identity.path_id
+            ))
+        })
+}
+
+fn copy_terrain_vector_field(
+    terrain: &LightingDataTerrainInput<'_>,
+    destination: &mut SerializedValue,
+    source_name: &str,
+    destination_name: &str,
+) -> Result<(), Box<dyn Error>> {
+    let value = source_terrain_field(terrain, source_name)?.clone();
+    ensure_lighting_data_value_shape(destination, destination_name, &value)?;
+    set_required_lighting_data_field(destination, destination_name, value)
+}
+
 pub(super) fn append_lighting_data_light_records(
     type_tree: &crate::serialized_file::metadata::TypeTree,
     root: &mut SerializedValue,
@@ -1183,5 +1284,187 @@ mod tests {
             lighting_data.struct_fields().unwrap()[0].value,
             SerializedValue::Array(Vec::new())
         );
+    }
+
+    fn terrain_input<'object>(
+        value: &'object SerializedValue,
+    ) -> super::super::LightingDataTerrainInput<'object> {
+        use crate::export::scene_collection::{ExportAssetCollectionIdentity, ExportAssetIdentity};
+
+        super::super::LightingDataTerrainInput {
+            identity: ExportAssetIdentity {
+                collection: ExportAssetCollectionIdentity::SerializedFile { file_index: 0 },
+                object_index: 7,
+                path_id: 559,
+                class_id: 218,
+            },
+            file_id: 44,
+            value,
+        }
+    }
+
+    fn terrain_payload(lightmap_index: SerializedValue) -> SerializedValue {
+        fn vector4(x: f32, y: f32, z: f32, w: f32) -> SerializedValue {
+            SerializedValue::Struct(vec![
+                SerializedFieldValue {
+                    name: "x".to_owned(),
+                    value: SerializedValue::F32(x),
+                },
+                SerializedFieldValue {
+                    name: "y".to_owned(),
+                    value: SerializedValue::F32(y),
+                },
+                SerializedFieldValue {
+                    name: "z".to_owned(),
+                    value: SerializedValue::F32(z),
+                },
+                SerializedFieldValue {
+                    name: "w".to_owned(),
+                    value: SerializedValue::F32(w),
+                },
+            ])
+        }
+
+        SerializedValue::Struct(vec![
+            SerializedFieldValue {
+                name: "m_LightmapIndex".to_owned(),
+                value: lightmap_index,
+            },
+            SerializedFieldValue {
+                name: "m_LightmapTilingOffset".to_owned(),
+                value: vector4(0.5, 0.5, 0.25, 0.25),
+            },
+            SerializedFieldValue {
+                name: "m_LightmapTilingOffsetDynamic".to_owned(),
+                value: vector4(1.0, 1.0, 0.0, 0.0),
+            },
+            SerializedFieldValue {
+                name: "m_DynamicUVST".to_owned(),
+                value: vector4(0.0, 0.0, 0.0, 0.0),
+            },
+            SerializedFieldValue {
+                name: "m_ChunkDynamicUVST".to_owned(),
+                value: vector4(0.0, 0.0, 0.0, 0.0),
+            },
+            SerializedFieldValue {
+                name: "m_ExplicitProbeSetHash".to_owned(),
+                value: SerializedValue::Struct(vec![SerializedFieldValue {
+                    name: "Hash".to_owned(),
+                    value: SerializedValue::Bytes(vec![0; 16]),
+                }]),
+            },
+        ])
+    }
+
+    fn lighting_data_tree_1120() -> crate::serialized_file::metadata::TypeTree {
+        use crate::processing::asset_factory::{
+            reference_class_layouts, ClassLayoutSource, FactoryUnityVersion,
+        };
+
+        let version = FactoryUnityVersion::parse("2022.3.22f1").unwrap();
+        let (tree, _) = reference_class_layouts()
+            .tpk_trees(1120, &version)
+            .unwrap()
+            .expect("frozen TPK must contain the LightingDataAsset layout");
+        (*tree).clone()
+    }
+
+    fn empty_lighting_data_root() -> SerializedValue {
+        SerializedValue::Struct(vec![
+            SerializedFieldValue {
+                name: "m_LightmappedRendererDataIDs".to_owned(),
+                value: SerializedValue::Array(Vec::new()),
+            },
+            SerializedFieldValue {
+                name: "m_LightmappedRendererData".to_owned(),
+                value: SerializedValue::Array(Vec::new()),
+            },
+        ])
+    }
+
+    fn array_len(root: &SerializedValue, name: &str) -> usize {
+        let SerializedValue::Struct(fields) = root else {
+            panic!("LightingDataAsset test root is not a struct");
+        };
+        let field = fields.iter().find(|field| field.name == name).unwrap();
+        let SerializedValue::Array(items) = &field.value else {
+            panic!("LightingDataAsset test field {name} is not an array");
+        };
+        items.len()
+    }
+
+    #[test]
+    fn unlightmapped_terrain_writes_no_lighting_records() {
+        let tree = lighting_data_tree_1120();
+        let payload = terrain_payload(SerializedValue::U16(u16::MAX));
+        let mut root = empty_lighting_data_root();
+        super::append_lighting_data_terrain_records(&tree, &mut root, &[terrain_input(&payload)])
+            .unwrap();
+        assert_eq!(array_len(&root, "m_LightmappedRendererDataIDs"), 0);
+        assert_eq!(array_len(&root, "m_LightmappedRendererData"), 0);
+    }
+
+    #[test]
+    fn lightmapped_terrain_copies_tiling_uv_and_probe_hash() {
+        let tree = lighting_data_tree_1120();
+        let payload = terrain_payload(SerializedValue::U16(3));
+        let mut root = empty_lighting_data_root();
+        super::append_lighting_data_terrain_records(&tree, &mut root, &[terrain_input(&payload)])
+            .unwrap();
+        assert_eq!(array_len(&root, "m_LightmappedRendererDataIDs"), 1);
+        assert_eq!(array_len(&root, "m_LightmappedRendererData"), 1);
+        let SerializedValue::Struct(fields) = &root else {
+            panic!("LightingDataAsset test root is not a struct");
+        };
+        let identifier = fields
+            .iter()
+            .find(|field| field.name == "m_LightmappedRendererDataIDs")
+            .unwrap();
+        let SerializedValue::Array(identifiers) = &identifier.value else {
+            panic!("identifier test field is not an array");
+        };
+        let SerializedValue::Struct(identifier_fields) = &identifiers[0] else {
+            panic!("identifier test element is not a struct");
+        };
+        let target = identifier_fields
+            .iter()
+            .find(|field| field.name == "targetObject")
+            .unwrap();
+        assert_eq!(target.value, SerializedValue::I64(44));
+        let data = fields
+            .iter()
+            .find(|field| field.name == "m_LightmappedRendererData")
+            .unwrap();
+        let SerializedValue::Array(records) = &data.value else {
+            panic!("data test field is not an array");
+        };
+        let SerializedValue::Struct(record) = &records[0] else {
+            panic!("data test element is not a struct");
+        };
+        let field_value = |name: &str| {
+            record
+                .iter()
+                .find(|field| field.name == name)
+                .unwrap_or_else(|| panic!("record test field {name} is missing"))
+                .value
+                .clone()
+        };
+        assert_eq!(field_value("lightmapIndex"), SerializedValue::U16(3));
+        assert_eq!(
+            field_value("lightmapIndexDynamic"),
+            SerializedValue::U16(u16::MAX)
+        );
+        assert_eq!(
+            field_value("uvMesh"),
+            SerializedValue::PPtr {
+                file_id: 0,
+                path_id: 0
+            }
+        );
+        let SerializedValue::Struct(tiling) = field_value("lightmapST") else {
+            panic!("lightmapST test field is not a struct");
+        };
+        assert_eq!(tiling[0].value, SerializedValue::F32(0.5));
+        assert_eq!(tiling[2].value, SerializedValue::F32(0.25));
     }
 }
