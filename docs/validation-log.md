@@ -1,5 +1,10 @@
 # Validation log
 
+## 2026-10-14 Parity rows updated for CLI integration evidence
+
+- Corrected four rows whose evidence/open-items went stale after the recent integration arc: `EXP-CLI-EXPORT-TEXTURE-001` (three CLI tests now, Crunch CLI covered), `RES-TEXTURE-CRUNCH-001` (guard/containment/truncation/sweep/export-texture evidence recorded; open items narrowed to new variants, multi-face/mips, project export, Unity), `RES-AUDIO-001` (eight CLI tests with FSB5 success paths), `EXP-AUDIO-EXPORT-001` (successful decode plus both CLI formats now covered). No status was inflated: converter-centric rows stay honest about missing real-sample/Unity legs.
+- Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No user input was read; Phase 1 remains open and Phase 2 remains locked. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 FSB5 export-audio integration test (ogg remux + wav)
 
 - New: `export_audio_remuxes_silent_fsb5_to_ogg_and_wav` reuses the existing `make_audio_clip_file` fixture helper with the silent stereo FSB5 container bytes from the decode suite (no new fixture file needed). Default export asserts Ogg magic, exactly 5 remuxed packets with zero audio payloads, and the status line; PreferWav asserts 128-frame fact, exact WAV length, all-zero samples, and its status line. This closes the FSB5 CLI-output remainder for both export formats at the `export-audio` level.
