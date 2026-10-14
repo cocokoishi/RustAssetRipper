@@ -4,6 +4,7 @@
 
 - Root-caused a world UI-image difference to missing Rust engine redirects for sprites/textures (reference: builtin-extra fileID 10911; Rust: duplicate export plus wrong reference). Fixed by mirroring the frozen sprite/texture cache keys with probe-generated band tables, exact three-state texture gate, and fail-open routing; 11/11 routing module tests pass locally (3 new), formatting clean, release binary rebuilt twice (final binary matches final source).
 - Fresh replay plus re-audit: the two MonoBehaviour diffs and both Rust-only files are gone with zero unpaired documents and no regressions; 102/102 differing PNGs pixel-identical. One pre-existing difference class remains open as the next blocker: 4 GameObject documents write `m_StaticEditorFlags: 0` where the reference writes all-bits-set; the frozen rule (`EditorFormatConverter`: non-default static-batch info or non-empty subset indices marks the renderer's GameObject static) is identified but not yet implemented.
+- Actions run `38570286029` is fully green on both platforms (sprite/texture redirect commit), including warnings-denied Clippy, the release build, changed-line formatting, and the public-repository hygiene job.
 - Local checks: `git diff --check` exit 0; `cargo check --locked --all-targets` exit 0; `cargo test --locked --lib object_routing` 11/11. Full validation via GitHub Actions after push. Sample input read-only; outputs quarantined. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 First semantic audit: near-equivalence, one Avatar diff
