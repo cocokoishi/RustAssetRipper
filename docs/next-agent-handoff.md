@@ -4,7 +4,7 @@
 
 - Worktree `../main-work` (detached at `b99597e`); the Desktop checkout's conflicts and local changes are untouched. Phase 1 open, Phase 2 locked; no user input, Unity, or UABEA used.
 - Crunch decoder proven unreachable for Texture3D/array shapes: frozen `ToTextureFormat` maps no GraphicsFormat to a Crunch TextureFormat, so the no-version-API note becomes a proven non-issue rather than open debt. New regression `graphics_format_conversion_never_yields_crunched_texture_format` exhausts domain 0-151. See the validation-log entry.
-- Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push.
+- Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint). Actions run `38491835469` is fully green on both platforms (lib 1,749 passed/1 ignored, CLI 128 passed, Clippy, release builds, formatting, hygiene).
 
 ## Latest current checkpoint — 2026-10-13 (FSB5 table decode validation in progress)
 

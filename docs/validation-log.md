@@ -6,6 +6,7 @@
 - Source trace: frozen `Texture3DExtensions.GetTextureFormat` converts the GraphicsFormat-valued `m_Format` through `GraphicsFormatExtensions.ToTextureFormat` (default RGBA32); the converter Crunch-gates on the resulting TextureFormat. All frozen `ToTextureFormat` arms were read: compressed layouts map to plain equivalents (DXT1/3/5, ETC1/2, EAC, ASTC, BC, PVRTC) and no arm emits 28, 29, 64, or 65. Texture2DArray/CubemapArray carry GraphicsFormat directly, same domain. Crunch input is therefore impossible for these shapes by construction, in both implementations.
 - Rust side: `to_texture_format` mirrors the frozen table (fixture-pinned, 156 rows) with the same RGBA32 fallback; the 3D/array exporters decode through the GraphicsFormat route. New regression `graphics_format_conversion_never_yields_crunched_texture_format` exhausts enum domain 0-151 and asserts no conversion output is `is_crunched`, pinning the contract against future table edits.
 - Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No user input was read; Phase 1 remains open and Phase 2 remains locked. Unity import/runtime and UABEA were NOT RUN.
+- Actions run `38491835469` is fully green on Ubuntu and Windows: lib 1,749 passed/1 ignored (new Crunch-domain regression included), CLI 128 passed, warnings-denied Clippy, release builds, changed-line formatting, and repository hygiene.
 
 ## 2026-10-13 FSB5 production setup-table decode validation (silent packets; real audio still open)
 
