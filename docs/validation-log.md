@@ -1,5 +1,10 @@
 # Validation log
 
+## 2026-10-14 First Unity-6 sample: two open features scoped
+
+- HEAD-binary replay plus audit of the first 6000-series avatar: the texture/audio conversion routes are unported for Unity 6, so 25 textures fall back to raw `.texture2D` (reference: PNGs), audio to YAML+sidecar (reference: OGG), and all downstream reference diffs cascade from those targets. A GUID census shows the reference still redirects to builtin-extra (7 references) while Rust's predefined tables stop at the 2022 bands, explaining the extra material/shader files too. Scoped as two features, not defects in ported paths: 6000-band predefined tables (probe-generable) and Unity-6 importer/conversion routes (layout transcription). No product change this round.
+- Local checks: `git diff --check` exit 0. No local Cargo run needed (no product change). Full validation via GitHub Actions after push. Sample input read-only; outputs quarantined. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Second avatar audited; flow-style rule holds
 
 - HEAD-binary replay plus audit of the next avatar in acceptance order: zero unpaired documents, everything exact or GUID-mapped except the single class-90 Avatar document, which shows the same flow/block signature (section maps and float counts identical); ordered per-section floats verified identical (pose 5358/5358, default-pose 3930/3930, human 1033/1033, skeleton 1441/1441), so `DIFF-AVATAR-FLOW-001` now rests on two samples. All 28 differing PNGs pixel-identical. No new root cause; no product change.

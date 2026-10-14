@@ -1,5 +1,11 @@
 # RustAssetRipper hand-off — 2026-10-10
 
+## Latest current checkpoint — 2026-10-14 (Unity-6 program scoped)
+
+- Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public (only class IDs/counts/field names in docs; audit outputs quarantined).
+- Avatar VRC-AV03 audited: Unity-6 texture/audio routes unported (systematic fallbacks + cascades) plus missing 6000-band redirects (FGUID x7). Next: generate 6000-band predefined tables via the probe (bounded), then scope the importer transcription.
+- Local checks: `git diff --check` exit 0. No local Cargo run (no product change). Full validation via GitHub Actions after push.
+
 ## Latest current checkpoint — 2026-10-14 (second avatar clean)
 
 - Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public (only class IDs/counts/field names in docs; audit outputs quarantined).
