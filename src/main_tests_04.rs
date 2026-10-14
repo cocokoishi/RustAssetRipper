@@ -1470,3 +1470,49 @@
         }
         assert_eq!(fs::read(&source_path).unwrap(), input_bytes);
     }
+
+    #[test]
+    fn export_texture_decodes_a_synthetic_crn_texture2d() {
+        // Hand-built 2019.4 SerializedFile with one class-28 Texture2D carrying
+        // the committed classic DXT1 CRN bytes (`tests/fixtures/crn-texture-512.assets`).
+        // Fixture layout: one type with an 11-node TypeTree (Texture2D root; `m_Name`
+        // string; `m_Width`, `m_Height`, `m_TextureFormat`, `m_CompleteImageSize`
+        // `int`s; `TypelessData` "image data" with `int` size plus `UInt8` data, which
+        // decodes straight to bytes); payload `0`-length name, `512`, `512`, `28`,
+        // image size, image length, CRN bytes, zero padding to 4 bytes; PathID 42.
+        // Pixel identity is proven separately by the CRN oracle regression through
+        // the same converter; this pins the mount/workspace/decode/convert/write
+        // plumbing and the PNG envelope.
+        let directory = TestInputDirectory::new_root();
+        let source_path = directory.join("crn-texture.assets");
+        let output_path = directory.join("crn.png");
+        fs::write(
+            &source_path,
+            include_bytes!("../tests/fixtures/crn-texture-512.assets"),
+        )
+        .unwrap();
+        let input = TestInputDirectory {
+            directory,
+            files: vec![source_path.clone(), output_path.clone()],
+            subdirectories: Vec::new(),
+        };
+
+        let mut status = Vec::new();
+        super::export_texture_to(
+            &[source_path],
+            0,
+            42,
+            assetripper::export::settings::ImageExportFormat::Png,
+            true,
+            &output_path,
+            &mut status,
+        )
+        .unwrap();
+        let png = fs::read(&output_path).unwrap();
+        assert!(png.len() > 1000, "PNG body is nontrivial");
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+        assert_eq!(u32::from_be_bytes(png[16..20].try_into().unwrap()), 512);
+        assert_eq!(u32::from_be_bytes(png[20..24].try_into().unwrap()), 512);
+        // DXT1Crunched carries alpha, so the writer selects RGBA color type 6.
+        assert_eq!(png[25], 6);
+    }

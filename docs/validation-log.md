@@ -1,5 +1,11 @@
 # Validation log
 
+## 2026-10-14 CRN texture export-texture integration test
+
+- Built: hand-assembled 2019.4 SerializedFile (`tests/fixtures/crn-texture-512.assets`, 24,697 bytes) with one class-28 Texture2D carrying the committed classic DXT1 CRN bytes. Layout: 11-node TypeTree (Texture2D root, `m_Name` string, four `int`s, `TypelessData` "image data" decoding straight to bytes); payload with empty name, 512/512/28/size fields, CRN bytes, 4-byte padding; PathID 42. A scratch probe (gitignored, linked prebuilt rlib for shape validation only) verified parse, payload decode, view reads, and production conversion to the exact committed oracle hash on the first attempt.
+- Test: `export_texture_decodes_a_synthetic_crn_texture2d` runs `export-texture` in-process and asserts PNG signature, 512x512 IHDR dims, RGBA color type, and nontrivial body. Pixel identity rests on the unit oracle through the same converter. This closes the "project/CLI output" remainder for single-face CRN at the `export-texture` level; full `export-project` collection flow stays open.
+- Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); fixture shape validated locally via `rustc`-linked prebuilt rlib, export half delegated to GitHub Actions after push. No user input was read; Phase 1 remains open and Phase 2 remains locked. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 CRN project-integration test scoped (not started)
 
 - Next CRN code item: prove a CRN texture through `export-project` to PNG end to end (closes the "project/CLI output" remainder for single-face CRN; multi-face/mips still need fixtures that cannot be synthesized).

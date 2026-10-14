@@ -1,5 +1,11 @@
 # RustAssetRipper hand-off — 2026-10-10
 
+## Latest current checkpoint — 2026-10-14 (CRN export-texture integration)
+
+- Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Phase 1 open, Phase 2 locked; no user input, Unity, or UABEA used.
+- Shipped the scoped integration at `export-texture` level: committed hand-built fixture (`tests/fixtures/crn-texture-512.assets`, recipe in the test comment) plus an in-process test asserting PNG envelope/dims/color-type. Fixture shape pre-verified locally via rlib-linked probe (parse/decode/oracle hash); export half goes through CI.
+- Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push.
+
 ## Latest current checkpoint — 2026-10-14 (CRN integration scoped)
 
 - Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Phase 1 open, Phase 2 locked; no user input, Unity, or UABEA used.
