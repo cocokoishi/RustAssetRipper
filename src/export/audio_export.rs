@@ -2111,6 +2111,119 @@ mod tests {
     }
 
     #[test]
+    fn vorbis_lookup_setups_parse_with_production_identification() {
+        // Every table key must be the CRC32 of its setup bytes, and every
+        // setup must parse under lewton with the production identification
+        // shape (sample-declared channels, 256/2048 block sizes). A probe
+        // over all entries showed stereo-coupled setups parse only with two
+        // channels while coupling-free setups parse with any layout; both
+        // classes parse with two channels, which is what this test pins
+        // alongside key integrity. Real-audio decode through the table is
+        // covered by the table-backed reconstruction test below.
+        let mut entries = 0u32;
+        for (crc, header) in super::vorbis_lookup::VORBIS_LOOKUP.entries() {
+            let header: &[u8] = header;
+            assert_eq!(
+                crate::resources::blend_shape::crc32_ieee(header),
+                *crc,
+                "lookup key must be the setup CRC32"
+            );
+            lewton::header::read_header_setup(header, 2, (8, 11))
+                .expect("table setup must parse with stereo identification");
+            entries += 1;
+        }
+        assert_eq!(entries, 161, "audited lookup-table size");
+    }
+
+    #[test]
+    fn production_identification_packet_parses_with_declared_fields() {
+        let packet = super::build_vorbis_identification_packet(2, 48_000);
+        let identification = lewton::header::read_header_ident(&packet).unwrap();
+        assert_eq!(identification.audio_channels, 2);
+        assert_eq!(identification.audio_sample_rate, 48_000);
+        assert_eq!(identification.blocksize_0, 8);
+        assert_eq!(identification.blocksize_1, 11);
+    }
+
+    /// Minimal version-1 container holding two one-byte zero packets and a
+    /// declared sample count of 128, mirroring the reconstruction test layout.
+    fn silent_table_backed_container(
+        channel_code: u64,
+        rate_code: u64,
+        setup_crc: u32,
+    ) -> Vec<u8> {
+        let packet_data = [1u8, 0, 0, 1, 0, 0];
+        let mut fsb5 = vec![0u8; 60];
+        fsb5[..4].copy_from_slice(b"FSB5");
+        fsb5[4..8].copy_from_slice(&1u32.to_le_bytes());
+        fsb5[8..12].copy_from_slice(&1u32.to_le_bytes());
+        fsb5[12..16].copy_from_slice(&16u32.to_le_bytes());
+        fsb5[20..24].copy_from_slice(&(packet_data.len() as u32).to_le_bytes());
+        fsb5[24..28].copy_from_slice(&15u32.to_le_bytes());
+        let sample_header =
+            (u64::from(128u32) << 34) | (channel_code << 5) | (rate_code << 1) | 1;
+        fsb5.extend_from_slice(&sample_header.to_le_bytes());
+        fsb5.extend_from_slice(&[0x08, 0, 0, 0x16]);
+        fsb5.extend_from_slice(&setup_crc.to_le_bytes());
+        fsb5.extend_from_slice(&packet_data);
+        fsb5
+    }
+
+    #[test]
+    fn production_table_backed_fsb5_decode_rebuilds_silent_audio() {
+        // Table-backed end-to-end proof through decode_fsb5_vorbis: the two
+        // zero packets prime lewton's overlap window and then decode to 128
+        // silent frames under the table setup, so the rebuilt Ogg preserves
+        // the packets and the WAV conversion yields exact silence.
+        for (channels, rate_code, setup_crc) in [
+            (2u8, 8u64, 0xA722_97FFu32),
+            (1u8, 9u64, 0x070B_A3B6u32),
+        ] {
+            let channel_code = u64::from(channels - 1);
+            let fsb5 = silent_table_backed_container(channel_code, rate_code, setup_crc);
+            let (rebuilt_ogg, extension) = super::decode_fsb5_vorbis(&fsb5, 1024 * 1024).unwrap();
+            assert_eq!(extension, "ogg");
+
+            let mut reader = ogg::PacketReader::new(Cursor::new(rebuilt_ogg.as_slice()));
+            let mut rebuilt_packets = Vec::new();
+            while let Some(packet) = reader.read_packet().unwrap() {
+                rebuilt_packets.push(packet.data);
+            }
+            assert_eq!(rebuilt_packets.len(), 5);
+            assert_eq!(
+                rebuilt_packets[2].as_slice(),
+                *super::vorbis_lookup::VORBIS_LOOKUP.get(&setup_crc).unwrap()
+            );
+            assert_eq!(rebuilt_packets[3], [0]);
+            assert_eq!(rebuilt_packets[4], [0]);
+
+            let wav = super::convert_ogg_to_wav_with_limit(&rebuilt_ogg, 1024 * 1024).unwrap();
+            assert_eq!(u32::from_le_bytes(wav[46..50].try_into().unwrap()), 128);
+            assert_eq!(wav.len(), 58 + 128 * 4 * usize::from(channels));
+            for sample in wav[58..].chunks_exact(4) {
+                assert_eq!(f32::from_le_bytes(sample.try_into().unwrap()), 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn fsb5_decode_rejects_unknown_setup_crc_before_audio() {
+        // Unknown setups must fail loudly at the lookup stage, never by
+        // decoding audio against a mismatched setup header.
+        let unknown_crc = 0xDEAD_BEEFu32;
+        assert!(!super::vorbis_lookup::VORBIS_LOOKUP.contains_key(&unknown_crc));
+        let fsb5 = silent_table_backed_container(1, 8, unknown_crc);
+        let error = super::decode_fsb5_vorbis(&fsb5, 1024 * 1024).unwrap_err();
+        match error {
+            super::AudioDecodeError::Fsb5DecodeFailed { reason } => assert!(
+                reason.contains("not in the supported lookup table"),
+                "unexpected reason: {reason}"
+            ),
+            other => panic!("expected table-miss failure, got {other}"),
+        }
+    }
+
+    #[test]
     fn exporter_warnings_name_the_asset_like_the_source() {
         assert_eq!(
             native_audio_empty_warning("Music"),

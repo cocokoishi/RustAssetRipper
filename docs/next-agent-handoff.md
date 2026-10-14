@@ -1,5 +1,11 @@
 # RustAssetRipper hand-off — 2026-10-10
 
+## Latest current checkpoint — 2026-10-13 (FSB5 table decode validation in progress)
+
+- Worktree `../main-work` (detached at `a32add3`); the Desktop checkout's conflicts and local changes are untouched. Phase 1 open, Phase 2 locked; no user input, Unity, or UABEA used.
+- FSB5 production setup-table validation: scratch probes (gitignored `target/probe-fsb5-table/`, not committed) prove all 161 `VORBIS_LOOKUP` keys equal their setup CRC32 and every setup parses under lewton with production identification parameters (97 stereo-coupled parse only with two channels; 64 coupling-free parse with any layout). A micro-packet search found two-packet silent sequences decoding to exactly 128 zero frames under every setup/channel combination (225/225). New tests in `src/export/audio_export.rs` pin table integrity, ident-builder round-trip, table-backed end-to-end silent decode (stereo + mono), and loud unknown-CRC rejection. Real-audio table-backed decode still awaits Phase-2 inputs; see `DIFF-AUDIO-FSB5-RECONSTRUCTION-001`.
+- Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push.
+
 ## Latest current checkpoint — 2026-10-13
 
 - Phase 1 remains open. Commit 0cd4edb adds streamed Sprite bone geometry: the importer now reuses the already-resolved external vertex byte range and errors if a set stream is unresolved. Synthetic coverage verifies streamed and inline geometry equality.
