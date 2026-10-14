@@ -54,7 +54,7 @@ impl TextureImporterLayout {
             (2017, 2) => Some(Self::Unity2017_2),
             (2017, 4) => Some(Self::Unity2017_4),
             (2018, 2) => Some(Self::Unity2018_2),
-            (2018, 3) => Some(Self::Unity2018_3),
+            (2018, 3 | 4) => Some(Self::Unity2018_3),
             (2019, 4) => Some(Self::Unity2019_4),
             (2022, 3) => Some(Self::Unity2022_3),
             _ => None,

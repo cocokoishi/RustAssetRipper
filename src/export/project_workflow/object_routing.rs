@@ -20,6 +20,22 @@ const PREDEFINED_ENGINE_TEXTURES_BAND_2022_2_15F1: &str =
     include_str!("predefined_textures_band_2022_2_15f1.tsv");
 const PREDEFINED_ENGINE_TEXTURES_BAND_2022_3_11F1: &str =
     include_str!("predefined_textures_band_2022_3_11f1.tsv");
+const PREDEFINED_ENGINE_MATERIALS_BAND_6000_0_29F1: &str =
+    include_str!("predefined_materials_band_6000_0_29f1.tsv");
+const PREDEFINED_ENGINE_SHADERS_BAND_6000_0_29F1: &str =
+    include_str!("predefined_shaders_band_6000_0_29f1.tsv");
+const PREDEFINED_ENGINE_SPRITES_BAND_6000_0_29F1: &str =
+    include_str!("predefined_sprites_band_6000_0_29f1.tsv");
+const PREDEFINED_ENGINE_TEXTURES_BAND_6000_0_29F1: &str =
+    include_str!("predefined_textures_band_6000_0_29f1.tsv");
+const PREDEFINED_ENGINE_MATERIALS_BAND_2018_3_0B6: &str =
+    include_str!("predefined_materials_band_2018_3_0b6.tsv");
+const PREDEFINED_ENGINE_SHADERS_BAND_2018_3_0B6: &str =
+    include_str!("predefined_shaders_band_2018_3_0b6.tsv");
+const PREDEFINED_ENGINE_SPRITES_BAND_2018_3_0B6: &str =
+    include_str!("predefined_sprites_band_2018_3_0b6.tsv");
+const PREDEFINED_ENGINE_TEXTURES_BAND_2018_3_0B6: &str =
+    include_str!("predefined_textures_band_2018_3_0b6.tsv");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PredefinedEngineAssetTarget {
@@ -69,8 +85,10 @@ fn select_engine_assets_band(unity_version: Option<&str>) -> Option<&'static str
 /// pins the probe-verified fact that the two 2022.3 bands are currently byte-identical.
 fn predefined_engine_material_rows(band: &str) -> Option<&'static str> {
     match band {
+        "2018.3.0b6" => Some(PREDEFINED_ENGINE_MATERIALS_BAND_2018_3_0B6),
         "2022.2.15f1" => Some(PREDEFINED_ENGINE_MATERIALS_BAND_2022_2_15F1),
         "2022.3.11f1" => Some(PREDEFINED_ENGINE_MATERIALS_BAND_2022_3_11F1),
+        "6000.0.29f1" => Some(PREDEFINED_ENGINE_MATERIALS_BAND_6000_0_29F1),
         _ => None,
     }
 }
@@ -80,8 +98,10 @@ fn predefined_engine_material_rows(band: &str) -> Option<&'static str> {
 /// Only probed bands have embedded rows; anything else selects nothing.
 fn predefined_engine_shader_rows(band: &str) -> Option<&'static str> {
     match band {
+        "2018.3.0b6" => Some(PREDEFINED_ENGINE_SHADERS_BAND_2018_3_0B6),
         "2022.2.15f1" => Some(PREDEFINED_ENGINE_SHADERS_BAND_2022_2_15F1),
         "2022.3.11f1" => Some(PREDEFINED_ENGINE_SHADERS_BAND_2022_3_11F1),
+        "6000.0.29f1" => Some(PREDEFINED_ENGINE_SHADERS_BAND_6000_0_29F1),
         _ => None,
     }
 }
@@ -246,8 +266,10 @@ fn predefined_engine_material_target(
 /// `SpriteKey(Name, TextureName)` match.
 fn predefined_engine_sprite_rows(band: &str) -> Option<&'static str> {
     match band {
+        "2018.3.0b6" => Some(PREDEFINED_ENGINE_SPRITES_BAND_2018_3_0B6),
         "2022.2.15f1" => Some(PREDEFINED_ENGINE_SPRITES_BAND_2022_2_15F1),
         "2022.3.11f1" => Some(PREDEFINED_ENGINE_SPRITES_BAND_2022_3_11F1),
+        "6000.0.29f1" => Some(PREDEFINED_ENGINE_SPRITES_BAND_6000_0_29F1),
         _ => None,
     }
 }
@@ -259,8 +281,10 @@ fn predefined_engine_sprite_rows(band: &str) -> Option<&'static str> {
 /// `Texture2DKey(Name, Width, Height)` match.
 fn predefined_engine_texture_rows(band: &str) -> Option<&'static str> {
     match band {
+        "2018.3.0b6" => Some(PREDEFINED_ENGINE_TEXTURES_BAND_2018_3_0B6),
         "2022.2.15f1" => Some(PREDEFINED_ENGINE_TEXTURES_BAND_2022_2_15F1),
         "2022.3.11f1" => Some(PREDEFINED_ENGINE_TEXTURES_BAND_2022_3_11F1),
+        "6000.0.29f1" => Some(PREDEFINED_ENGINE_TEXTURES_BAND_6000_0_29F1),
         _ => None,
     }
 }
@@ -1026,8 +1050,8 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
             };
             let mut audio_binary_export = None;
             let audio_claim_decode = if let Some(view) = audio_view.as_ref().filter(|_| {
-                project_version.major == 2022
-                    && project_version.minor == 3
+                (project_version.major == 2022 && project_version.minor == 3
+                    || project_version.major == 2018 && project_version.minor == 4)
                     && matches!(
                         settings.audio_export_format,
                         crate::export::settings::AudioExportFormat::Default
@@ -2388,5 +2412,114 @@ mod tests {
             None,
             "a version selecting an unprobed band resolves nothing"
         );
+    }
+
+    #[test]
+    fn unity_6000_predefined_bands_resolve_and_stay_separate() {
+        // 6000.0.60f1 selects the 6000.0.29f1 band. Shared rows resolve there;
+        // rows added or removed between the 2022.3.11f1 and 6000.0.29f1 bands
+        // prove the selections stay independent.
+        let sprite = predefined_engine_sprite_target(
+            "InputFieldBackground",
+            Some("InputFieldBackground"),
+            Some("6000.0.60f1"),
+        )
+        .unwrap()
+        .expect("the 6000.0.29f1 engine-assets band keeps the UI input sprite");
+        assert_eq!(sprite.file_id, 10911);
+        assert_eq!(sprite.guid, builtin_extra_guid());
+        let texture =
+            predefined_engine_texture_target("Default-Particle", 64, 64, Some("6000.0.60f1"))
+                .unwrap()
+                .expect("the 6000.0.29f1 engine-assets band keeps Default-Particle");
+        assert_eq!(texture.file_id, 10300);
+        assert_eq!(texture.guid, builtin_extra_guid());
+        let property_names = [
+            "_MainTex",
+            "_ColorTint",
+            "_HueVariationKwToggle",
+            "_HueVariationColor",
+            "_NormalMapKwToggle",
+            "_NormalMap",
+            "_ExtraTex",
+            "_Glossiness",
+            "_Metallic",
+            "_SubsurfaceKwToggle",
+            "_SubsurfaceTex",
+            "_SubsurfaceColor",
+            "_SubsurfaceIndirect",
+            "_BillboardKwToggle",
+            "_BillboardShadowFade",
+            "_TwoSided",
+            "_LeafFacingKwToggle",
+            "_WIND_SHARED",
+            "_WIND_BRANCH1",
+            "_WIND_BRANCH2",
+            "_WIND_RIPPLE",
+            "_WIND_SHIMMER",
+        ];
+        let shader = ShaderView {
+            parsed: Some(ParsedShaderForm {
+                name: "Nature/SpeedTree9".to_owned(),
+                properties: property_names
+                    .iter()
+                    .map(|name| ParsedShaderProperty {
+                        name: (*name).to_owned(),
+                        ..ParsedShaderProperty::default()
+                    })
+                    .collect(),
+                ..ParsedShaderForm::default()
+            }),
+            ..ShaderView::default()
+        };
+        let target = predefined_engine_shader_target(&shader, Some("6000.0.60f1"))
+            .unwrap()
+            .expect("the 6000.0.29f1 engine-assets band adds Nature/SpeedTree9");
+        assert_eq!(target.file_id, 14003);
+        assert_eq!(target.guid, builtin_extra_guid());
+        // The 2022-only GraphView UI shader row is gone from the 6000 band.
+        let removed = ShaderView {
+            parsed: Some(ParsedShaderForm {
+                name: "Hidden/GraphView/GraphViewUIE".to_owned(),
+                properties: ["_MainTex", "_FontTex", "_CustomTex", "_Color"]
+                    .iter()
+                    .map(|name| ParsedShaderProperty {
+                        name: (*name).to_owned(),
+                        ..ParsedShaderProperty::default()
+                    })
+                    .collect(),
+                ..ParsedShaderForm::default()
+            }),
+            ..ShaderView::default()
+        };
+        assert_eq!(
+            predefined_engine_shader_target(&removed, Some("6000.0.60f1")).unwrap(),
+            None,
+            "removed 2022 rows must not resolve under the 6000 band"
+        );
+    }
+
+    #[test]
+    fn unity_2018_predefined_bands_resolve() {
+        // 2018.4.20f1 selects the 2018.3.0b6 band. Shared UI-sprite and
+        // particle-material rows resolve there with builtin-extra identity.
+        let sprite = predefined_engine_sprite_target(
+            "InputFieldBackground",
+            Some("InputFieldBackground"),
+            Some("2018.4.20f1"),
+        )
+        .unwrap()
+        .expect("the 2018.3.0b6 engine-assets band contains the UI input sprite");
+        assert_eq!(sprite.file_id, 10911);
+        assert_eq!(sprite.guid, builtin_extra_guid());
+        let material = predefined_engine_material_target(
+            "Default-Particle",
+            Some("Legacy Shaders/Particles/Alpha Blended Premultiply"),
+            Some("2018.4.20f1"),
+        )
+        .unwrap()
+        .expect("the 2018.3.0b6 engine-assets band contains Default-Particle");
+        assert_eq!(material.file_id, 10301);
+        assert_eq!(material.guid, builtin_extra_guid());
     }
 }

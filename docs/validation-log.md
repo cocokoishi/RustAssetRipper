@@ -1,5 +1,11 @@
 # Validation log
 
+## 2026-10-14 Inner version rules; 2018 bands plus routes land, importer bodies open
+
+- Version truth established: export decisions follow the inner SerializedFile version (both sides write ProjectVersion 2018.4.20f1), not the 6000 bundle tag; the 6000-band tables stay dormant probe-verified data. Added 2018.3.0b6 predefined bands (12/182/8/51 rows), mapped (2018,4) to the 2018_3 texture layout as a verifiable hypothesis, and opened the audio decode gate to 2018.4. Module tests 13/13 locally; formatting clean; release rebuilt.
+- Fresh replay plus re-audit: unpaired files collapse (26/31 to 1/1, the raw cubemap excepted); 24/24 PNGs pixel-identical; the OGG is packet-identical (76/76). All 25 PNG importer sidecars still differ, so the 2018.4 importer body transcription stays open alongside the paired-content diffs (materials, transforms, cascades) and the cubemap route. No regressions.
+- Local checks: `git diff --check` exit 0; `cargo check` clean; local Clippy clean. Full validation via GitHub Actions after push. Sample input read-only; outputs quarantined. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 First Unity-6 sample: two open features scoped
 
 - HEAD-binary replay plus audit of the first 6000-series avatar: the texture/audio conversion routes are unported for Unity 6, so 25 textures fall back to raw `.texture2D` (reference: PNGs), audio to YAML+sidecar (reference: OGG), and all downstream reference diffs cascade from those targets. A GUID census shows the reference still redirects to builtin-extra (7 references) while Rust's predefined tables stop at the 2022 bands, explaining the extra material/shader files too. Scoped as two features, not defects in ported paths: 6000-band predefined tables (probe-generable) and Unity-6 importer/conversion routes (layout transcription). No product change this round.

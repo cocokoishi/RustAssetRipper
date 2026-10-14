@@ -1,0 +1,15 @@
+# EngineAssetsTpk band 2018.3.0b6 Material name and resolved Shader-name signatures; source resource order.
+# Probe dump for 2018.4.20f1 requests (nearest-key-at-or-below band selection).
+# Probed with: dotnet EngineAssetsProbe.dll
+10100|D|Font Material|GUI/Text Shader
+10756|D|FrameDebuggerRenderTargetDisplay|Hidden/FrameDebuggerRenderTargetDisplay
+10301|F|Default-Particle|Legacy Shaders/Particles/Alpha Blended Premultiply
+10302|F|Default-Diffuse|Legacy Shaders/Diffuse
+10303|F|Default-Material|Standard
+10304|F|Default-Skybox|Skybox/Procedural
+10306|F|Default-Line|Legacy Shaders/Particles/Alpha Blended Premultiply
+10308|F|Default-ParticleSystem|Particles/Standard Unlit
+10754|F|Sprites-Default|Sprites/Default
+10758|F|Sprites-Mask|Sprites/Mask
+15302|F|SpatialMappingOcclusion|VR/SpatialMapping/Occlusion
+15303|F|SpatialMappingWireframe|VR/SpatialMapping/Wireframe

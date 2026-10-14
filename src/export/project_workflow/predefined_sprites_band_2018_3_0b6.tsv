@@ -1,0 +1,11 @@
+# EngineAssetsTpk band 2018.3.0b6 Sprite name and resolved Texture-name signatures; source resource order.
+# Probe dump for 2018.4.20f1 requests (nearest-key-at-or-below band selection).
+# Probed with: dotnet EngineAssetsProbe.dll
+10404|D|UnitySplash-cube|UnitySplash-cube
+10901|F|Checkmark|Checkmark
+10905|F|UISprite|UISprite
+10907|F|Background|Background
+10911|F|InputFieldBackground|InputFieldBackground
+10913|F|Knob|Knob
+10915|F|DropdownArrow|DropdownArrow
+10917|F|UIMask|UIMask
