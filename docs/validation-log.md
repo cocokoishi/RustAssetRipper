@@ -1,5 +1,10 @@
 # Validation log
 
+## 2026-10-14 Sixteen baselines; largest material gap noted
+
+- Two more baselines with saved inventories: audio-visual avatar exact on anim/mat/controller/cs/ogg with tiny texture/shader gaps (6000 tag over 2022 inner content again); large world exact on anim/controller/cs/ogg/unity with the largest material gap so far (332 vs 343) plus texture/shader gaps and font outputs. Material gaps are no longer negligible-singletons; the redirect-parity diff will need per-asset resolution rather than count arithmetic. All observations, not verdicts.
+- Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No sample content committed; outputs quarantined in gitignored scratch. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Fourteen baselines; scale extreme exports cleanly
 
 - Two more baselines with saved inventories: mesh/constraint-heavy avatar exact on anim/png/controller/cs/ogg with small material/shader gaps; the 426664-object scale extreme exports 9679 files with anim/png/controller/cs/ogg/unity exact, near-exact materials, a 139-vs-169 shader gap, one overrideController, and one real class-29 Crunch texture in the wild. Three more large raw-type IDs identified statically (SpriteAtlas, AimConstraint, LookAtConstraint). All gaps stay observations.
