@@ -22,7 +22,7 @@ using AssetRipper.Tpk.EngineAssets;
 
 if (args.Length == 0)
 {
-	Console.Error.WriteLine("usage: bands <out> | bandjson <version> <out> | tsv <version> <materialsOut> <shadersOut> | classnames <out>");
+	Console.Error.WriteLine("usage: bands <out> | bandjson <version> <out> | tsv <version> <materialsOut> <shadersOut> | spritetextsv <version> <spritesOut> <texturesOut> | classnames <out>");
 	return 2;
 }
 
@@ -38,6 +38,9 @@ try
 			return 0;
 		case "tsv":
 			DumpTsv(args[1], args[2], args[3]);
+			return 0;
+		case "spritetextsv":
+			DumpSpriteTextureTsv(args[1], args[2], args[3]);
 			return 0;
 		case "classnames":
 			DumpClassNames(args[1]);
@@ -157,6 +160,68 @@ static void DumpTsv(string versionText, string materialsOut, string shadersOut)
 	}
 	File.WriteAllLines(materialsOut, materials);
 	File.WriteAllLines(shadersOut, shaders);
+}
+
+static void DumpSpriteTextureTsv(string versionText, string spritesOut, string texturesOut)
+{
+	TpkEngineAssetsBlob blob = LoadBlob();
+	UnityVersion version = UnityVersion.Parse(versionText);
+	// Same band selection as DumpBandJson.
+	int index;
+	if (version <= blob.Data[0].Key)
+	{
+		index = 0;
+	}
+	else
+	{
+		index = blob.Data.Count - 1;
+		for (int i = 1; i < blob.Data.Count; i++)
+		{
+			if (version <= blob.Data[i].Key)
+			{
+				index = i - 1;
+				break;
+			}
+		}
+	}
+	using JsonDocument document = JsonDocument.Parse(blob.Data[index].Value);
+	List<string> sprites = new();
+	List<string> textures = new();
+	foreach (string section in new[] { "DefaultResources", "ExtraResources" })
+	{
+		string kind = section == "DefaultResources" ? "D" : "F";
+		if (!document.RootElement.TryGetProperty(section, out JsonElement resources))
+		{
+			continue;
+		}
+		foreach (JsonProperty entry in resources.EnumerateObject())
+		{
+			JsonElement value = entry.Value;
+			string type = value.GetProperty("$type").GetString() ?? "";
+			string name = value.TryGetProperty("Name", out JsonElement nameElement)
+				? nameElement.GetString() ?? ""
+				: "";
+			if (type == "Sprite")
+			{
+				string texture = value.TryGetProperty("Texture", out JsonElement textureElement)
+					? textureElement.GetString() ?? ""
+					: "";
+				sprites.Add($"{entry.Name}|{kind}|{name}|{texture}");
+			}
+			else if (type == "Texture2D")
+			{
+				string width = value.TryGetProperty("Width", out JsonElement widthElement)
+					? widthElement.GetInt32().ToString()
+					: "";
+				string height = value.TryGetProperty("Height", out JsonElement heightElement)
+					? heightElement.GetInt32().ToString()
+					: "";
+				textures.Add($"{entry.Name}|{kind}|{name}|{width}|{height}");
+			}
+		}
+	}
+	File.WriteAllLines(spritesOut, sprites);
+	File.WriteAllLines(texturesOut, textures);
 }
 
 static void DumpClassNames(string output)

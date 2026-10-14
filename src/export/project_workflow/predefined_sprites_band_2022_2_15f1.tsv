@@ -1,0 +1,12 @@
+# EngineAssetsTpk band 2022.2.15f1 Sprite name and resolved Texture-name signatures; source resource order.
+# Probe-verified byte-identical to the 2022.2.15f1 band rows (spritetextsv requests for 2022.3.6f1 and 2022.3.22f1).
+# Probed with: dotnet run --project tools/probes/engine-assets/EngineAssetsProbe.csproj --configuration Release -p:ReferenceRoot=<isolated build> -- spritetextsv <request-version> <spritesOut> <texturesOut>
+10404|F|UnitySplash-Light|UnitySplash-Light
+10901|F|Checkmark|Checkmark
+10905|F|UISprite|UISprite
+10907|F|Background|Background
+10911|F|InputFieldBackground|InputFieldBackground
+10913|F|Knob|Knob
+10915|F|DropdownArrow|DropdownArrow
+10917|F|UIMask|UIMask
+20001|F|UnitySplash-Dark|UnitySplash-Dark

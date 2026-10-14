@@ -1,0 +1,57 @@
+# EngineAssetsTpk band 2022.3.11f1 Texture2D name, width, and height signatures; source resource order.
+# Probe-verified byte-identical to the 2022.2.15f1 band rows (spritetextsv requests for 2022.3.6f1 and 2022.3.22f1).
+# Probed with: dotnet run --project tools/probes/engine-assets/EngineAssetsProbe.csproj --configuration Release -p:ReferenceRoot=<isolated build> -- spritetextsv <request-version> <spritesOut> <texturesOut>
+10001|D|Soft|128|128
+10103|D|Font Texture|0|0
+10400|D|UnityWatermark-small|128|58
+10401|D|EscToExit_back|74|71
+10402|D|EscToExit_Text|267|20
+10406|D|UnityWatermark-trial-big|512|94
+10407|D|UnityWatermark-trial|76|14
+10408|D|UnityWatermark-beta|127|17
+10409|D|UnityWatermark-edu|148|17
+10410|D|UnityWatermark-dev|115|17
+10411|D|WarningSign|64|64
+10413|D|UnityWatermark-proto|87|13
+10414|D|UnityWatermarkPlugin-beta|66|17
+11001|D|box|12|12
+11002|D|button active|12|12
+11003|D|button hover|12|12
+11004|D|button on hover|12|12
+11005|D|button on|12|12
+11006|D|button|12|12
+11007|D|horizontal scrollbar thumb|12|12
+11008|D|horizontal scrollbar|18|15
+11009|D|horizontalslider|8|7
+11010|D|slider thumb active|8|12
+11011|D|slider thumb|8|12
+11012|D|slidert humb hover|8|12
+11013|D|toggle active|14|14
+11014|D|toggle hover|14|14
+11015|D|toggle on hover|14|14
+11016|D|toggle on|14|14
+11017|D|toggle on active|14|14
+11018|D|toggle|14|14
+11019|D|vertical scrollbar thumb|12|12
+11020|D|vertical scrollbar|15|18
+11021|D|verticalslider|7|8
+11022|D|window on|17|27
+11023|D|window|17|27
+11024|D|textfield|12|12
+11025|D|textfield on|12|12
+11026|D|textfield hover|12|12
+15000|D|UnitySplash-HolographicTrackingLoss|32|32
+10300|F|Default-Particle|64|64
+10305|F|Default-Checker|64|64
+10307|F|Default-ParticleSystem|64|64
+10309|F|Default-Checker-Gray|64|64
+10403|F|UnitySplash-Light|2048|1024
+10900|F|Checkmark|64|64
+10904|F|UISprite|32|32
+10906|F|Background|32|32
+10910|F|InputFieldBackground|32|32
+10912|F|Knob|64|64
+10914|F|DropdownArrow|64|64
+10916|F|UIMask|32|32
+20000|F|UnitySplash-Dark|2048|1024
+20100|F|Invalidated|64|8

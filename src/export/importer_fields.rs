@@ -293,7 +293,7 @@ pub fn select_prefab_importer(is_prefab_marker: bool) -> PrefabImporterBranch {
 
 /// Class ID of Sprite objects whose render data can point at a texture.
 const SPRITE_OBJECT_CLASS_ID: i32 = 213;
-type SpriteRenderDataTexturePointer = (String, i32, i64);
+pub(crate) type SpriteRenderDataTexturePointer = (String, i32, i64);
 
 /// Collect `AddSprites` caller facts for workspace sprites associated with one texture.
 ///
@@ -843,7 +843,7 @@ fn record_sprite_texture_association(
     Ok(())
 }
 
-fn sprite_render_data_texture_pointer(
+pub(crate) fn sprite_render_data_texture_pointer(
     root: &SerializedValue,
 ) -> Result<Option<SpriteRenderDataTexturePointer>, Box<dyn Error>> {
     let render_data = strict_required_sprite_field(root, "m_RD")?;

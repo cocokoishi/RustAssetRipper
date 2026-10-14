@@ -12,6 +12,14 @@ const PREDEFINED_ENGINE_SHADERS_BAND_2022_2_15F1: &str =
     include_str!("predefined_shaders_band_2022_2_15f1.tsv");
 const PREDEFINED_ENGINE_SHADERS_BAND_2022_3_11F1: &str =
     include_str!("predefined_shaders_band_2022_3_11f1.tsv");
+const PREDEFINED_ENGINE_SPRITES_BAND_2022_2_15F1: &str =
+    include_str!("predefined_sprites_band_2022_2_15f1.tsv");
+const PREDEFINED_ENGINE_SPRITES_BAND_2022_3_11F1: &str =
+    include_str!("predefined_sprites_band_2022_3_11f1.tsv");
+const PREDEFINED_ENGINE_TEXTURES_BAND_2022_2_15F1: &str =
+    include_str!("predefined_textures_band_2022_2_15f1.tsv");
+const PREDEFINED_ENGINE_TEXTURES_BAND_2022_3_11F1: &str =
+    include_str!("predefined_textures_band_2022_3_11f1.tsv");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PredefinedEngineAssetTarget {
@@ -229,6 +237,231 @@ fn predefined_engine_material_target(
         return Ok(Some(PredefinedEngineAssetTarget { file_id, guid }));
     }
     Ok(None)
+}
+
+/// Sprite identity rows for an `EngineAssetsTpk` band key.
+///
+/// Only probed bands have embedded rows; anything else selects nothing. Each
+/// row is `fileID|resourceKind|spriteName|textureName`, mirroring the frozen
+/// `SpriteKey(Name, TextureName)` match.
+fn predefined_engine_sprite_rows(band: &str) -> Option<&'static str> {
+    match band {
+        "2022.2.15f1" => Some(PREDEFINED_ENGINE_SPRITES_BAND_2022_2_15F1),
+        "2022.3.11f1" => Some(PREDEFINED_ENGINE_SPRITES_BAND_2022_3_11F1),
+        _ => None,
+    }
+}
+
+/// Texture2D identity rows for an `EngineAssetsTpk` band key.
+///
+/// Only probed bands have embedded rows; anything else selects nothing. Each
+/// row is `fileID|resourceKind|textureName|width|height`, mirroring the frozen
+/// `Texture2DKey(Name, Width, Height)` match.
+fn predefined_engine_texture_rows(band: &str) -> Option<&'static str> {
+    match band {
+        "2022.2.15f1" => Some(PREDEFINED_ENGINE_TEXTURES_BAND_2022_2_15F1),
+        "2022.3.11f1" => Some(PREDEFINED_ENGINE_TEXTURES_BAND_2022_3_11F1),
+        _ => None,
+    }
+}
+
+fn predefined_engine_guid_words(
+    table_kind: &str,
+    line_index: usize,
+    resource_kind: &str,
+) -> Result<[u8; 16], Box<dyn Error>> {
+    let words = match resource_kind {
+        "D" => crate::export::guid_policy::ENGINE_DEFAULT_RESOURCES_GUID_WORDS,
+        "F" => crate::export::guid_policy::ENGINE_BUILTIN_EXTRA_GUID_WORDS,
+        other => {
+            return Err(invalid_project(format!(
+                "predefined {table_kind} table row {} has unknown resource kind {other:?}",
+                line_index + 1
+            )));
+        }
+    };
+    let mut guid = [0; 16];
+    for (index, word) in words.iter().enumerate() {
+        guid[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    Ok(guid)
+}
+
+fn predefined_engine_sprite_target(
+    name: &str,
+    texture_name: Option<&str>,
+    unity_version: Option<&str>,
+) -> Result<Option<PredefinedEngineAssetTarget>, Box<dyn Error>> {
+    let Some(band) = select_engine_assets_band(unity_version) else {
+        return Ok(None);
+    };
+    let Some(table) = predefined_engine_sprite_rows(band) else {
+        return Ok(None);
+    };
+    let texture_name = texture_name.unwrap_or_default();
+    for (line_index, line) in table.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut fields = line.splitn(4, '|');
+        let Some(file_id_text) = fields.next() else {
+            return Err(invalid_project(format!(
+                "predefined Sprite table row {} has no file ID",
+                line_index + 1
+            )));
+        };
+        let Some(resource_kind) = fields.next() else {
+            return Err(invalid_project(format!(
+                "predefined Sprite table row {} has no resource kind",
+                line_index + 1
+            )));
+        };
+        let Some(candidate_name) = fields.next() else {
+            return Err(invalid_project(format!(
+                "predefined Sprite table row {} has no name",
+                line_index + 1
+            )));
+        };
+        let Some(candidate_texture) = fields.next() else {
+            return Err(invalid_project(format!(
+                "predefined Sprite table row {} has no Texture name",
+                line_index + 1
+            )));
+        };
+        if candidate_name != name || candidate_texture != texture_name {
+            continue;
+        }
+        let file_id = file_id_text.parse::<i64>().map_err(|error| {
+            invalid_project(format!(
+                "predefined Sprite table row {} has an invalid file ID: {error}",
+                line_index + 1
+            ))
+        })?;
+        let guid = predefined_engine_guid_words("Sprite", line_index, resource_kind)?;
+        return Ok(Some(PredefinedEngineAssetTarget { file_id, guid }));
+    }
+    Ok(None)
+}
+
+fn predefined_engine_texture_target(
+    name: &str,
+    width: i32,
+    height: i32,
+    unity_version: Option<&str>,
+) -> Result<Option<PredefinedEngineAssetTarget>, Box<dyn Error>> {
+    let Some(band) = select_engine_assets_band(unity_version) else {
+        return Ok(None);
+    };
+    let Some(table) = predefined_engine_texture_rows(band) else {
+        return Ok(None);
+    };
+    for (line_index, line) in table.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut fields = line.splitn(5, '|');
+        let Some(file_id_text) = fields.next() else {
+            return Err(invalid_project(format!(
+                "predefined Texture table row {} has no file ID",
+                line_index + 1
+            )));
+        };
+        let Some(resource_kind) = fields.next() else {
+            return Err(invalid_project(format!(
+                "predefined Texture table row {} has no resource kind",
+                line_index + 1
+            )));
+        };
+        let Some(candidate_name) = fields.next() else {
+            return Err(invalid_project(format!(
+                "predefined Texture table row {} has no name",
+                line_index + 1
+            )));
+        };
+        let row_width = fields.next().and_then(|text| text.parse::<i32>().ok());
+        let row_height = fields.next().and_then(|text| text.parse::<i32>().ok());
+        if candidate_name != name || row_width != Some(width) || row_height != Some(height) {
+            continue;
+        }
+        let file_id = file_id_text.parse::<i64>().map_err(|error| {
+            invalid_project(format!(
+                "predefined Texture table row {} has an invalid file ID: {error}",
+                line_index + 1
+            ))
+        })?;
+        let guid = predefined_engine_guid_words("Texture", line_index, resource_kind)?;
+        return Ok(Some(PredefinedEngineAssetTarget { file_id, guid }));
+    }
+    Ok(None)
+}
+
+/// Lenient `m_Name` read for predefined engine-asset matching.
+///
+/// Missing fields, wrong types, and non-UTF-8 bytes select no redirect rather
+/// than failing the export: the redirect is opportunistic and the asset keeps
+/// its ordinary route when identity cannot be established.
+fn predefined_engine_object_name(root: &SerializedValue) -> Option<String> {
+    let value = root.unique_field_in_base_chain("m_Name").ok()??;
+    match value {
+        SerializedValue::StringBytes(bytes) | SerializedValue::Bytes(bytes) => {
+            std::str::from_utf8(bytes).ok().map(str::to_owned)
+        }
+        _ => None,
+    }
+}
+
+fn predefined_engine_texture_dimensions(root: &SerializedValue) -> Option<(i32, i32)> {
+    let width = root.unique_field_in_base_chain("m_Width").ok()??;
+    let height = root.unique_field_in_base_chain("m_Height").ok()??;
+    let SerializedValue::I32(width) = width else {
+        return None;
+    };
+    let SerializedValue::I32(height) = height else {
+        return None;
+    };
+    Some((*width, *height))
+}
+
+/// Resolves a Sprite render-data texture pointer to the referenced Texture2D
+/// object, mirroring the frozen `sprite.TryGetTexture` gate: a null pointer
+/// yields a lookup with no texture name (which can still match name-only
+/// rows), while a non-null but unresolvable pointer selects no redirect at
+/// all. The outer `None` means "do not consult the table".
+fn resolve_sprite_texture_name(
+    field_path: &str,
+    file_id: i32,
+    path_id: i64,
+    source: &WorkspaceObject,
+    objects: &ObjectWorkspace,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+) -> Result<Option<Option<String>>, Box<dyn Error>> {
+    let mut matching_edges = reference_graph
+        .references_from_object(source.file_index, source.object_index)
+        .filter(|edge| {
+            edge.field_path == field_path && edge.file_id == file_id && edge.path_id == path_id
+        });
+    let Some(edge) = matching_edges.next() else {
+        return Ok(None);
+    };
+    match &edge.resolution {
+        MultiFilePPtrResolution::Object {
+            target_file_index,
+            target_object_index,
+        } if reference_graph.object_class_id(*target_file_index, *target_object_index)
+            == Some(crate::export::res_wiring::TEXTURE2D_CLASS_ID) =>
+        {
+            let Some(target) = objects.get(*target_file_index, *target_object_index) else {
+                return Ok(None);
+            };
+            let Ok(payload) = &target.payload else {
+                return Ok(None);
+            };
+            Ok(Some(predefined_engine_object_name(&payload.root)))
+        }
+        _ => Ok(None),
+    }
 }
 
 fn resolved_material_shader_name(
@@ -713,7 +946,71 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
             } else {
                 None
             };
-            let predefined_engine_target = predefined_engine_shader.or(predefined_engine_material);
+            let predefined_engine_sprite = if source_engine_guid.is_none()
+                && class_id == crate::resources::sprite::SPRITE_CLASS_ID
+            {
+                if let Some(payload) = payload {
+                    let name = predefined_engine_object_name(&payload.root);
+                    // The redirect decision is opportunistic: unreadable
+                    // render data keeps the ordinary sprite route, so strict
+                    // sprite reads still fail loudly in their own path. A null
+                    // texture pointer still consults the table with no texture
+                    // name; only an unresolvable non-null pointer skips it.
+                    let texture_pointer =
+                        crate::export::importer_fields::sprite_render_data_texture_pointer(
+                            &payload.root,
+                        );
+                    let texture_name = match texture_pointer {
+                        Ok(None) => Some(None),
+                        Ok(Some((field_path, file_id, path_id))) => resolve_sprite_texture_name(
+                            &field_path,
+                            file_id,
+                            path_id,
+                            object,
+                            objects,
+                            reference_graph,
+                        )?,
+                        Err(_) => None,
+                    };
+                    match (name, texture_name) {
+                        (Some(name), Some(texture_name)) => predefined_engine_sprite_target(
+                            &name,
+                            texture_name.as_deref(),
+                            file.metadata.prefix.unity_version_text.as_deref(),
+                        )?,
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let predefined_engine_texture = if source_engine_guid.is_none()
+                && class_id == crate::export::res_wiring::TEXTURE2D_CLASS_ID
+            {
+                if let Some(payload) = payload {
+                    let name = predefined_engine_object_name(&payload.root);
+                    let dimensions = predefined_engine_texture_dimensions(&payload.root);
+                    match (name, dimensions) {
+                        (Some(name), Some((width, height))) => predefined_engine_texture_target(
+                            &name,
+                            width,
+                            height,
+                            file.metadata.prefix.unity_version_text.as_deref(),
+                        )?,
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let predefined_engine_target = predefined_engine_shader
+                .or(predefined_engine_material)
+                .or(predefined_engine_sprite)
+                .or(predefined_engine_texture);
             let engine_guid =
                 source_engine_guid.or_else(|| predefined_engine_target.map(|target| target.guid));
             let audio_view = if source_engine_guid.is_none()
@@ -1693,7 +1990,9 @@ fn font_collection_subasset<'object>(
 mod tests {
     use super::{
         predefined_engine_material_rows, predefined_engine_material_target,
-        predefined_engine_shader_target, project_object_name, select_engine_assets_band,
+        predefined_engine_shader_target, predefined_engine_sprite_rows,
+        predefined_engine_sprite_target, predefined_engine_texture_rows,
+        predefined_engine_texture_target, project_object_name, select_engine_assets_band,
         should_report_unported_texture_route, texture_array_project_route_supported,
     };
     use crate::export::project_workflow::SHADER_CLASS_ID;
@@ -1967,6 +2266,127 @@ mod tests {
         assert_eq!(
             project_object_name(SHADER_CLASS_ID, None, Some(&shader)).as_deref(),
             Some("Hidden/lilToonOutline")
+        );
+    }
+
+    #[test]
+    fn predefined_sprite_and_texture_bands_stay_byte_identical() {
+        // Probe-verified fact (isolated engine-assets TPK dump): the two embedded
+        // 2022.3 bands carry identical Sprite and Texture2D rows. If a future probe
+        // refresh diverges, the band mapping above must gain independent tables.
+        fn data_rows(table: &str) -> Vec<&str> {
+            table
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                .collect()
+        }
+        assert_eq!(
+            data_rows(predefined_engine_sprite_rows("2022.2.15f1").unwrap()),
+            data_rows(predefined_engine_sprite_rows("2022.3.11f1").unwrap())
+        );
+        assert_eq!(
+            data_rows(predefined_engine_texture_rows("2022.2.15f1").unwrap()),
+            data_rows(predefined_engine_texture_rows("2022.3.11f1").unwrap())
+        );
+    }
+
+    fn builtin_extra_guid() -> [u8; 16] {
+        let mut guid = [0; 16];
+        for (index, word) in crate::export::guid_policy::ENGINE_BUILTIN_EXTRA_GUID_WORDS
+            .iter()
+            .enumerate()
+        {
+            guid[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        guid
+    }
+
+    #[test]
+    fn unity_2022_3_predefined_sprite_matches_name_and_texture_name() {
+        // 2022.3.22f1 selects the 2022.3.11f1 band, whose builtin-extra rows carry
+        // the default UI sprites keyed by sprite and texture name.
+        let target = predefined_engine_sprite_target(
+            "InputFieldBackground",
+            Some("InputFieldBackground"),
+            Some("2022.3.22f1"),
+        )
+        .unwrap()
+        .expect("the 2022.3.11f1 engine-assets band contains the UI input sprite");
+        assert_eq!(target.file_id, 10911);
+        assert_eq!(target.guid, builtin_extra_guid());
+        // The texture name is part of the baseline cache identity.
+        assert_eq!(
+            predefined_engine_sprite_target(
+                "InputFieldBackground",
+                Some("Checkmark"),
+                Some("2022.3.22f1")
+            )
+            .unwrap(),
+            None,
+            "a mismatched texture name must not redirect"
+        );
+        assert_eq!(
+            predefined_engine_sprite_target("InputFieldBackground", None, Some("2022.3.22f1"))
+                .unwrap(),
+            None,
+            "a null texture must not match rows carrying a texture name"
+        );
+        assert_eq!(
+            predefined_engine_sprite_target(
+                "NoSuchSprite",
+                Some("NoSuchSprite"),
+                Some("2022.3.22f1")
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            predefined_engine_sprite_target(
+                "InputFieldBackground",
+                Some("InputFieldBackground"),
+                Some("2021.3.0f1")
+            )
+            .unwrap(),
+            None,
+            "a version selecting an unprobed band resolves nothing"
+        );
+        assert_eq!(
+            predefined_engine_sprite_target(
+                "InputFieldBackground",
+                Some("InputFieldBackground"),
+                None
+            )
+            .unwrap(),
+            None,
+            "a missing version selects no engine-assets band"
+        );
+    }
+
+    #[test]
+    fn unity_2022_3_predefined_texture_matches_name_and_dimensions() {
+        let target =
+            predefined_engine_texture_target("Default-Particle", 64, 64, Some("2022.3.22f1"))
+                .unwrap()
+                .expect("the 2022.3.11f1 engine-assets band contains Default-Particle");
+        assert_eq!(target.file_id, 10300);
+        assert_eq!(target.guid, builtin_extra_guid());
+        // Width and height are part of the baseline cache identity.
+        assert_eq!(
+            predefined_engine_texture_target("Default-Particle", 32, 64, Some("2022.3.22f1"))
+                .unwrap(),
+            None,
+            "mismatched dimensions must not redirect"
+        );
+        assert_eq!(
+            predefined_engine_texture_target("NoSuchTexture", 64, 64, Some("2022.3.22f1")).unwrap(),
+            None
+        );
+        assert_eq!(
+            predefined_engine_texture_target("Default-Particle", 64, 64, Some("2019.4.40f1"))
+                .unwrap(),
+            None,
+            "a version selecting an unprobed band resolves nothing"
         );
     }
 }

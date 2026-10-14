@@ -1,5 +1,11 @@
 # RustAssetRipper hand-off — 2026-10-10
 
+## Latest current checkpoint — 2026-10-14 (sprite redirects fixed)
+
+- Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public (only class IDs/counts/field names in docs; audit outputs quarantined).
+- Sprite/texture engine redirects implemented with probe-generated bands; world re-audit clean except 4 GameObject static-flags diffs. Next blocker: mirror the frozen editor-format static rule (non-default batch info or non-empty subset indices marks the GameObject all-static).
+- Local checks: `git diff --check` exit 0; cargo check + 11/11 module tests green. Full validation via GitHub Actions after push.
+
 ## Latest current checkpoint — 2026-10-14 (semantic audit, 1 diff left)
 
 - Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public (audit JSON stays quarantined in gitignored scratch; only counts/class IDs in docs).
