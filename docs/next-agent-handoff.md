@@ -1,5 +1,11 @@
 # RustAssetRipper hand-off — 2026-10-10
 
+## Latest current checkpoint — 2026-10-14 (hostile Ogg regression)
+
+- Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Phase 1 open, Phase 2 locked; no user input, Unity, or UABEA used.
+- New test pins the Ogg converter against truncations and page corruptions: no panic allowed; only loud errors, documented empty output, or well-formed WAV. If CI finds a panic or malformed WAV, the reader path needs containment or a header fix next.
+- Local checks: `git diff --check` exit 0; single-file `rustfmt --check` clean. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push.
+
 ## Latest current checkpoint — 2026-10-14 (hostile Vorbis packets, no panic)
 
 - Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Phase 1 open, Phase 2 locked; no user input, Unity, or UABEA used.

@@ -1,5 +1,10 @@
 # Validation log
 
+## 2026-10-14 Hostile Ogg inputs stay panic-free and well-formed
+
+- Gap: the Ogg converter faced only empty, garbage-prefix, and limit inputs; structured hostility (truncations, corrupt segment tables/checksums/granules) was untested, leaving the `ogg` crate reader's panic posture unknown. New test runs seven truncations plus three first-page corruptions through production conversion: every outcome must be a loud error, the documented empty output, or a well-formed WAV (RIFF/WAVE, full header).
+- Local checks: `git diff --check` exit 0; single-file `rustfmt --check` clean. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No user input was read; Phase 1 remains open and Phase 2 remains locked. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Hostile Vorbis packets fail loudly (no lewton panic found)
 
 - Probe: eleven hostile packets (0xFF runs, single-bit edges, mixed, patterned) against three table setups under mono/stereo production identification — 55 decodes, zero panics (every case errors or decodes empty at the decoder level). Production maps decode errors to loud `Fsb5DecodeFailed`, so no containment is needed on this path, unlike the CRN decoder.

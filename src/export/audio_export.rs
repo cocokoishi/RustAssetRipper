@@ -1632,6 +1632,38 @@ mod tests {
     }
 
     #[test]
+    fn hostile_ogg_inputs_never_panic_and_stay_well_formed() {
+        // Truncations and first-page corruptions of the fixture Ogg must
+        // never panic: every outcome is either a loud decode error, the
+        // documented empty output, or a well-formed WAV.
+        let ogg = include_bytes!("ogg_to_wav_test_fixture.ogg");
+        let mut hostile: Vec<Vec<u8>> = Vec::new();
+        for cut in [0usize, 3, 27, 28, 40, 100, 1000] {
+            hostile.push(ogg[..cut.min(ogg.len())].to_vec());
+        }
+        let mut segments = ogg.to_vec();
+        segments[26] = 0xFF;
+        hostile.push(segments);
+        let mut checksum = ogg.to_vec();
+        checksum[22..26].copy_from_slice(&[0x12, 0x34, 0x56, 0x78]);
+        hostile.push(checksum);
+        let mut granule = ogg.to_vec();
+        granule[6..14].copy_from_slice(&[0xFF; 8]);
+        hostile.push(granule);
+        for input in &hostile {
+            match super::convert_ogg_to_wav_with_limit(input, 1024 * 1024) {
+                Err(_) => {}
+                Ok(wav) if wav.is_empty() => {}
+                Ok(wav) => assert!(
+                    wav.len() >= 58 && &wav[..4] == b"RIFF" && &wav[8..12] == b"WAVE",
+                    "hostile input produced a malformed WAV of {} bytes",
+                    wav.len()
+                ),
+            }
+        }
+    }
+
+    #[test]
     fn export_format_support_matches_is_supported_export_format() {
         assert!(is_supported_export_format(AudioExportFormat::Default));
         assert!(is_supported_export_format(AudioExportFormat::PreferWav));
