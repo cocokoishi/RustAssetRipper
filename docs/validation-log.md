@@ -4,6 +4,7 @@
 
 - Animator/Light/Constraint editor layouts carry single defaulted fields (plus one release-only removal). Fixed with a table-driven backfill (unit-tested). Formatting and Clippy (warnings-denied locally) clean; release rebuilt.
 - Fresh replay plus re-audit: real-diff classes 6 to 3 (95/108/1773428102 resolve fully) with zero unpaired files and no regressions.
+- Actions run `38621924925` is fully green on both platforms (class editor field deltas), including warnings-denied Clippy, the release build, changed-line formatting, and the public-repository hygiene job.
 - Local checks: `git diff --check` exit 0; `cargo check`/`cargo clippy` clean; module tests green. Full validation via GitHub Actions after push. Sample input read-only; outputs quarantined. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 Renderer GI fields fixed; 6 classes remain
