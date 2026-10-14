@@ -1,5 +1,10 @@
 # Validation log
 
+## 2026-10-14 AV04 converges on current binary
+
+- Fresh replay plus re-audit on the 2022.3 avatar (1952 objects): 596 paired files, zero unpaired; zero real-diff classes except the Avatar doc, proven content-identical modulo style (strict token equality over 73448 chars). No product changes needed.
+- Local checks: replay exit 0; audit clean. Sample input read-only; outputs quarantined. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Empty-item spacing fixed; AV05 converges
 
 - Empty block-sequence items keep the baseline trailing space (mapping empties still drop it); regression test added. Formatting and Clippy (warnings-denied locally) clean; release rebuilt.
