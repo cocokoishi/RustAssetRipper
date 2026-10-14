@@ -3,6 +3,7 @@
 ## 2026-10-14 Recurring raw-type IDs identified as engine classes (static)
 
 - The large raw-type IDs recurring across samples resolve through the dispatch fixture to ordinary Unity engine classes: LightingSettings_2020 (850595691), ParentConstraint_2018 (1773428102), PositionConstraint_2018 (1818360608), RotationConstraint_2018 (1818360609), all with TPK rows. The "unknown type" observation is closed with no sample reads; ledger notes updated.
+- Actions run `38546519154` is fully green on both platforms (docs-only change), including the public-repository hygiene job.
 - Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 Twelve baselines; unknown raw-type IDs recur across samples
