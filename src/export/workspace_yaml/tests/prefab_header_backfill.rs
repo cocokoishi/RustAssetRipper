@@ -1,6 +1,7 @@
 use super::super::object_conversion::{
-    apply_game_object_header_backfill, apply_generic_header_backfill,
-    apply_keyframe_tangent_mode_backfill, prefab_header_backfill_version,
+    apply_custom_data_label_backfill, apply_game_object_header_backfill,
+    apply_generic_header_backfill, apply_keyframe_tangent_mode_backfill,
+    prefab_header_backfill_version,
 };
 use crate::export::unity_yaml::{
     UnityYamlDocument, UnityYamlMappingStyle, UnityYamlNode, UnityYamlScalar, UnityYamlWriteLimits,
@@ -180,5 +181,46 @@ fn tangent_mode_backfill_targets_curve_keyframes_only() {
         output.match_indices("tangentMode").count(),
         2,
         "exactly the missing keyframe gains the default"
+    );
+}
+
+#[test]
+fn custom_data_labels_follow_present_stream_fields_only() {
+    let mut body = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    body.insert_field("mode0", signed(1)).unwrap();
+    body.insert_field("color0", signed(0)).unwrap();
+    body.insert_field("vector0_0", signed(0)).unwrap();
+    body.insert_field("colorful", signed(0)).unwrap();
+    body.insert_field("vector0", signed(0)).unwrap();
+    let mut document = UnityYamlDocument::object(198, 45, "ParticleSystem", body, false)
+        .expect("test ParticleSystem document builds");
+    apply_custom_data_label_backfill(&mut document);
+    // A second pass is a no-op: insertion skips labels already written.
+    apply_custom_data_label_backfill(&mut document);
+    let output = render(&document);
+    key_order(
+        &output,
+        &[
+            "color0",
+            "colorLabel0:",
+            "vector0_0",
+            "vectorLabel0_0:",
+            "colorful",
+            "vector0",
+        ],
+    );
+    assert_eq!(
+        output.match_indices("colorLabel0").count(),
+        1,
+        "the color label is not duplicated"
+    );
+    assert_eq!(
+        output.match_indices("vectorLabel0_0").count(),
+        1,
+        "the vector label is not duplicated"
+    );
+    assert!(
+        !output.contains("colorfulLabel"),
+        "non-indexed fields gain no label"
     );
 }

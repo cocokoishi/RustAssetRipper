@@ -1,5 +1,9 @@
 # Source behavior and differential findings
 
+## DIFF-CUSTOMDATA-LABELS-2018-001 — editor-default CustomData labels (fixed)
+
+ParticleSystem CustomDataModule documents differed by ten missing empty-string labels (`colorLabelN` after each `colorN`, `vectorLabelN_M` after each `vectorN_M`): the serialized layout carries the indexed fields without labels while the reference editor layout annotates each one. Fixed with a document-level backfill following present fields only, pinned by a unit test. Re-audit: class 198 resolves fully with no regressions. Status: fixed and validated on the reporting sample.
+
 ## DIFF-CURVE-TANGENTMODE-2018-001 — editor-default keyframe tangentMode (fixed)
 
 AudioSource and ParticleSystem curves differed by one field: the 2018.4 Keyframe v3 serializes seven fields without `tangentMode`, while the reference editor layout carries it and exports default 0 (all 127 reference values are 0; stride math rules out data presence). Fixed with a document-level backfill inserting `tangentMode: 0` before `weightedMode` in `m_Curve` keyframes when no editor tree was applied, pinned by a unit test. MonoBehaviour documents are excluded: their curves serialize through managed layouts without the slot (proven by a 114 doc the first pass broke and the gate restored). Re-audit: class 82 resolves fully with no regressions. Status: fixed and validated on the reporting sample.

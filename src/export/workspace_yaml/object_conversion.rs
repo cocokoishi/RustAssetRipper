@@ -947,10 +947,12 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
                 apply_generic_header_backfill(&mut document)
             };
             backfill.map_err(|message| scene_editor_format_error(source, class_id, message))?;
-            // MonoBehaviour curves serialize through managed layouts without a
-            // tangentMode slot, so the editor default must not be added there.
+            // MonoBehaviour curves and fields serialize through managed layouts
+            // without these editor slots, so the editor defaults must not be
+            // added there.
             if class_id != 114 {
                 apply_keyframe_tangent_mode_backfill(&mut document);
+                apply_custom_data_label_backfill(&mut document);
             }
         }
         Ok(Some(document))
@@ -1894,6 +1896,86 @@ pub(super) fn insert_editor_headers(entries: &mut Vec<(UnityYamlNode, UnityYamlN
             entries.insert(insert_at, (yaml_plain_node(name), value));
             insert_at += 1;
         }
+    }
+}
+
+/// Inserts the editor-default custom-data labels (`colorLabelN`,
+/// `vectorLabelN_M`) after the particle CustomData stream fields they annotate.
+///
+/// The serialized CustomData layout carries the indexed `colorN`/`vectorN_M`
+/// fields without labels; the reference editor layout carries empty-string
+/// labels after each one. Objects converted through an editor TypeTree gain
+/// them from editor defaults; versions without a ported editor tree need them
+/// here. Insertion only follows fields already present and skips labels
+/// already written, so other shapes select no completion.
+pub(super) fn apply_custom_data_label_backfill(document: &mut UnityYamlDocument) {
+    let UnityYamlNodeKind::Mapping { entries, .. } = &mut document.root.kind else {
+        return;
+    };
+    let Some((_, body)) = entries.first_mut() else {
+        return;
+    };
+    backfill_labels_in_node(body);
+}
+
+fn custom_data_label_for(field: &str) -> Option<String> {
+    if let Some(stream) = field.strip_prefix("color") {
+        if !stream.is_empty() && stream.bytes().all(|b| b.is_ascii_digit()) {
+            return Some(format!("colorLabel{stream}"));
+        }
+    }
+    if let Some(rest) = field.strip_prefix("vector") {
+        if let Some((stream, index)) = rest.split_once('_') {
+            if !stream.is_empty()
+                && !index.is_empty()
+                && stream.bytes().all(|b| b.is_ascii_digit())
+                && index.bytes().all(|b| b.is_ascii_digit())
+            {
+                return Some(format!("vectorLabel{stream}_{index}"));
+            }
+        }
+    }
+    None
+}
+
+fn backfill_labels_in_node(node: &mut UnityYamlNode) {
+    match &mut node.kind {
+        UnityYamlNodeKind::Mapping { entries, .. } => {
+            let mut index = 0;
+            while index < entries.len() {
+                let name = match &entries[index].0.kind {
+                    UnityYamlNodeKind::Scalar(UnityYamlScalar::PlainString(name)) => name.clone(),
+                    _ => {
+                        index += 1;
+                        continue;
+                    }
+                };
+                match custom_data_label_for(&name) {
+                    Some(label) if yaml_field_index(entries, &label).is_none() => {
+                        entries.insert(
+                            index + 1,
+                            (
+                                yaml_plain_node(&label),
+                                UnityYamlNode::plain_string(String::new()),
+                            ),
+                        );
+                        index += 2;
+                    }
+                    _ => {
+                        index += 1;
+                    }
+                }
+            }
+            for (_, value) in entries.iter_mut() {
+                backfill_labels_in_node(value);
+            }
+        }
+        UnityYamlNodeKind::Sequence { items, .. } => {
+            for item in items.iter_mut() {
+                backfill_labels_in_node(item);
+            }
+        }
+        UnityYamlNodeKind::Scalar(_) => {}
     }
 }
 
