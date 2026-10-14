@@ -1,5 +1,11 @@
 # RustAssetRipper hand-off — 2026-10-10
 
+## Latest current checkpoint — 2026-10-14 (renderer GI fixed)
+
+- Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public (only class IDs/counts/field names in docs; audit outputs quarantined).
+- VRC-AV03 r16: real-diff 9 to 6; zero unpaired; binaries clean. Next: 91 extra lines, class extras (43 m_MeshOptimized, 95 m_WarningMessage, 108 shadow fields, 1773428102 m_IsLocked), 90 flow rule.
+- Local checks: `git diff --check` exit 0; cargo check/clippy (-D warnings locally) + module tests green. Full validation via GitHub Actions after push.
+
 ## Latest current checkpoint — 2026-10-14 (CustomData labels fixed)
 
 - Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public (only class IDs/counts/field names in docs; audit outputs quarantined).

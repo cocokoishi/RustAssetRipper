@@ -1,5 +1,9 @@
 # Source behavior and differential findings
 
+## DIFF-RENDERER-GI-2018-001 — renderer lightmap editor fields (fixed)
+
+MeshRenderer, SkinnedMeshRenderer, and ParticleSystemRenderer documents differed by ten missing canonical lightmap fields plus release-only baked indices the reference editor layout omits. Fixed with a renderer-family backfill (insert missing with canonical defaults, remove baked indices/additional streams, never rewrite source values), pinned by a unit test. Re-audit: classes 23/137/199 resolve fully with no regressions. Status: fixed and validated on the reporting sample.
+
 ## DIFF-CUSTOMDATA-LABELS-2018-001 — editor-default CustomData labels (fixed)
 
 ParticleSystem CustomDataModule documents differed by ten missing empty-string labels (`colorLabelN` after each `colorN`, `vectorLabelN_M` after each `vectorN_M`): the serialized layout carries the indexed fields without labels while the reference editor layout annotates each one. Fixed with a document-level backfill following present fields only, pinned by a unit test. Re-audit: class 198 resolves fully with no regressions. Status: fixed and validated on the reporting sample.

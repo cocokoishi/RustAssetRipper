@@ -1,7 +1,7 @@
 use super::super::object_conversion::{
     apply_custom_data_label_backfill, apply_game_object_header_backfill,
     apply_generic_header_backfill, apply_keyframe_tangent_mode_backfill,
-    prefab_header_backfill_version,
+    apply_renderer_gi_backfill, prefab_header_backfill_version,
 };
 use crate::export::unity_yaml::{
     UnityYamlDocument, UnityYamlMappingStyle, UnityYamlNode, UnityYamlScalar, UnityYamlWriteLimits,
@@ -222,5 +222,55 @@ fn custom_data_labels_follow_present_stream_fields_only() {
     assert!(
         !output.contains("colorfulLabel"),
         "non-indexed fields gain no label"
+    );
+}
+
+#[test]
+fn renderer_gi_backfill_inserts_canonical_defaults_in_order() {
+    // Mirrors the observed serialized shape: sources lacking the lightmap
+    // block gain every field in canonical order; present values are kept.
+    let mut body = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    body.insert_field("serializedVersion", signed(4)).unwrap();
+    body.insert_field("m_Enabled", signed(1)).unwrap();
+    body.insert_field("m_LightProbeVolumeOverride", signed(0))
+        .unwrap();
+    body.insert_field("m_MinimumChartSize", signed(9)).unwrap();
+    body.insert_field("m_LightmapIndex", signed(7)).unwrap();
+    body.insert_field("m_AdditionalVertexStreams", signed(0))
+        .unwrap();
+    body.insert_field("m_SortingLayerID", signed(0)).unwrap();
+    let mut document = UnityYamlDocument::object(23, 46, "MeshRenderer", body, false)
+        .expect("test MeshRenderer document builds");
+    apply_renderer_gi_backfill(&mut document);
+    // A second pass is a no-op: insertion skips fields already present.
+    apply_renderer_gi_backfill(&mut document);
+    let output = render(&document);
+    key_order(
+        &output,
+        &[
+            "m_LightProbeVolumeOverride",
+            "m_ScaleInLightmap: 1",
+            "m_PreserveUVs: 0",
+            "m_IgnoreNormalsForChartDetection: 0",
+            "m_ImportantGI: 0",
+            "m_StitchLightmapSeams: 0",
+            "m_SelectedEditorRenderState: 3",
+            "m_AutoUVMaxDistance: 0.5",
+            "m_AutoUVMaxAngle: 89",
+            "m_LightmapParameters: {fileID: 0}",
+            // Present fields keep their values and relative order after the
+            // inserted block instead of being rewritten to defaults, while
+            // release-only baked fields are removed.
+            "m_MinimumChartSize: 9",
+            "m_SortingLayerID",
+        ],
+    );
+    assert!(
+        !output.contains("m_LightmapIndex"),
+        "baked lightmap indices are removed"
+    );
+    assert!(
+        !output.contains("m_AdditionalVertexStreams"),
+        "additional vertex streams are removed"
     );
 }

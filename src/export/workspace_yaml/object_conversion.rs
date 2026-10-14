@@ -953,6 +953,11 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
             if class_id != 114 {
                 apply_keyframe_tangent_mode_backfill(&mut document);
                 apply_custom_data_label_backfill(&mut document);
+                // The frozen `EditorFormatConverter.Convert(IRenderer)` covers
+                // every renderer; the backfill mirrors its class set.
+                if matches!(class_id, 23 | 96 | 120 | 137 | 199 | 212) {
+                    apply_renderer_gi_backfill(&mut document);
+                }
             }
         }
         Ok(Some(document))
@@ -1977,6 +1982,100 @@ fn backfill_labels_in_node(node: &mut UnityYamlNode) {
         }
         UnityYamlNodeKind::Scalar(_) => {}
     }
+}
+
+/// Inserts the editor-default renderer lightmap fields when the serialized
+/// layout lacks them.
+///
+/// The reference renderer editor layout carries ten lightmap fields with
+/// canonical defaults; some serialized layouts omit them. Objects converted
+/// through an editor TypeTree gain them from editor defaults; versions
+/// without a ported editor tree need them here. Insertion targets the
+/// `23|96|120|137|199|212` renderer family (mirroring the editor conversion's
+/// class set), places absent fields after `m_LightProbeVolumeOverride` (else
+/// before `m_SortingLayerID`, else appended), and never rewrites source
+/// values. MonoBehaviour documents are excluded by the caller.
+///
+/// The same editor layout omits the baked lightmap indices and additional
+/// vertex streams that some serialized layouts carry, so those release-only
+/// fields are removed: Unity re-derives baked indices on import, and the
+/// reference output never contains them.
+pub(super) fn apply_renderer_gi_backfill(document: &mut UnityYamlDocument) {
+    let UnityYamlNodeKind::Mapping { entries, .. } = &mut document.root.kind else {
+        return;
+    };
+    let Some((_, body)) = entries.first_mut() else {
+        return;
+    };
+    let UnityYamlNodeKind::Mapping {
+        entries: fields, ..
+    } = &mut body.kind
+    else {
+        return;
+    };
+    let defaults = [
+        (
+            "m_ScaleInLightmap",
+            UnityYamlNode::scalar(UnityYamlScalar::Float32(1.0)),
+        ),
+        (
+            "m_PreserveUVs",
+            UnityYamlNode::scalar(UnityYamlScalar::Boolean(false)),
+        ),
+        (
+            "m_IgnoreNormalsForChartDetection",
+            UnityYamlNode::scalar(UnityYamlScalar::Boolean(false)),
+        ),
+        (
+            "m_ImportantGI",
+            UnityYamlNode::scalar(UnityYamlScalar::Boolean(false)),
+        ),
+        (
+            "m_StitchLightmapSeams",
+            UnityYamlNode::scalar(UnityYamlScalar::Boolean(false)),
+        ),
+        (
+            "m_SelectedEditorRenderState",
+            UnityYamlNode::scalar(UnityYamlScalar::Signed(3)),
+        ),
+        (
+            "m_MinimumChartSize",
+            UnityYamlNode::scalar(UnityYamlScalar::Signed(4)),
+        ),
+        (
+            "m_AutoUVMaxDistance",
+            UnityYamlNode::scalar(UnityYamlScalar::Float32(0.5)),
+        ),
+        (
+            "m_AutoUVMaxAngle",
+            UnityYamlNode::scalar(UnityYamlScalar::Float32(89.0)),
+        ),
+        ("m_LightmapParameters", yaml_null_pptr_node()),
+    ];
+    let mut insert_at = match yaml_field_index(fields, "m_LightProbeVolumeOverride") {
+        Some(index) => index + 1,
+        None => match yaml_field_index(fields, "m_SortingLayerID") {
+            Some(index) => index,
+            None => fields.len(),
+        },
+    };
+    for (name, value) in defaults {
+        if yaml_field_index(fields, name).is_none() {
+            fields.insert(insert_at, (yaml_plain_node(name), value));
+            insert_at += 1;
+        }
+    }
+    fields.retain(|(key, _)| match &key.kind {
+        UnityYamlNodeKind::Scalar(UnityYamlScalar::PlainString(name)) => !matches!(
+            name.as_str(),
+            "m_LightmapIndex"
+                | "m_LightmapIndexDynamic"
+                | "m_LightmapTilingOffset"
+                | "m_LightmapTilingOffsetDynamic"
+                | "m_AdditionalVertexStreams"
+        ),
+        _ => true,
+    });
 }
 
 /// Inserts the editor-default keyframe `tangentMode` into decoded animation

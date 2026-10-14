@@ -1,5 +1,11 @@
 # Validation log
 
+## 2026-10-14 Renderer GI fields fixed; 6 classes remain
+
+- Renderer editor layouts carry ten canonical lightmap fields and omit baked release indices. Fixed with a family backfill (unit-tested, source values preserved). Formatting and Clippy (warnings-denied locally) clean; release rebuilt.
+- Fresh replay plus re-audit: real-diff classes 9 to 6 (23/137/199 resolve fully) with zero unpaired files and no regressions.
+- Local checks: `git diff --check` exit 0; `cargo check`/`cargo clippy` clean; module tests green. Full validation via GitHub Actions after push. Sample input read-only; outputs quarantined. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 CustomData labels fixed; 9 classes remain
 
 - The CustomDataModule editor layout annotates each stream field with an empty-string label the data lacks. Fixed with a present-fields-only backfill (unit-tested). Formatting and Clippy (warnings-denied locally) clean; release rebuilt.
