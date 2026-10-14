@@ -1,5 +1,12 @@
 # Validation log
 
+## 2026-10-14 Localization decision-logic audit (PRODUCT-I18N-001 logic verified; UI surface stays open)
+
+- Scope: the locale-independent rules in `src/localization.rs` (default code, 23-code table, hyphenation tables, existence, `LoadLanguage` decision). The 272-key string tables, per-key fallback, and picker names stay with the future UI surface per the module docs; no localized-message consumer exists.
+- Frozen-source reads (no runs): `Localization.cs` sets default `LanguageCodes.English` (`"en-US"`) and switches only when the normalized code differs and exists, firing the change event exactly on switch; `LanguageCodes.cs` defines `Exists` as non-null dictionary membership. The generated `LanguageCodes.g.cs` lists the 23 hyphenated codes with native names in the same order as the Rust table, plus exactly four `AsUnderscored` arms (`en-US`/`pt-BR`/`zh-Hans`/`zh-Hant`) and four reverse `AsHyphenated` arms with identity default (null passes through). All match the Rust port arm-for-arm, including ordinal case-sensitive existence.
+- Locale-file checks: `AssetRipper/Localizations/` holds exactly the 23 stems behind the table (`ar` through `zh_Hant`); `en_US.json` parses to 272 keys; `id.json` parses to an empty object. The Rust table order matches stem-alphabetical order.
+- Rust tests already pin every checked behavior (table contents, both conversions with round-trip, existence incl. case sensitivity, all `LoadLanguage` branches). No code change resulted; no user input was read. PRODUCT-I18N-001 keeps its status: decision logic verified, UI surface (tables, picker, fallback wiring) remains with PRODUCT-GUI-001. Phase 1 remains open and Phase 2 remains locked. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Crunch decoder proven unreachable for Texture3D/array shapes
 
 - Question: the Crunch reconciliation left "no CRN behavior for Texture3D/array shapes" open because those export paths hardcode `texture_format: 0` and call the no-version converter. If a Texture3D/array could carry a Crunch format, that would be silent mis-decode.

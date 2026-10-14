@@ -1,5 +1,11 @@
 # RustAssetRipper hand-off — 2026-10-10
 
+## Latest current checkpoint — 2026-10-14 (I18N decision-logic audit, no code change)
+
+- Worktree `../main-work` (detached at `45d2778`); the Desktop checkout's conflicts and local changes are untouched. Phase 1 open, Phase 2 locked; no user input, Unity, or UABEA used.
+- Localization decision logic verified against frozen source and generated tables: default `en-US`, 23-code table/order, 4+4 hyphenation arms with null passthrough, ordinal existence, `LoadLanguage` null/identical/unknown semantics; locale dir holds the 23 stems, `en_US.json` has 272 keys, `id.json` is empty. Rust tests already pinned all of it, so no code changed. PRODUCT-I18N-001 stays open for the UI surface only. See the validation-log entry.
+- Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push.
+
 ## Latest current checkpoint — 2026-10-14 (Crunch/Texture3D-array proven non-issue)
 
 - Worktree `../main-work` (detached at `b99597e`); the Desktop checkout's conflicts and local changes are untouched. Phase 1 open, Phase 2 locked; no user input, Unity, or UABEA used.
