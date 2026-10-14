@@ -4,6 +4,7 @@
 
 - The controller root carried four release-only fields every editor layout omits. Fixed by extending the root-rebuild skip list (reads precede the drop). The Avatar doc is proven content-identical modulo YAML style (strict token equality). Formatting and Clippy (warnings-denied locally) clean; release rebuilt.
 - Fresh replay plus re-audit: real-diff classes 2 to 1 (91 resolves fully); the remaining Avatar doc is semantically equivalent with zero unpaired files and no regressions.
+- Actions run `38634710011` is fully green on both platforms (controller root release-only fields), including warnings-denied Clippy, the release build, changed-line formatting, and the public-repository hygiene job.
 - Local checks: `git diff --check` exit 0; `cargo check`/`cargo clippy` clean; module tests green. Full validation via GitHub Actions after push. Sample input read-only; outputs quarantined. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 Mesh fields fixed; 2 classes remain
