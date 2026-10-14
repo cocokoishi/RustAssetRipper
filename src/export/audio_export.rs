@@ -2253,6 +2253,36 @@ mod tests {
     }
 
     #[test]
+    fn ogg_page_checksum_matches_real_encoder_pages() {
+        // Every page of the repository Ogg fixture comes from a real encoder.
+        // Recomputing each stored page checksum with the writer's CRC function
+        // proves the checksum path against ground-truth bytes; packet
+        // round-trips alone cannot show this because readers do not verify it.
+        let ogg = include_bytes!("ogg_to_wav_test_fixture.ogg");
+        let mut offset = 0usize;
+        let mut pages = 0u32;
+        while offset < ogg.len() {
+            let header = &ogg[offset..offset + 27];
+            assert_eq!(&header[..4], b"OggS");
+            let segment_count = usize::from(header[26]);
+            let lacing = &ogg[offset + 27..offset + 27 + segment_count];
+            let body_len: usize = lacing.iter().map(|size| usize::from(*size)).sum();
+            let body_start = offset + 27 + segment_count;
+            let body = &ogg[body_start..body_start + body_len];
+            let stored = u32::from_le_bytes(ogg[offset + 22..offset + 26].try_into().unwrap());
+            let mut zeroed_header = header.to_vec();
+            zeroed_header[22..26].fill(0);
+            let mut checksum = super::ogg_crc32_update(0, &zeroed_header);
+            checksum = super::ogg_crc32_update(checksum, lacing);
+            checksum = super::ogg_crc32_update(checksum, body);
+            assert_eq!(checksum, stored, "page {pages} checksum");
+            offset = body_start + body_len;
+            pages += 1;
+        }
+        assert!(pages > 0, "fixture holds Ogg pages");
+    }
+
+    #[test]
     fn exporter_warnings_name_the_asset_like_the_source() {
         assert_eq!(
             native_audio_empty_warning("Music"),
