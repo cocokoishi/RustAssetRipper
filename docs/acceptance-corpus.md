@@ -48,27 +48,27 @@ version-routing blocker exists at the TypeTree level.
 | ID | Rust replay | Inventory | Reference export | Semantic diff | Verdict |
 |----|-------------|-----------|------------------|---------------|---------|
 | VRC-AV01 | probe done | done: 2 nodes, 1 file (2022.3.22f1, tree), 2753 objs, 1.5MB resource node; decode 2753/2753 OK | pending | pending | parse+decode-OK; export pending |
-| VRC-AV02 | pending | pending | pending | pending | — |
+| VRC-AV02 | probe done | decode 642/642 OK | pending | pending | parse+decode-OK; export pending |
 | VRC-AV03 | probe done | done: 3 nodes, 1 file (inner 2018.4.20f1, tree), 260 objs, 16MB resource node; decode 260/260 OK | pending | pending | parse+decode-OK; export pending |
-| VRC-AV04 | pending | pending | pending | pending | — |
-| VRC-AV05 | pending | pending | pending | pending | — |
-| VRC-AV06 | pending | pending | pending | pending | — |
-| VRC-AV07 | pending | pending | pending | pending | — |
-| VRC-AV08 | pending | pending | pending | pending | — |
-| VRC-AV09 | pending | pending | pending | pending | — |
-| VRC-AV10 | pending | pending | pending | pending | — |
-| VRC-AV11 | pending | pending | pending | pending | — |
+| VRC-AV04 | probe done | decode 1952/1952 OK | pending | pending | parse+decode-OK; export pending |
+| VRC-AV05 | probe done | decode 216/216 OK | pending | pending | parse+decode-OK; export pending |
+| VRC-AV06 | probe done | decode 3394/3394 OK | pending | pending | parse+decode-OK; export pending |
+| VRC-AV07 | probe done | decode 1373/1373 OK | pending | pending | parse+decode-OK; export pending |
+| VRC-AV08 | probe done | decode 1364/1364 OK | pending | pending | parse+decode-OK; export pending |
+| VRC-AV09 | probe done | decode 3827/3827 OK | pending | pending | parse+decode-OK; export pending |
+| VRC-AV10 | probe done | decode 6529/6529 OK | pending | pending | parse+decode-OK; export pending |
+| VRC-AV11 | probe done | decode 6461/6461 OK | pending | pending | parse+decode-OK; export pending |
 | VRC-W01 | probe done | done: 3 nodes, 2 files (2022.3.22f1, trees), 1008 objs, 243KB resource node; decode 1008/1008 OK | pending | pending | parse+decode-OK; export pending |
 | VRC-W02 | probe done | done: fmt-7 bundle, 3 nodes, 2 files (2019.4.31f1, trees), 46 objs, 12MB resource node; decode 46/46 OK | pending | pending | parse+decode-OK; export pending |
-| VRC-W03 | pending | pending | pending | pending | — |
-| VRC-W04 | pending | pending | pending | pending | — |
-| VRC-W05 | pending | pending | pending | pending | — |
-| VRC-W06 | pending | pending | pending | pending | — |
-| VRC-W07 | pending | pending | pending | pending | — |
-| VRC-W08 | pending | pending | pending | pending | — |
-| VRC-W09 | pending | pending | pending | pending | — |
-| VRC-W10 | pending | pending | pending | pending | — |
-| VRC-W11 | pending | pending | pending | pending | — |
+| VRC-W03 | probe done | decode 2274/2274 OK | pending | pending | parse+decode-OK; export pending |
+| VRC-W04 | probe done | decode 15871/15871 OK | pending | pending | parse+decode-OK; export pending |
+| VRC-W05 | probe done | decode 1441/1441 OK | pending | pending | parse+decode-OK; export pending |
+| VRC-W06 | probe done | decode 426664/426664 OK | pending | pending | parse+decode-OK; export pending |
+| VRC-W07 | probe done | decode 42222/42222 OK | pending | pending | parse+decode-OK; export pending |
+| VRC-W08 | probe done | decode 1993/1993 OK | pending | pending | parse+decode-OK; export pending |
+| VRC-W09 | probe done | decode 10587/10587 OK | pending | pending | parse+decode-OK; export pending |
+| VRC-W10 | probe done | decode 72365/72365 OK | pending | pending | parse+decode-OK; export pending |
+| VRC-W11 | probe done | decode 33974/33974 OK | pending | pending | parse+decode-OK; export pending |
 
 Acceptance order: smallest first (VRC-AV01, VRC-W01), then by size.
 Reference outputs and Rust outputs stay in gitignored local scratch only.
@@ -98,13 +98,16 @@ become blockers.
 No container/metadata blocker surfaced in the first four. Next: object
 decode triage on VRC-AV01 (class-74/114 heavy), then reference-side runs.
 
-## Decode triage (4 samples, 4067/4067 OK)
+## Decode triage (22 samples, 637216/637216 OK)
 
-Extended the probe with per-object `decode_object_payload`: VRC-AV01
-2753/2753, VRC-W01 231+777=1008/1008, VRC-AV03 260/260 (including the
-unknown raw type 1773428102), VRC-W02 15+31=46/46. Zero decode failures.
-Caveats: stale-rlib success paths match HEAD for these APIs, but decode-OK
-is not semantic-OK (values unvalidated); factory/workspace/export untouched.
+Extended the probe with per-object `decode_object_payload` and swept the
+whole corpus: all 11 avatars (28771 objects) and all 11 worlds (608445
+objects) decode with zero failures, covering dense class-74/114 spreads,
+the unknown raw type 1773428102, fmt-7 containers, and 2018/2019/2022/6000
+inner versions. Scale note: VRC-W06 carries 421913 objects in a single
+SerializedFile (export-scale awareness, not a failure). Caveats:
+stale-rlib success paths match HEAD for these APIs, but decode-OK is not
+semantic-OK (values unvalidated); factory/workspace/export untouched.
 Next: reference-side runs, then export replay once a binary strategy exists.
 
 ## Open tooling gaps
