@@ -1,5 +1,10 @@
 # Validation log
 
+## 2026-10-14 AV09 converges on current binary
+
+- Fresh replay plus re-audit (3827 objects): 1135 paired files, zero unpaired; zero real-diff classes except three Avatar docs, each proven content-identical modulo style (strict token equality). No product changes needed.
+- Local checks: replay exit 0; audit clean. Sample input read-only; outputs quarantined. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 AV08 converges on current binary
 
 - Fresh replay plus re-audit (1364 objects): 356 paired files, zero unpaired; zero real-diff classes except the Avatar doc, proven content-identical modulo style (strict token equality over 122921 chars). Its input lives outside the small-sample directory (located by size); no product changes needed.
