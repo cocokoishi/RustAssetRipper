@@ -6,6 +6,7 @@
 - Scan (tracked `src`/`tools`/`tests` via `git grep`): the six original bundle filenames have zero hits. Remaining identity tokens were confined to two test sites and four comments: two export-ID tests (romaji test name, original object names in comments and assert messages) in `src/export/ids.rs`, one synthetic controller-root test module and fixture value in `src/export/project_workflow/animator_controller.rs`, and four provenance comments in `src/export/workspace_yaml/object_conversion.rs`. Extension strings (`.controller`), synthetic fixture names, Unity engine API field names, and built-in product vocabulary were classified generic and kept.
 - Change: renamed the test and module to generic descriptors and reworded the comments to reference frozen-source behavior without identities. Technical substance (class IDs, seeds, expected ID values, Unity versions in code, renderer class lists) is unchanged. Re-scanned after editing: zero hits for all scanned patterns.
 - Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No user input was read; Phase 1 remains open and Phase 2 remains locked. Unity import/runtime and UABEA were NOT RUN.
+- Actions run `38494362575` is fully green on both platforms (tests including the renamed export-ID tests, Clippy, release builds, formatting, hygiene).
 
 ## 2026-10-14 Localization decision-logic audit (PRODUCT-I18N-001 logic verified; UI surface stays open)
 
