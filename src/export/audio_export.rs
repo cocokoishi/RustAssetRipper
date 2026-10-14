@@ -2456,7 +2456,16 @@ mod tests {
             128 * 6 * 4
         );
         assert_eq!(wav.len(), 58 + 128 * 6 * 4);
-        assert!(wav[58..].iter().all(|byte| *byte == 0));
+        // Exact silence up to the sign of zero: the six-channel synthesis
+        // yields -0.0 (`0x80000000`) for some samples where stereo yields
+        // +0.0. Both compare equal to 0.0 and convert to identical PCM, so
+        // the data assertion admits either encoding but nothing else.
+        for sample in wav[58..].chunks_exact(4) {
+            assert!(
+                sample == [0, 0, 0, 0] || sample == [0, 0, 0, 0x80],
+                "non-silent sample {sample:02X?}"
+            );
+        }
     }
 
     #[test]
