@@ -4,6 +4,7 @@
 
 - Drove an rlib-linked inventory probe (gitignored scratch; Oct-13 rlib, so triage-grade only) over the first four corpus samples: VRC-AV01 (2 nodes, 2753 objects, dense class-74/114/28 spread), VRC-W01 (2 files, 1008 objects, broad world spread with audio), VRC-AV03 (inner 2018.4.20f1 vs 6000 bundle tag, 16MB resource node, one unknown raw type 1773428102 parsed cleanly), VRC-W02 (fmt-7 bundle, small world graph). Zero container/entry/parse errors in all four. Ledger rows and triage notes updated in `docs/acceptance-corpus.md`; no sample content committed.
 - Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. Sample inputs read-only; outputs in gitignored scratch. Phase 1 remains open and Phase 2 remains locked pending the stage gate. Unity import/runtime and UABEA were NOT RUN.
+- Actions run `38531303815` is fully green on both platforms (docs-only change), including the public-repository hygiene job.
 
 ## 2026-10-14 Real-sample acceptance corpus registered (anonymous)
 
