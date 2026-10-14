@@ -994,6 +994,80 @@ mod tests {
     }
 
     #[test]
+    fn crunched_header_and_routing_mismatches_fail_loudly() {
+        // Caller-arg mismatches against a valid CRN fixture exercise the
+        // production guard arms without new fixtures: face count, serialized
+        // dimensions, codec agreement, and header validity each fail with
+        // their own reason instead of mis-decoding.
+        let data = &include_bytes!("../../tests/fixtures/crunch/classic_dxt1.crn")[..];
+        let version = UnityVersion::parse("2017.2.0f1").unwrap();
+        fn image(
+            texture_format: i32,
+            width: u32,
+            height: u32,
+            depth: u32,
+            data: &[u8],
+        ) -> TextureImage<'_> {
+            TextureImage {
+                texture_format,
+                graphics_format: 0,
+                width,
+                height,
+                depth,
+                image_size: data.len(),
+                data,
+            }
+        }
+        for (name, texture_format, width, height, depth, bytes, reason) in [
+            (
+                "faces",
+                28,
+                512,
+                512,
+                6,
+                data,
+                "CRN header has invalid dimensions, mip count, or face count",
+            ),
+            (
+                "dimensions",
+                28,
+                4,
+                4,
+                1,
+                data,
+                "CRN dimensions do not match the serialized Texture2D",
+            ),
+            (
+                "codec",
+                29,
+                512,
+                512,
+                1,
+                data,
+                "CRN codec does not match the serialized Unity TextureFormat",
+            ),
+            (
+                "header",
+                28,
+                512,
+                512,
+                1,
+                &[0; 64][..],
+                "invalid CRN header",
+            ),
+        ] {
+            assert_eq!(
+                convert_to_bitmap_with_unity_version(
+                    &image(texture_format, width, height, depth, bytes),
+                    Some(version.clone())
+                ),
+                Err(TextureConvertError::CrunchDecodeFailed { reason }),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
     fn unpack_normal_reconstructs_blue() {
         // The reference swaps alpha and red: the output red is the input
         // alpha and the output alpha is the input red; blue is recomputed

@@ -1,5 +1,10 @@
 # Validation log
 
+## 2026-10-14 Crunch guard-arm regression (no new fixtures)
+
+- Gap: the production CRN wrapper's mismatch arms had no coverage; only the success hashes and the version-gate table were pinned. New test drives the committed `classic_dxt1.crn` fixture with caller-arg variations plus a garbage header: face-count, serialized-dimension, codec-agreement, and header-validity mismatches each fail with their own loud reason instead of mis-decoding.
+- Local checks: `git diff --check` exit 0; single-file `rustfmt --check` clean. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No user input was read; Phase 1 remains open and Phase 2 remains locked. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Stale-claim sweep: CRUNCH fixtures and FSB5/audio coverage statements
 
 - `validation-log.md` CRUNCH entry claimed no CRN fixture/test lived in the source tree and the production wrapper/routing were unverified. Both are stale: the six CRNs are committed under `tests/fixtures/crunch` and the in-tree regression decodes all six through the version-gated production wrapper with full-RGBA oracle hashes. Corrected to name the true remainder (image writers, project/CLI output, mips past level 0, multiple faces).
