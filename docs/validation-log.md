@@ -4,6 +4,7 @@
 
 - Version truth established: export decisions follow the inner SerializedFile version (both sides write ProjectVersion 2018.4.20f1), not the 6000 bundle tag; the 6000-band tables stay dormant probe-verified data. Added 2018.3.0b6 predefined bands (12/182/8/51 rows), mapped (2018,4) to the 2018_3 texture layout as a verifiable hypothesis, and opened the audio decode gate to 2018.4. Module tests 13/13 locally; formatting clean; release rebuilt.
 - Fresh replay plus re-audit: unpaired files collapse (26/31 to 1/1, the raw cubemap excepted); 24/24 PNGs pixel-identical; the OGG is packet-identical (76/76). All 25 PNG importer sidecars still differ, so the 2018.4 importer body transcription stays open alongside the paired-content diffs (materials, transforms, cascades) and the cubemap route. No regressions.
+- Actions run `38582453502` is fully green on both platforms (2018/6000 bands plus 2018 routes), including warnings-denied Clippy, the release build, changed-line formatting, and the public-repository hygiene job.
 - Local checks: `git diff --check` exit 0; `cargo check` clean; local Clippy clean. Full validation via GitHub Actions after push. Sample input read-only; outputs quarantined. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 First Unity-6 sample: two open features scoped
