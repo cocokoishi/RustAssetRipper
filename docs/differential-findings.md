@@ -1,5 +1,9 @@
 # Source behavior and differential findings
 
+## DIFF-CLASS-FIELD-DELTAS-2018-001 — class-specific editor field deltas (fixed)
+
+Animator, Light, and ParentConstraint documents differed by single editor-default fields (plus a release-only Light struct the editor omits). Fixed with a table-driven document backfill (insert with anchors, remove release-only, never rewrite source values), pinned by a unit test covering all three rows plus the no-op case. Re-audit: classes 95/108/1773428102 resolve fully with no regressions. Status: fixed and validated on the reporting sample.
+
 ## DIFF-RENDERER-GI-2018-001 — renderer lightmap editor fields (fixed)
 
 MeshRenderer, SkinnedMeshRenderer, and ParticleSystemRenderer documents differed by ten missing canonical lightmap fields plus release-only baked indices the reference editor layout omits. Fixed with a renderer-family backfill (insert missing with canonical defaults, remove baked indices/additional streams, never rewrite source values), pinned by a unit test. Re-audit: classes 23/137/199 resolve fully with no regressions. Status: fixed and validated on the reporting sample.

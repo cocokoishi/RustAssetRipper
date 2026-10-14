@@ -1,7 +1,8 @@
 use super::super::object_conversion::{
-    apply_custom_data_label_backfill, apply_game_object_header_backfill,
-    apply_generic_header_backfill, apply_keyframe_tangent_mode_backfill,
-    apply_renderer_gi_backfill, prefab_header_backfill_version,
+    apply_class_editor_field_backfill, apply_custom_data_label_backfill,
+    apply_game_object_header_backfill, apply_generic_header_backfill,
+    apply_keyframe_tangent_mode_backfill, apply_renderer_gi_backfill,
+    prefab_header_backfill_version,
 };
 use crate::export::unity_yaml::{
     UnityYamlDocument, UnityYamlMappingStyle, UnityYamlNode, UnityYamlScalar, UnityYamlWriteLimits,
@@ -273,4 +274,77 @@ fn renderer_gi_backfill_inserts_canonical_defaults_in_order() {
         !output.contains("m_AdditionalVertexStreams"),
         "additional vertex streams are removed"
     );
+}
+
+#[test]
+fn class_editor_field_deltas_insert_defaults_and_drop_release_fields() {
+    // Animator: the empty warning message slots between its neighbors.
+    let mut animator = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    animator
+        .insert_field("m_LinearVelocityBlending", signed(0))
+        .unwrap();
+    animator
+        .insert_field("m_HasTransformHierarchy", signed(1))
+        .unwrap();
+    let mut document = UnityYamlDocument::object(95, 47, "Animator", animator, false)
+        .expect("test Animator document builds");
+    apply_class_editor_field_backfill(&mut document, 95);
+    let output = render(&document);
+    key_order(
+        &output,
+        &[
+            "m_LinearVelocityBlending",
+            "m_WarningMessage:",
+            "m_HasTransformHierarchy",
+        ],
+    );
+    // Light: shadow metrics slot after the color temperature while the
+    // release-only baking output is removed.
+    let mut light = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    light
+        .insert_field("m_UseColorTemperature", signed(0))
+        .unwrap();
+    let mut baking = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    baking.insert_field("serializedVersion", signed(2)).unwrap();
+    light.insert_field("m_BakingOutput", baking).unwrap();
+    light.insert_field("m_Cookie", signed(0)).unwrap();
+    let mut document = UnityYamlDocument::object(108, 48, "Light", light, false)
+        .expect("test Light document builds");
+    apply_class_editor_field_backfill(&mut document, 108);
+    let output = render(&document);
+    key_order(
+        &output,
+        &[
+            "m_UseColorTemperature",
+            "m_ShadowRadius: 0",
+            "m_ShadowAngle: 0",
+            "m_Cookie",
+        ],
+    );
+    assert!(
+        !output.contains("m_BakingOutput"),
+        "release-only baking output is removed"
+    );
+    // ParentConstraint: the lock flag slots before the sources.
+    let mut constraint = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    constraint
+        .insert_field("m_IsContraintActive", signed(1))
+        .unwrap();
+    constraint.insert_field("m_Sources", signed(0)).unwrap();
+    let mut document =
+        UnityYamlDocument::object(1773428102, 49, "ParentConstraint", constraint, false)
+            .expect("test ParentConstraint document builds");
+    apply_class_editor_field_backfill(&mut document, 1773428102);
+    let output = render(&document);
+    key_order(
+        &output,
+        &["m_IsContraintActive", "m_IsLocked: 0", "m_Sources"],
+    );
+    // Unlisted classes select no completion.
+    let mut other = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    other.insert_field("m_Enabled", signed(1)).unwrap();
+    let mut document = UnityYamlDocument::object(33, 50, "MeshFilter", other, false)
+        .expect("test MeshFilter document builds");
+    apply_class_editor_field_backfill(&mut document, 33);
+    assert!(!render(&document).contains("m_WarningMessage"));
 }

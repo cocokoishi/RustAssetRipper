@@ -958,6 +958,7 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
                 if matches!(class_id, 23 | 96 | 120 | 137 | 199 | 212) {
                     apply_renderer_gi_backfill(&mut document);
                 }
+                apply_class_editor_field_backfill(&mut document, class_id);
             }
         }
         Ok(Some(document))
@@ -2076,6 +2077,140 @@ pub(super) fn apply_renderer_gi_backfill(document: &mut UnityYamlDocument) {
         ),
         _ => true,
     });
+}
+
+/// A class-specific editor-layout delta: fields the editor layout carries
+/// with defaults that some serialized layouts lack (inserted), plus
+/// release-only fields the editor layout omits (removed).
+struct ClassEditorFieldDelta {
+    class_id: i32,
+    inserts: &'static [ClassFieldInsert],
+    removes: &'static [&'static str],
+}
+
+/// One defaulted field insertion: placed after `after` when present, else
+/// before `before` when present, else appended.
+struct ClassFieldInsert {
+    name: &'static str,
+    after: &'static str,
+    before: &'static str,
+    value: ClassFieldDefault,
+}
+
+/// Constructible default values for inserted editor fields.
+#[derive(Clone, Copy)]
+enum ClassFieldDefault {
+    EmptyString,
+    Float32(f32),
+    Boolean(bool),
+}
+
+impl ClassFieldDefault {
+    fn node(self) -> UnityYamlNode {
+        match self {
+            ClassFieldDefault::EmptyString => UnityYamlNode::plain_string(String::new()),
+            ClassFieldDefault::Float32(value) => {
+                UnityYamlNode::scalar(UnityYamlScalar::Float32(value))
+            }
+            ClassFieldDefault::Boolean(value) => {
+                UnityYamlNode::scalar(UnityYamlScalar::Boolean(value))
+            }
+        }
+    }
+}
+
+/// Class-specific editor deltas proven against reference output. The Animator
+/// warning message, the Light shadow metrics, and the ParentConstraint lock
+/// flag are editor defaults absent from the data; the Light baking output is
+/// a release-only struct the editor layout omits.
+const CLASS_EDITOR_FIELD_DELTAS: &[ClassEditorFieldDelta] = &[
+    ClassEditorFieldDelta {
+        class_id: 95,
+        inserts: &[ClassFieldInsert {
+            name: "m_WarningMessage",
+            after: "m_LinearVelocityBlending",
+            before: "m_HasTransformHierarchy",
+            value: ClassFieldDefault::EmptyString,
+        }],
+        removes: &[],
+    },
+    ClassEditorFieldDelta {
+        class_id: 108,
+        inserts: &[
+            ClassFieldInsert {
+                name: "m_ShadowRadius",
+                after: "m_UseColorTemperature",
+                before: "m_Cookie",
+                value: ClassFieldDefault::Float32(0.0),
+            },
+            ClassFieldInsert {
+                name: "m_ShadowAngle",
+                after: "m_ShadowRadius",
+                before: "m_Cookie",
+                value: ClassFieldDefault::Float32(0.0),
+            },
+        ],
+        removes: &["m_BakingOutput"],
+    },
+    ClassEditorFieldDelta {
+        class_id: 1773428102,
+        inserts: &[ClassFieldInsert {
+            name: "m_IsLocked",
+            after: "m_IsContraintActive",
+            before: "m_Sources",
+            value: ClassFieldDefault::Boolean(false),
+        }],
+        removes: &[],
+    },
+];
+
+/// Applies the class-specific editor-layout delta for the document's class, if
+/// any is declared. Insertions skip fields already present; removals drop
+/// release-only fields the editor layout omits. Other classes select no
+/// completion. MonoBehaviour documents are excluded by the caller.
+pub(super) fn apply_class_editor_field_backfill(document: &mut UnityYamlDocument, class_id: i32) {
+    let Some(delta) = CLASS_EDITOR_FIELD_DELTAS
+        .iter()
+        .find(|delta| delta.class_id == class_id)
+    else {
+        return;
+    };
+    let UnityYamlNodeKind::Mapping { entries, .. } = &mut document.root.kind else {
+        return;
+    };
+    let Some((_, body)) = entries.first_mut() else {
+        return;
+    };
+    let UnityYamlNodeKind::Mapping {
+        entries: fields, ..
+    } = &mut body.kind
+    else {
+        return;
+    };
+    for insert in delta.inserts {
+        if yaml_field_index(fields, insert.name).is_some() {
+            continue;
+        }
+        let position = match yaml_field_index(fields, insert.after) {
+            Some(index) => index + 1,
+            None => match yaml_field_index(fields, insert.before) {
+                Some(index) => index,
+                None => fields.len(),
+            },
+        };
+        fields.insert(
+            position,
+            (yaml_plain_node(insert.name), insert.value.node()),
+        );
+    }
+    if !delta.removes.is_empty() {
+        fields.retain(|(key, _)| match &key.kind {
+            UnityYamlNodeKind::Scalar(UnityYamlScalar::PlainString(name)) => {
+                !delta.removes.contains(&name.as_str())
+            }
+            _ => true,
+        });
+    }
 }
 
 /// Inserts the editor-default keyframe `tangentMode` into decoded animation
