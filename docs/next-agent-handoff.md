@@ -1,5 +1,11 @@
 # RustAssetRipper hand-off — 2026-10-10
 
+## Latest current checkpoint — 2026-10-14 (stale-claim sweep, no code change)
+
+- Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Phase 1 open, Phase 2 locked; no user input, Unity, or UABEA used.
+- Corrected stale living claims without touching statuses or dated history: CRUNCH entry (fixtures committed, production wrapper verified in-tree; remainder is writers/CLI/mips/faces), FSB5 DIFF entry (four-layout table proof plus rejection/rebuild/checksum regressions), RES-AUDIO-001 row (production-table lookup covered; real-audio/multi-stream/codecs/versions still open).
+- Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push.
+
 ## Latest current checkpoint — 2026-10-14 (sprite triage narrowing, no code change)
 
 - Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Phase 1 open, Phase 2 locked; no user input, Unity, or UABEA used.
