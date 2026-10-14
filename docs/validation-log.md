@@ -1,5 +1,10 @@
 # Validation log
 
+## 2026-10-14 CRN bombs cover both decoder families
+
+- Follow-up: the bomb regressions covered only the classic unpack path, but the Unity unpacker duplicates the same unchecked slicing. Both bombs now run against the classic fixture (2017.2) and the Unity fixture (2017.3); the shared boundary containment maps every outcome to the same loud errors.
+- Local checks: `git diff --check` exit 0; single-file `rustfmt --check` clean. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No user input was read; Phase 1 remains open and Phase 2 remains locked. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Fallible plain-texture bitmap allocation
 
 - Finding: the non-Crunch converter allocated its output with `vec![0; pixel_bytes]` directly, while the Crunch path next to it uses `try_reserve_exact` plus `AllocationFailed`. Hostile dimensions inside the `TextureTooLarge` bound (up to 2 GiB) would abort the process on allocation failure instead of failing loudly like the reference's catchable exception. Sibling `vec![0; ...]` sites are test helpers with fixed small sizes, not production paths.

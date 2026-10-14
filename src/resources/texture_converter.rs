@@ -1124,50 +1124,57 @@ mod tests {
     #[test]
     fn malicious_crn_headers_fail_loudly_instead_of_panicking() {
         // The vendored decoder slices attacker-controlled header offsets
-        // without bounds checks. Both bombs below panicked before the
-        // boundary containment landed; each must now fail with a loud error.
-        let data = &include_bytes!("../../tests/fixtures/crunch/classic_dxt1.crn")[..];
-        let version = UnityVersion::parse("2017.2.0f1").unwrap();
-        // A short buffer with a large level count drives the header level
-        // loop past the buffer end.
-        let mut level_bomb = data[..96].to_vec();
-        level_bomb[16] = 8;
-        let image = TextureImage {
-            texture_format: 28,
-            graphics_format: 0,
-            width: 512,
-            height: 512,
-            depth: 1,
-            image_size: level_bomb.len(),
-            data: &level_bomb,
-        };
-        assert_eq!(
-            convert_to_bitmap_with_unity_version(&image, Some(version)),
-            Err(TextureConvertError::CrunchDecodeFailed {
-                reason: "invalid CRN header"
-            }),
-            "level bomb"
-        );
-        // A full-length buffer with a huge table offset survives header
-        // parsing and reaches section unpacking.
-        let mut tables_bomb = data.to_vec();
-        tables_bomb[67..70].copy_from_slice(&[0xFF; 3]);
-        let image = TextureImage {
-            texture_format: 28,
-            graphics_format: 0,
-            width: 512,
-            height: 512,
-            depth: 1,
-            image_size: tables_bomb.len(),
-            data: &tables_bomb,
-        };
-        assert_eq!(
-            convert_to_bitmap_with_unity_version(&image, Some(version)),
-            Err(TextureConvertError::CrunchDecodeFailed {
-                reason: "CRN decoder panicked on malformed input"
-            }),
-            "tables bomb"
-        );
+        // without bounds checks on both the classic and Unity unpack paths.
+        // Both bombs below panicked before the boundary containment landed;
+        // each must now fail with a loud error.
+        let classic = &include_bytes!("../../tests/fixtures/crunch/classic_dxt1.crn")[..];
+        let unity = &include_bytes!("../../tests/fixtures/crunch/unity_dxt1.crn")[..];
+        for (path, data, version_text) in [
+            ("classic", classic, "2017.2.0f1"),
+            ("unity", unity, "2017.3.0f1"),
+        ] {
+            let version = UnityVersion::parse(version_text).unwrap();
+            // A short buffer with a large level count drives the header level
+            // loop past the buffer end.
+            let mut level_bomb = data[..96].to_vec();
+            level_bomb[16] = 8;
+            let image = TextureImage {
+                texture_format: 28,
+                graphics_format: 0,
+                width: 512,
+                height: 512,
+                depth: 1,
+                image_size: level_bomb.len(),
+                data: &level_bomb,
+            };
+            assert_eq!(
+                convert_to_bitmap_with_unity_version(&image, Some(version)),
+                Err(TextureConvertError::CrunchDecodeFailed {
+                    reason: "invalid CRN header"
+                }),
+                "{path} level bomb"
+            );
+            // A full-length buffer with a huge table offset survives header
+            // parsing and reaches section unpacking.
+            let mut tables_bomb = data.to_vec();
+            tables_bomb[67..70].copy_from_slice(&[0xFF; 3]);
+            let image = TextureImage {
+                texture_format: 28,
+                graphics_format: 0,
+                width: 512,
+                height: 512,
+                depth: 1,
+                image_size: tables_bomb.len(),
+                data: &tables_bomb,
+            };
+            assert_eq!(
+                convert_to_bitmap_with_unity_version(&image, Some(version)),
+                Err(TextureConvertError::CrunchDecodeFailed {
+                    reason: "CRN decoder panicked on malformed input"
+                }),
+                "{path} tables bomb"
+            );
+        }
     }
 
     #[test]
