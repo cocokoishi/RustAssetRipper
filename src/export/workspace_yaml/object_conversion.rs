@@ -10,7 +10,7 @@ use crate::serialized_file::object::{
     default_value_for_type_tree_node, ObjectDefaultValueLimits, SerializedFieldValue,
     SerializedValue,
 };
-use crate::serialized_file::object_workspace::WorkspaceObject;
+use crate::serialized_file::object_workspace::{ObjectWorkspace, WorkspaceObject};
 use crate::serialized_file::reference_graph::{MultiFilePPtrResolution, MultiFileReferenceGraph};
 use crate::serialized_file::workspace::SerializedFileWorkspace;
 
@@ -122,6 +122,7 @@ pub(super) struct WorkspaceYamlObjectConversionRequest<'object> {
     pub(super) file_id: i64,
     pub(super) processed_animation_root: Option<&'object SerializedValue>,
     pub(super) animation_clip_editor_format: bool,
+    pub(super) game_object_static_mark: bool,
     pub(super) generated_component_overlay: Option<&'object WorkspaceGeneratedComponentYamlOverlay>,
     pub(super) generated_prefab_internal: Option<&'object WorkspaceGeneratedPrefabInternalPointer>,
     pub(super) generated_lighting_data: Option<&'object WorkspaceGeneratedLightingDataYamlPointer>,
@@ -139,6 +140,7 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
             file_id,
             processed_animation_root,
             animation_clip_editor_format,
+            game_object_static_mark,
             generated_component_overlay,
             generated_prefab_internal,
             generated_lighting_data,
@@ -655,6 +657,7 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
                     file_index,
                     object.object_index,
                     reference_graph,
+                    game_object_static_mark,
                 )
                 .map_err(|message| scene_editor_format_error(source, class_id, message))?;
             }
@@ -1599,9 +1602,10 @@ fn apply_scene_object_editor_format(
     file_index: usize,
     object_index: usize,
     reference_graph: &MultiFileReferenceGraph<'_>,
+    game_object_static_mark: bool,
 ) -> Result<(), String> {
     match class_id {
-        1 => apply_game_object_editor_format(editor_root, source_root),
+        1 => apply_game_object_editor_format(editor_root, source_root, game_object_static_mark),
         4 | 224 => apply_transform_editor_format(
             editor_root,
             source_root,
@@ -1621,6 +1625,7 @@ fn apply_scene_object_editor_format(
 fn apply_game_object_editor_format(
     editor_root: &mut SerializedValue,
     source_root: &SerializedValue,
+    static_mark: bool,
 ) -> Result<(), String> {
     let tag_id = match source_root
         .unique_field_in_base_chain("m_Tag")
@@ -1664,7 +1669,107 @@ fn apply_game_object_editor_format(
         .try_reserve_exact(tag_name.len())
         .map_err(|_| "could not allocate GameObject.m_TagString".to_owned())?;
     bytes.extend_from_slice(tag_name.as_bytes());
+    if static_mark {
+        // Mirrors the frozen `MarkGameObjectAsStatic`: when editor-format
+        // conversion enables Everything, Unity sets all bits even though it
+        // only uses the first 7. A missing field fails loudly like the other
+        // GameObject editor invariants above.
+        let flags = editor_root
+            .unique_field_in_base_chain_mut("m_StaticEditorFlags")
+            .map_err(|error| format!("could not inspect GameObject.m_StaticEditorFlags: {error}"))?
+            .ok_or_else(|| "editor GameObject has no m_StaticEditorFlags field".to_owned())?;
+        let SerializedValue::U32(value) = flags else {
+            return Err(format!(
+                "editor GameObject.m_StaticEditorFlags has value {flags:?}, expected U32"
+            ));
+        };
+        *value = u32::MAX;
+    }
     Ok(())
+}
+
+/// Renderer classes covered by the frozen `EditorFormatConverter.Convert(IRenderer)`.
+fn editor_format_renderer_class(class_id: i32) -> bool {
+    matches!(class_id, 23 | 96 | 120 | 137 | 199 | 212)
+}
+
+fn serialized_int_value(value: &SerializedValue) -> Option<i64> {
+    match value {
+        SerializedValue::I8(value) => Some(i64::from(*value)),
+        SerializedValue::U8(value) => Some(i64::from(*value)),
+        SerializedValue::I16(value) => Some(i64::from(*value)),
+        SerializedValue::U16(value) => Some(i64::from(*value)),
+        SerializedValue::I32(value) => Some(i64::from(*value)),
+        SerializedValue::U32(value) => Some(i64::from(*value)),
+        SerializedValue::I64(value) => Some(*value),
+        SerializedValue::U64(value) => i64::try_from(*value).ok(),
+        _ => None,
+    }
+}
+
+/// Mirrors the frozen `EditorFormatConverter` static rule for one renderer
+/// payload: a present `m_StaticBatchInfo` marks unless it is default
+/// (`firstSubMesh == 0 && subMeshCount == 0`); otherwise a present
+/// non-empty `m_SubsetIndices` marks. Missing or unreadable fields select no
+/// mark: the renderer's own export path still fails loudly on truly broken
+/// data, while the GameObject keeps its source flags.
+fn renderer_static_batch_marks(root: &SerializedValue) -> bool {
+    let batch_info = root.unique_field_in_base_chain("m_StaticBatchInfo");
+    if let Ok(Some(batch_info)) = batch_info {
+        let first = batch_info
+            .unique_field_in_base_chain("firstSubMesh")
+            .ok()
+            .flatten()
+            .and_then(serialized_int_value)
+            .unwrap_or(0);
+        let count = batch_info
+            .unique_field_in_base_chain("subMeshCount")
+            .ok()
+            .flatten()
+            .and_then(serialized_int_value)
+            .unwrap_or(0);
+        return first != 0 || count != 0;
+    }
+    if let Ok(Some(subset)) = root.unique_field_in_base_chain("m_SubsetIndices") {
+        if let SerializedValue::Array(items) = subset {
+            return !items.is_empty();
+        }
+    }
+    false
+}
+
+/// Whether the frozen editor-format conversion would mark this GameObject
+/// static: any attached renderer component meeting the static-batch rule.
+/// Reference edges under `m_Component` resolve the attached components;
+/// unresolvable renderers select no mark and keep the ordinary route.
+pub(super) fn game_object_static_mark(
+    objects: &ObjectWorkspace,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+    object: &WorkspaceObject,
+) -> bool {
+    reference_graph
+        .references_from_object(object.file_index, object.object_index)
+        .filter(|edge| edge.field_path.starts_with("m_Component"))
+        .filter_map(|edge| match &edge.resolution {
+            MultiFilePPtrResolution::Object {
+                target_file_index,
+                target_object_index,
+            } => Some((*target_file_index, *target_object_index)),
+            _ => None,
+        })
+        .any(|(target_file_index, target_object_index)| {
+            let class_id = reference_graph.object_class_id(target_file_index, target_object_index);
+            if !class_id.is_some_and(editor_format_renderer_class) {
+                return false;
+            }
+            let Some(target) = objects.get(target_file_index, target_object_index) else {
+                return false;
+            };
+            let Ok(payload) = target.payload.as_ref() else {
+                return false;
+            };
+            renderer_static_batch_marks(&payload.root)
+        })
 }
 
 fn apply_transform_editor_format(
@@ -3028,6 +3133,7 @@ pub fn workspace_object_to_unity_yaml_document(
         file_id,
         processed_animation_root: None,
         animation_clip_editor_format: false,
+        game_object_static_mark: false,
         generated_component_overlay: None,
         generated_prefab_internal: None,
         generated_lighting_data: None,
@@ -3102,6 +3208,7 @@ pub fn workspace_object_to_unity_yaml_document_with_processed_animation_root(
         file_id,
         processed_animation_root,
         animation_clip_editor_format,
+        game_object_static_mark: false,
         generated_component_overlay: None,
         generated_prefab_internal: None,
         generated_lighting_data: None,
@@ -3702,5 +3809,49 @@ mod tests {
         )
         .unwrap();
         assert_eq!(texture_offset, (0.0, 0.0));
+    }
+
+    fn batch_info_root(first: i32, count: i32) -> SerializedValue {
+        SerializedValue::Struct(vec![SerializedFieldValue {
+            name: "m_StaticBatchInfo".to_owned(),
+            value: SerializedValue::Struct(vec![
+                SerializedFieldValue {
+                    name: "firstSubMesh".to_owned(),
+                    value: SerializedValue::I32(first),
+                },
+                SerializedFieldValue {
+                    name: "subMeshCount".to_owned(),
+                    value: SerializedValue::I32(count),
+                },
+            ]),
+        }])
+    }
+
+    fn subset_root(count: usize) -> SerializedValue {
+        SerializedValue::Struct(vec![SerializedFieldValue {
+            name: "m_SubsetIndices".to_owned(),
+            value: SerializedValue::Array(vec![SerializedValue::U32(0); count]),
+        }])
+    }
+
+    #[test]
+    fn static_batch_info_marks_unless_default() {
+        // Mirrors the frozen `StaticBatchInfo.IsDefault`: only (0, 0) keeps
+        // the GameObject unmarked.
+        assert!(!renderer_static_batch_marks(&batch_info_root(0, 0)));
+        assert!(renderer_static_batch_marks(&batch_info_root(0, 1)));
+        assert!(renderer_static_batch_marks(&batch_info_root(1, 1)));
+        assert!(renderer_static_batch_marks(&batch_info_root(1, 0)));
+    }
+
+    #[test]
+    fn subset_indices_mark_without_batch_info() {
+        // Without `m_StaticBatchInfo` (older layouts), a non-empty
+        // `m_SubsetIndices` marks; an empty or missing one does not.
+        assert!(renderer_static_batch_marks(&subset_root(3)));
+        assert!(!renderer_static_batch_marks(&subset_root(0)));
+        assert!(!renderer_static_batch_marks(&SerializedValue::Struct(
+            vec![]
+        )));
     }
 }

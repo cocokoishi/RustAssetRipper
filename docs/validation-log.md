@@ -1,5 +1,11 @@
 # Validation log
 
+## 2026-10-14 GameObject static marking fixed; world fully clean
+
+- Mirrored the frozen editor-format static rule: renderers with non-default static-batch info (or non-empty subset indices on older layouts) mark their GameObject all-static. The mark is computed from attached renderer components through the reference graph at assignment time and applied to the editor field with loud failure on absence. Condition unit tests pass locally (2 new), formatting clean, release binary rebuilt.
+- Fresh replay plus re-audit: class 1 goes to 172/172 exact; zero classes with real diffs, zero unpaired documents, no regressions. The world is now fully clean except encoder-only PNG bytes (pixel-identical), the by-design auxiliary path map, and per-run GUID randomness (all normalized by the audit discipline).
+- Local checks: `git diff --check` exit 0; `cargo check --locked --all-targets` exit 0; module tests green. Full validation via GitHub Actions after push. Sample input read-only; outputs quarantined. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Sprite engine redirects fixed; world re-audit clean except static flags
 
 - Root-caused a world UI-image difference to missing Rust engine redirects for sprites/textures (reference: builtin-extra fileID 10911; Rust: duplicate export plus wrong reference). Fixed by mirroring the frozen sprite/texture cache keys with probe-generated band tables, exact three-state texture gate, and fail-open routing; 11/11 routing module tests pass locally (3 new), formatting clean, release binary rebuilt twice (final binary matches final source).

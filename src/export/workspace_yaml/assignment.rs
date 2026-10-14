@@ -387,6 +387,12 @@ fn workspace_assignments_to_unity_yaml_with_context<A: UnityYamlCollectionAssign
                         file_id,
                         processed_animation_root: None,
                         animation_clip_editor_format: false,
+                        game_object_static_mark: asset.class_id == 1
+                            && super::object_conversion::game_object_static_mark(
+                                objects,
+                                export_context.reference_graph,
+                                object,
+                            ),
                         generated_component_overlay: generated_component_overlay.as_ref(),
                         generated_prefab_internal: generated_prefab_internal.as_ref(),
                         generated_lighting_data,
