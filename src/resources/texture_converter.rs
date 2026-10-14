@@ -349,13 +349,23 @@ pub fn convert_to_bitmap_with_unity_version(
     };
 
     let layer_bytes = image.width * image.height * 4;
+    // Fallible allocation like the Crunch path below: hostile dimensions
+    // within the `TextureTooLarge` bound must fail loudly instead of
+    // aborting the process on allocation failure.
+    let mut pixels = Vec::new();
+    pixels
+        .try_reserve_exact(pixel_bytes)
+        .map_err(|_| TextureConvertError::AllocationFailed {
+            requested_bytes: pixel_bytes,
+        })?;
+    pixels.resize(pixel_bytes, 0);
     let mut bitmap = Bitmap {
         width: image.width,
         height: image.height,
         depth: image.depth,
         is_rgba8: is_rgba8_target(image.texture_format),
         has_alpha: has_alpha(image.texture_format),
-        pixels: vec![0; pixel_bytes],
+        pixels,
     };
 
     let mut input_offset = 0usize;

@@ -1,5 +1,11 @@
 # Validation log
 
+## 2026-10-14 Fallible plain-texture bitmap allocation
+
+- Finding: the non-Crunch converter allocated its output with `vec![0; pixel_bytes]` directly, while the Crunch path next to it uses `try_reserve_exact` plus `AllocationFailed`. Hostile dimensions inside the `TextureTooLarge` bound (up to 2 GiB) would abort the process on allocation failure instead of failing loudly like the reference's catchable exception. Sibling `vec![0; ...]` sites are test helpers with fixed small sizes, not production paths.
+- Fix: allocate with `try_reserve_exact` mapping to `AllocationFailed`, then fill; the OOM-failure arm itself is not deterministically testable, but existing success-path tests cover the changed lines and CI guards regressions. The `layer_bytes` arithmetic needs no guard: the earlier zero-dimension reject plus the checked `pixel_bytes` bound keep every product in range.
+- Local checks: `git diff --check` exit 0; single-file `rustfmt --check` clean. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No user input was read; Phase 1 remains open and Phase 2 remains locked. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Short-input sweep across all texture decoders
 
 - Gap: `decode_texture` dispatches to 60+ format decoders with no input-length gate; no test faced any decoder with truncated input. New test drives one discriminant per decoder on both the texture-format and graphics-format routes (50 + 44 entries) with 0/1/7-byte inputs at valid 4x4 dimensions: every call must fail loudly, never panic and never silently accept. If CI reports a panic or an `Ok`, the offending decoder needs a length guard next.
