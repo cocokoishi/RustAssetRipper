@@ -1,5 +1,10 @@
 # Validation log
 
+## 2026-10-14 Redirect mechanism confirmed quantitatively (reference side)
+
+- Structural GUID census over a world baseline's export (535 defined GUIDs from sidecars vs 518 distinct referenced GUIDs): exactly 3 dangling targets — the unity-builtin-extra predefined GUID x79, the unity-default-resources predefined GUID x20, and one band-predefined GUID x2. Redirected assets emit no files or sidecars by design, which is why the earlier sidecar-side scan found zero. This confirms `DIFF-ENGINE-REDIRECT-001` with real numbers: class-to-file gaps in that export are substantially engine redirects, and future Rust-vs-ref diffs must compare redirect sets, not counts. No sample content read beyond GUID tokens; nothing committed from outputs.
+- Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Full corpus baselined (22/22); new shapes catalogued
 
 - Final two reference baselines with saved inventories: 2022.3.6f1 world exact on anim/controller/cs/ogg/unity with a playable output and small material/texture/shader gaps; the 287MB giant exact on anim/controller/cs/ogg/unity with flare/playable outputs and small gaps in both directions. New shapes across the corpus: playable, flare, terrainlayer, blendtree/state sub-docs, renderTexture/texture2D raw outputs, otf/ttf fonts, physicMaterial. Every sample now has a reference leg; the Rust export leg and semantic diffs remain the open work.
