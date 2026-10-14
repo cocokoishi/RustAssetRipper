@@ -3,6 +3,7 @@
 ## 2026-10-14 Hostile Ogg inputs stay panic-free and well-formed
 
 - Gap: the Ogg converter faced only empty, garbage-prefix, and limit inputs; structured hostility (truncations, corrupt segment tables/checksums/granules) was untested, leaving the `ogg` crate reader's panic posture unknown. New test runs seven truncations plus three first-page corruptions through production conversion: every outcome must be a loud error, the documented empty output, or a well-formed WAV (RIFF/WAVE, full header).
+- Actions run `38512164137` is fully green on both platforms: lib 1,763 passed/1 ignored (hostile-Ogg regression green), CLI 128 passed, warnings-denied Clippy, release builds, changed-line formatting, and repository hygiene.
 - Local checks: `git diff --check` exit 0; single-file `rustfmt --check` clean. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No user input was read; Phase 1 remains open and Phase 2 remains locked. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 Hostile Vorbis packets fail loudly (no lewton panic found)
