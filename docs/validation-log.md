@@ -3,6 +3,7 @@
 ## 2026-10-14 Baselines reach seven; shader/material skip pattern noted
 
 - Three more reference baselines with class-level comparison notes (Rust inventories saved locally): second avatar exact on anim/png/controller/cs/mat/ogg with 6 shaders vs 8 class-48; fourth avatar exact on anim/png/mat/controller/cs/ogg with 13 shaders vs 19 class-48 plus renderTexture outputs and paired unknown raw types; third world exact on anim/cs/controller/ogg/unity with material/texture near-matches and a large 43-vs-63 shader gap. The shader shortfall recurs across samples (content-dependent, not constant); materials mostly exact with small gaps. All stay observations: the next static task is reading the reference exporter skip rules so future Rust-vs-ref diffs assert the right thing.
+- Actions run `38541093180` is fully green on both platforms (docs-only change), including the public-repository hygiene job.
 - Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No sample content committed; outputs quarantined in gitignored scratch. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 Three more reference baselines (observations, not verdicts)
