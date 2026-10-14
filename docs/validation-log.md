@@ -1,5 +1,10 @@
 # Validation log
 
+## 2026-10-14 Ten baselines; bundle-tag vs inner-version divergence confirmed
+
+- Three more reference baselines with saved Rust inventories: audio-heavy avatar exact on anim/ogg/png/mat/controller/cs (2-vs-3 shader gap); large avatar exact on anim/mat/controller/cs/ogg with 248-vs-249 png and 8-vs-12 shader gaps amid 992 MonoBehaviours; BlendTree avatar exact on anim/png/mat/controller/cs with sub-document outputs (4 blendtree, 1 state) and a 7-vs-8 shader gap. All three 6000-tagged bundles carry 2022.3.22f1 inner content, confirming the tag/content split is systematic. Texture gaps stay tiny; shader gaps stay content-dependent; all observations, not verdicts.
+- Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No sample content committed; outputs quarantined in gitignored scratch. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Engine-redirect rule recorded (static, both sides)
 
 - Read the frozen `EngineAssetsExporter`: engine-file assets redirect to predefined GUIDs instead of emitting files, with font and sprite-cache variants; the Rust port mirrors every piece (redirect collections, engine GUIDs, version-banded predefined tables, non-exportable redirect claims, engine fixtures). Recorded as `DIFF-ENGINE-REDIRECT-001` with the future diff rule (files plus per-asset redirect sets, never count equality). Corpus count gaps reinterpreted accordingly; they stay observations.

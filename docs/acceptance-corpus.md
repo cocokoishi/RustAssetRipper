@@ -54,9 +54,9 @@ gaps are expected on both sides through engine-asset redirects; see
 | VRC-AV02 | probe done | decode 642/642 OK | done: 473 files; 156/156 anim, 28/28 png, 9/9 controller, 15/15 cs, 8/8 mat, 1 ogg; 6 shader vs 8 class-48 (observation) | pending | parse+decode-OK; export pending |
 | VRC-AV03 | probe done | done: 3 nodes, 1 file (inner 2018.4.20f1, tree), 260 objs, 16MB resource node; decode 260/260 OK | done: 144 files; 25/25 png, 9/9 anim, 4/4 cs, 1 ogg; 13 mat vs 14 class-21 and 8 shader vs 10 class-48 (observations) | pending | parse+decode-OK; export pending |
 | VRC-AV04 | probe done | decode 1952/1952 OK | done: 1191 files; 370/370 anim, 67/67 png, 40/40 mat, 9/9 controller, 14/14 cs, 4/4 ogg; 13 shader vs 19 class-48, plus 4 renderTexture and paired raw types 1818360608/9 (observations) | pending | parse+decode-OK; export pending |
-| VRC-AV05 | probe done | decode 216/216 OK | pending | pending | parse+decode-OK; export pending |
-| VRC-AV06 | probe done | decode 3394/3394 OK | pending | pending | parse+decode-OK; export pending |
-| VRC-AV07 | probe done | decode 1373/1373 OK | pending | pending | parse+decode-OK; export pending |
+| VRC-AV05 | probe done | decode 216/216 OK | done: 281 files; 69/69 anim, 28/28 ogg, 6/6 png, 8/8 mat, 7/7 controller, 11/11 cs, inner 2022.3.22f1; 2 shader vs 3 class-48 (observation) | pending | parse+decode-OK; export pending |
+| VRC-AV06 | probe done | decode 3394/3394 OK | done: 2067 files; 623/623 anim, 26/26 mat, 9/9 controller, 18/18 cs, 3/3 ogg, inner 2022.3.22f1; 248 png vs 249 class-28, 8 shader vs 12 class-48 (observations); 992 class-114 noted | pending | parse+decode-OK; export pending |
+| VRC-AV07 | probe done | decode 1373/1373 OK | done: 1205 files; 499/499 anim, 41/41 png, 9/9 mat, 8/8 controller, 11/11 cs, inner 2022.3.22f1; 7 shader vs 8 class-48 (observation); 4 blendtree + 1 state sub-docs noted | pending | parse+decode-OK; export pending |
 | VRC-AV08 | probe done | decode 1364/1364 OK | pending | pending | parse+decode-OK; export pending |
 | VRC-AV09 | probe done | decode 3827/3827 OK | pending | pending | parse+decode-OK; export pending |
 | VRC-AV10 | probe done | decode 6529/6529 OK | pending | pending | parse+decode-OK; export pending |
