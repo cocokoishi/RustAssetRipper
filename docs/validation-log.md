@@ -1,5 +1,10 @@
 # Validation log
 
+## 2026-10-14 Meta timeCreated edges match DateTimeOffset exactly
+
+- Check: the `.meta` timestamp bounds (`-62_135_596_800`/`253_402_300_799`) equal .NET `DateTimeOffset` min/max in Unix seconds (verified by day-count arithmetic), but only interior values were tested. New test pins inclusive acceptance at both edges and rejection one second outside each.
+- Local checks: `git diff --check` exit 0; single-file `rustfmt --check` clean. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No user input was read; Phase 1 remains open and Phase 2 remains locked. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 CRN guard sweep completed (all six arms)
 
 - Follow-up: the guard test covered four arms; level-count surgery on the committed fixture closes the last two (zero levels hit the dimensions gate, fifteen levels exceed the 512-side mip chain). Every production guard arm in `convert_crunched_texture` now has a regression: header validity, dimensions/levels/faces, serialized dimensions, mip-chain bound, codec agreement, version gate, plus truncation, both decoder bombs, and the unknown-format/oversize entry checks.

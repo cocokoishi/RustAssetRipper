@@ -326,4 +326,30 @@ mod tests {
             ))
         ));
     }
+
+    #[test]
+    fn time_created_bounds_match_datetimeoffset_exactly_at_both_edges() {
+        // 0001-01-01T00:00:00Z and 9999-12-31T23:59:59Z in Unix seconds,
+        // inclusive on both ends like the source range check.
+        assert_eq!(
+            super::validate_time_created(-62_135_596_800),
+            Ok(-62_135_596_800)
+        );
+        assert_eq!(
+            super::validate_time_created(253_402_300_799),
+            Ok(253_402_300_799)
+        );
+        assert_eq!(
+            super::validate_time_created(-62_135_596_801),
+            Err(UnityMetaFileError::InvalidTimeCreated {
+                value: -62_135_596_801
+            })
+        );
+        assert_eq!(
+            super::validate_time_created(253_402_300_800),
+            Err(UnityMetaFileError::InvalidTimeCreated {
+                value: 253_402_300_800
+            })
+        );
+    }
 }
