@@ -1,5 +1,11 @@
 # Validation log
 
+## 2026-10-14 AV01 converges; W03 blocked on Terrain lighting
+
+- AV01's Avatar doc proven content-identical modulo style (strict token equality over 54851 chars); all avatars converged.
+- W03 (2022.3 world with Terrains) fails project export loudly at the LightingData gate: class-218 Terrain lighting data is unimplemented (reference emits terrain-backed renderer entries). Fail-closed with no partial output; recorded as DIFF-TERRAIN-LIGHTING-001, the next blocker.
+- Local checks: replay exit code nonzero as designed (explicit refusal, not a crash). Sample input read-only. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 AV11 converges on current binary
 
 - Fresh replay plus re-audit (6461 objects): 1606 paired files, zero unpaired; zero real-diff classes except two Avatar docs, each proven content-identical modulo style (strict token equality). No product changes needed.

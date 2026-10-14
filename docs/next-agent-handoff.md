@@ -1,5 +1,11 @@
 # RustAssetRipper hand-off — 2026-10-10
 
+## Latest current checkpoint — 2026-10-14 (AV01 converges; W03 blocked)
+
+- Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public (only class IDs/counts/field names in docs; audit outputs quarantined).
+- VRC-AV01 r2: CONVERGED (proven-equivalent Avatar; zero unpaired). Converged set: AV01-AV11, W01, W02 (all avatars plus two worlds). VRC-W03 r1: export fails loudly (class-218 Terrain lighting unimplemented; fail-closed, no partials). Next blocker: DIFF-TERRAIN-LIGHTING-001.
+- No product code changed this round (docs only).
+
 ## Latest current checkpoint — 2026-10-14 (AV11 converges)
 
 - Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public (only class IDs/counts/field names in docs; audit outputs quarantined).

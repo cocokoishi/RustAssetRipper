@@ -1,5 +1,9 @@
 # Source behavior and differential findings
 
+## DIFF-TERRAIN-LIGHTING-001 — Terrain lighting data unimplemented (open)
+
+A 2022.3 world with Terrain objects fails project export loudly at the LightingData gate (class 218 has no lighting-data reader; reference emits terrain-backed renderer entries with chunk UVs plus renderer IDs). Implementing it needs the frozen LightingData terrain path plus new readers and tests. Status: open, next blocker. The refusal is fail-closed and honest; no partial project is written.
+
 ## DIFF-EDITOR-COVERAGE-2022-001 — Animation joins the editor tree set (fixed)
 
 The Animation component exported release-shaped (no editor headers) on 2022.3 while the reference uses the editor layout. TPK-probed full editor base confirmed; added to the editor tree set following the established breadth pattern. No other sample contains this class (exhaustion survey), so the change is blast-free. Status: fixed and validated on the reporting sample.
