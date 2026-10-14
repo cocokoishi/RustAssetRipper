@@ -81,35 +81,14 @@ where
         }
     }
     if source.class_id == 21 && field_mode == UnityYamlObjectFieldMode::ProjectAsset && !stripped {
-        match (unity_version.major, unity_version.minor) {
-            (2017, 4) => insert_material_editor_fields(
-                &mut body,
-                &[
-                    "m_ObjectHideFlags",
-                    "m_PrefabParentObject",
-                    "m_PrefabInternal",
-                ],
-            )?,
-            (2018, 2) => insert_material_editor_fields(
-                &mut body,
-                &[
-                    "m_ObjectHideFlags",
-                    "m_CorrespondingSourceObject",
-                    "m_PrefabInternal",
-                ],
-            )?,
-            (2018, 3) | (2019, 4) => insert_material_editor_fields(
-                &mut body,
-                &[
-                    "m_ObjectHideFlags",
-                    "m_CorrespondingSourceObject",
-                    "m_PrefabInstance",
-                    "m_PrefabAsset",
-                ],
-            )?,
-            (2022, 3) => insert_late_material_editor_fields(&mut body, false)?,
-            (6000, 4) => insert_late_material_editor_fields(&mut body, true)?,
-            _ => {}
+        match material_editor_header_fields(unity_version.major, unity_version.minor) {
+            MaterialEditorHeaders::Early(fields) => {
+                insert_material_editor_fields(&mut body, fields)?
+            }
+            MaterialEditorHeaders::Late(include_allow_locking) => {
+                insert_late_material_editor_fields(&mut body, include_allow_locking)?
+            }
+            MaterialEditorHeaders::None => {}
         }
     }
     // The source walker labels native documents with asset.ClassName, not the
@@ -128,6 +107,41 @@ where
     };
     UnityYamlDocument::object(source.class_id, file_id, class_name, body, stripped)
         .map_err(UnityYamlObjectConversionError::NodeBuild)
+}
+
+/// Material editor-header selection by project version.
+///
+/// Early layouts prepend object/prefab header fields; late layouts (2022.3+)
+/// use the extended header set. Unity 2018.4 shares the 2018.3/2019.4 header
+/// set, probe-verified against reference output.
+enum MaterialEditorHeaders {
+    Early(&'static [&'static str]),
+    Late(bool),
+    None,
+}
+
+fn material_editor_header_fields(major: u32, minor: u32) -> MaterialEditorHeaders {
+    match (major, minor) {
+        (2017, 4) => MaterialEditorHeaders::Early(&[
+            "m_ObjectHideFlags",
+            "m_PrefabParentObject",
+            "m_PrefabInternal",
+        ]),
+        (2018, 2) => MaterialEditorHeaders::Early(&[
+            "m_ObjectHideFlags",
+            "m_CorrespondingSourceObject",
+            "m_PrefabInternal",
+        ]),
+        (2018, 3) | (2018, 4) | (2019, 4) => MaterialEditorHeaders::Early(&[
+            "m_ObjectHideFlags",
+            "m_CorrespondingSourceObject",
+            "m_PrefabInstance",
+            "m_PrefabAsset",
+        ]),
+        (2022, 3) => MaterialEditorHeaders::Late(false),
+        (6000, 4) => MaterialEditorHeaders::Late(true),
+        _ => MaterialEditorHeaders::None,
+    }
 }
 
 fn insert_material_editor_fields(
@@ -410,4 +424,48 @@ fn move_mapping_field_to_end(
         entries.push(field);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn early_fields(major: u32, minor: u32) -> Vec<&'static str> {
+        match material_editor_header_fields(major, minor) {
+            MaterialEditorHeaders::Early(fields) => fields.to_vec(),
+            _ => panic!("expected early headers for {major}.{minor}"),
+        }
+    }
+
+    #[test]
+    fn material_editor_headers_cover_2018_4_like_2018_3() {
+        // Reference output proves 2018.4 materials carry the 2018.3/2019.4
+        // header set; older minors keep their own sets and unmapped versions
+        // select nothing.
+        let expected = vec![
+            "m_ObjectHideFlags",
+            "m_CorrespondingSourceObject",
+            "m_PrefabInstance",
+            "m_PrefabAsset",
+        ];
+        assert_eq!(early_fields(2018, 4), expected);
+        assert_eq!(early_fields(2018, 3), expected);
+        assert_eq!(early_fields(2019, 4), expected);
+        assert_eq!(
+            early_fields(2018, 2),
+            vec![
+                "m_ObjectHideFlags",
+                "m_CorrespondingSourceObject",
+                "m_PrefabInternal",
+            ]
+        );
+        assert!(matches!(
+            material_editor_header_fields(2022, 3),
+            MaterialEditorHeaders::Late(false)
+        ));
+        assert!(matches!(
+            material_editor_header_fields(2020, 1),
+            MaterialEditorHeaders::None
+        ));
+    }
 }

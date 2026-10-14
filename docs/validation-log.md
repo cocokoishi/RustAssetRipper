@@ -1,5 +1,11 @@
 # Validation log
 
+## 2026-10-14 Material headers fixed; transforms remain
+
+- All 13 material documents missed four leading editor fields: the class-21 version match had no 2018.4 arm. Fixed by extracting the mapping into a tested helper (new regression test green) with the 2018.4 arm sharing the 2018.3 set. Formatting and Clippy clean locally; release rebuilt.
+- Fresh replay plus re-audit: materials resolve fully (1 exact, 12 GUID-mapped, 0 diffs); real-diff classes drop further with zero unpaired files and no regressions.
+- Local checks: `git diff --check` exit 0; `cargo check`/`cargo clippy` clean; module tests green. Full validation via GitHub Actions after push. Sample input read-only; outputs quarantined. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Cubemap route fixed; only paired-content diffs remain
 
 - The lone cubemap fell back for two pinned gates plus texture-only v7 cubemap fields. Fixed by opening both gates to the 2018_4 layout and parameterizing the three cubemap fields after the reference sidecar, pinned by body unit tests. A loud planning failure on the first attempt (second gate found by the honest error) was fixed in the same round. Formatting and Clippy clean locally; release rebuilt.
