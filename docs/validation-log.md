@@ -1,5 +1,11 @@
 # Validation log
 
+## 2026-10-14 Document stamps fixed; 11 classes remain
+
+- Reference stamps follow the editor layout version. Fixed on both document paths (shared workspace TPK-editor override plus controller pipeline version gates), pinned by a TPK-data test. Formatting and Clippy (warnings-denied locally) clean; release rebuilt.
+- Fresh replay plus re-audit: real-diff classes 13 to 11 (1102/1107 resolve fully) with zero unpaired files and no regressions.
+- Local checks: `git diff --check` exit 0; `cargo check`/`cargo clippy` clean; module tests green. Full validation via GitHub Actions after push. Sample input read-only; outputs quarantined. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Universal header backfill; 13 classes remain
 
 - The key census found 12 more classes missing the same four headers. Fixed by generalizing the backfill to all classes (idempotent, tested). Formatting and Clippy (warnings-denied locally) clean; release rebuilt.

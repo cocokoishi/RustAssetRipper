@@ -1,5 +1,9 @@
 # Source behavior and differential findings
 
+## DIFF-DOC-STAMPS-2018-001 — document version stamps follow the editor layout (fixed)
+
+Two stamp gaps shared one rule: reference documents stamp the editor layout version, while Rust stamped the release/file tree version on paths without an editor tree. Fixed twice: the shared workspace path now reads the TPK editor root version for 2018.4/2019.4 (fail-open), and the dedicated controller pipeline version-gates its two hardcoded AnimatorState/StateMachine stamps (2018.4 stamps 5, others 6). Pinned by a TPK-data regression test; controller workflow tests green. Re-audit: classes 1102/1107 resolve fully with no regressions. Status: fixed and validated on the reporting sample.
+
 ## DIFF-UNIVERSAL-HEADERS-2018-001 — editor headers backfilled for all classes (fixed)
 
 The per-class key census showed 12 more classes missing the same four editor headers on 2018.4 (components, controller, avatar, audio, light, renderer-adjacent, constraint). Fixed by generalizing the backfill: every non-stripped document without an editor tree now gets the universal headers, with class-1/4 extras unchanged and insertion skipping present fields. Re-audit: two classes resolve fully; all twelve gain exact headers with zero regressions. Remaining diffs in those classes are field-level (renderer GI sets, mesh/animator/light/constraint extras, version stamps), queued individually. Status: fixed and validated on the reporting sample.

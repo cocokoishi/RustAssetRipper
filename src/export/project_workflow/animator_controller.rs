@@ -1011,10 +1011,11 @@ pub(super) fn rebuild_animator_controller_documents(
                     child_index,
                     child_count,
                     &tos,
+                    project_version,
                 )?);
             }
             if let Some(state) = &node.synthetic_default_state {
-                documents.push(state_document(state, 0, 1, &tos)?);
+                documents.push(state_document(state, 0, 1, &tos, project_version)?);
             }
             documents.push(state_machine_document(
                 node,
@@ -1030,7 +1031,7 @@ pub(super) fn rebuild_animator_controller_documents(
             let target = drop.targets.get(&state.file_id).ok_or_else(|| {
                 invalid_project("AnimatorController dropped state has no separate-file identity")
             })?;
-            let mut document = state_document(state, 0, 1, &tos)?;
+            let mut document = state_document(state, 0, 1, &tos, project_version)?;
             set_document_anchor(&mut document, target.main_file_id)?;
             drop.dropped.try_reserve(1).map_err(|_| {
                 invalid_project("could not allocate AnimatorController dropped state documents")
@@ -1892,14 +1893,31 @@ fn layer_nodes(
     Ok(output)
 }
 
+fn animator_state_document_version(
+    project_version: crate::processing::scene_naming::SceneUnityVersion,
+) -> i64 {
+    // The 2018.4 AnimatorState/AnimatorStateMachine editor layouts stamp
+    // version 5 (TPK-probed against reference output); newer layouts stamp 6.
+    if project_version.major == 2018 && project_version.minor == 4 {
+        5
+    } else {
+        6
+    }
+}
+
 fn state_document(
     state: &StateConstant,
     state_index: usize,
     child_count: usize,
     tos: &HashMap<u32, String>,
+    project_version: crate::processing::scene_naming::SceneUnityVersion,
 ) -> Result<UnityYamlDocument, Box<dyn Error>> {
     let mut body = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
-    insert_field(&mut body, "serializedVersion", signed(6))?;
+    insert_field(
+        &mut body,
+        "serializedVersion",
+        signed(animator_state_document_version(project_version)),
+    )?;
     insert_field(&mut body, "m_ObjectHideFlags", signed(1))?;
     insert_field(&mut body, "m_CorrespondingSourceObject", local_pointer(0))?;
     insert_field(&mut body, "m_PrefabInstance", local_pointer(0))?;
@@ -2088,7 +2106,11 @@ fn state_machine_document(
     drop_targets: &HashMap<i64, DroppedTarget>,
 ) -> Result<UnityYamlDocument, Box<dyn Error>> {
     let mut body = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
-    insert_field(&mut body, "serializedVersion", signed(6))?;
+    insert_field(
+        &mut body,
+        "serializedVersion",
+        signed(animator_state_document_version(project_version)),
+    )?;
     insert_field(&mut body, "m_ObjectHideFlags", signed(1))?;
     insert_field(&mut body, "m_CorrespondingSourceObject", local_pointer(0))?;
     insert_field(&mut body, "m_PrefabInstance", local_pointer(0))?;

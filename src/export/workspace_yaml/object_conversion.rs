@@ -756,7 +756,13 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
         let document = serialized_object_value_to_unity_yaml_document(
             source,
             &payload.type_name,
-            type_root.version,
+            document_serialized_version(
+                class_id,
+                type_root.version,
+                editor_manager_type_tree.is_some(),
+                unity_version,
+                unity_version_text,
+            ),
             file_id,
             // SerializedFile's stripped bit selects a serialized type layout; the baseline YAML
             // marker comes from the owning hierarchy's StrippedAssets set, which is not wired
@@ -1895,6 +1901,42 @@ pub(super) fn apply_generic_header_backfill(
     let entries = yaml_body_entries(document)?;
     insert_editor_headers(entries);
     Ok(())
+}
+
+/// Selects the document `serializedVersion` stamp for the converted object.
+///
+/// Reference documents stamp the editor layout version. Objects converted
+/// through an editor TypeTree already carry it; versions without a ported
+/// editor tree would otherwise stamp the release/file tree version, which can
+/// be newer (per-patch file trees) than the editor layout. The TPK editor
+/// root version is the proven-correct stamp; lookup failures keep the existing
+/// version instead of failing the export.
+fn document_serialized_version(
+    class_id: i32,
+    type_version: i32,
+    editor_tree_used: bool,
+    unity_version: SceneUnityVersion,
+    unity_version_text: Option<&str>,
+) -> i32 {
+    if editor_tree_used || !prefab_header_backfill_version(unity_version.major, unity_version.minor)
+    {
+        return type_version;
+    }
+    let Some(text) = unity_version_text else {
+        return type_version;
+    };
+    let Some(factory_version) = FactoryUnityVersion::parse(text) else {
+        return type_version;
+    };
+    let Ok(Some((_, editor))) = reference_class_layouts().tpk_trees(class_id, &factory_version)
+    else {
+        return type_version;
+    };
+    editor
+        .nodes
+        .first()
+        .map(|node| node.version)
+        .unwrap_or(type_version)
 }
 
 /// Completes a converted GameObject document with the 2018.4/2019.4 editor

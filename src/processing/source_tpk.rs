@@ -746,6 +746,39 @@ mod tests {
     }
 
     #[test]
+    fn tpk_editor_roots_match_reference_document_stamps_for_2018_4() {
+        use crate::processing::asset_factory::FactoryUnityVersion;
+
+        // Reference documents stamp the editor layout version. The document
+        // stamp override reads these roots; per-patch file trees can report a
+        // newer release version (class 1102 reports 6 in the file) while the
+        // editor layout stays at the version below.
+        let database = SourceTpkDatabase::embedded();
+        let version = FactoryUnityVersion::parse("2018.4.20f1").unwrap();
+        for (class_id, expected) in [
+            (43, 9),
+            (82, 4),
+            (91, 5),
+            (95, 3),
+            (108, 8),
+            (137, 2),
+            (198, 6),
+            (199, 6),
+            (1102, 5),
+            (1107, 5),
+        ] {
+            let Some((_, editor)) = database.trees(class_id, &version).unwrap() else {
+                panic!("no TPK trees for class {class_id} at 2018.4.20f1");
+            };
+            assert_eq!(
+                editor.nodes.first().map(|node| node.version),
+                Some(expected),
+                "editor root version for class {class_id}"
+            );
+        }
+    }
+
+    #[test]
     fn base64_decoder_preserves_empty_ascii_and_unicode_strings() {
         assert_eq!(decode_base64(""), Some(Vec::new()));
         assert_eq!(decode_base64("SGVsbG8="), Some(b"Hello".to_vec()));
