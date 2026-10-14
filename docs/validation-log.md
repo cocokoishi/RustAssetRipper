@@ -1,5 +1,11 @@
 # Validation log
 
+## 2026-10-14 Importer version stamp fixed; audio body and cubemap remain
+
+- The 25 PNG sidecar diffs reduced to a single integer: reference writes TextureImporter `serializedVersion: 9` for 2018.4 while Rust's shared v7 body stamped 7. Fixed with a dedicated 2018_4 layout variant reusing the v7 body (same pattern as the shared 2019_4/2022_3 arm), pinned by a stamp-plus-body-parity test. Condition tests, formatting, and Clippy clean locally; release rebuilt.
+- Fresh replay plus re-audit: all 25 PNG sidecars now match (additional diffs 28 to 4); PNGs remain pixel-identical and the OGG packet-identical. Remaining: the OGG sidecar body (2018.4 AudioImporter field order/content), the raw cubemap route, and paired-content diffs. No regressions.
+- Local checks: `git diff --check` exit 0; `cargo check`/`cargo clippy` clean; module tests green. Full validation via GitHub Actions after push. Sample input read-only; outputs quarantined. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Inner version rules; 2018 bands plus routes land, importer bodies open
 
 - Version truth established: export decisions follow the inner SerializedFile version (both sides write ProjectVersion 2018.4.20f1), not the 6000 bundle tag; the 6000-band tables stay dormant probe-verified data. Added 2018.3.0b6 predefined bands (12/182/8/51 rows), mapped (2018,4) to the 2018_3 texture layout as a verifiable hypothesis, and opened the audio decode gate to 2018.4. Module tests 13/13 locally; formatting clean; release rebuilt.

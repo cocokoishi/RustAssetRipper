@@ -39,6 +39,7 @@ pub enum TextureImporterLayout {
     Unity2017_4,
     Unity2018_2,
     Unity2018_3,
+    Unity2018_4,
     Unity2019_4,
     Unity2022_3,
 }
@@ -54,7 +55,8 @@ impl TextureImporterLayout {
             (2017, 2) => Some(Self::Unity2017_2),
             (2017, 4) => Some(Self::Unity2017_4),
             (2018, 2) => Some(Self::Unity2018_2),
-            (2018, 3 | 4) => Some(Self::Unity2018_3),
+            (2018, 3) => Some(Self::Unity2018_3),
+            (2018, 4) => Some(Self::Unity2018_4),
             (2019, 4) => Some(Self::Unity2019_4),
             (2022, 3) => Some(Self::Unity2022_3),
             _ => None,
@@ -469,10 +471,27 @@ fn texture_importer(
             return texture_importer_v4_2017(&facts, asset_bundle_name, sprite_mesh_type, false);
         }
         TextureImporterLayout::Unity2018_2 => {
-            return texture_importer_v7(&facts, asset_bundle_name, sprite_mesh_type, true, true);
+            return texture_importer_v7(&facts, asset_bundle_name, sprite_mesh_type, true, true, 7);
         }
         TextureImporterLayout::Unity2018_3 => {
-            return texture_importer_v7(&facts, asset_bundle_name, sprite_mesh_type, false, true);
+            return texture_importer_v7(
+                &facts,
+                asset_bundle_name,
+                sprite_mesh_type,
+                false,
+                true,
+                7,
+            );
+        }
+        TextureImporterLayout::Unity2018_4 => {
+            return texture_importer_v7(
+                &facts,
+                asset_bundle_name,
+                sprite_mesh_type,
+                false,
+                true,
+                9,
+            );
         }
         TextureImporterLayout::Unity2019_4 | TextureImporterLayout::Unity2022_3 => {}
     }
@@ -793,8 +812,9 @@ fn texture_importer_v7(
     sprite_mesh_type: i64,
     has_name: bool,
     has_psd_remove_matte_option: bool,
+    serialized_version: i64,
 ) -> Result<UnityYamlNode, Box<dyn Error>> {
-    let mut importer = mapping(vec![("serializedVersion", signed(7))])?;
+    let mut importer = mapping(vec![("serializedVersion", signed(serialized_version))])?;
     if has_name {
         importer.insert_field("name", UnityYamlNode::string(""))?;
     }
@@ -1573,5 +1593,56 @@ mod tests {
             signed_scalar(mapping_field(&plan.importer, "streamingMipmapsPriority")),
             0
         );
+    }
+
+    fn v7_facts() -> TextureImporterFacts {
+        TextureImporterFacts {
+            enable_mipmap: true,
+            srgb_texture: true,
+            is_readable: false,
+            streaming_mipmaps: false,
+            streaming_mipmaps_priority: 0,
+            format: 4,
+            max_texture_size: 2048,
+            filter_mode: 1,
+            aniso: 1,
+            mip_bias: 0.0,
+            wrap_u: 0,
+            wrap_v: 0,
+            wrap_w: 0,
+            normal_map: false,
+        }
+    }
+
+    fn without_version_stamp(node: &UnityYamlNode) -> UnityYamlNode {
+        let mut stripped = node.clone();
+        let UnityYamlNodeKind::Mapping { entries, .. } = &mut stripped.kind else {
+            panic!("expected a YAML mapping")
+        };
+        let Some((key, _)) = entries.first() else {
+            panic!("expected a non-empty YAML mapping")
+        };
+        let UnityYamlNodeKind::Scalar(UnityYamlScalar::PlainString(key)) = &key.kind else {
+            panic!("expected a string YAML key")
+        };
+        assert_eq!(key, "serializedVersion");
+        entries.remove(0);
+        stripped
+    }
+
+    #[test]
+    fn unity_2018_4_importer_stamps_version_9_on_the_v7_body() {
+        assert_eq!(
+            TextureImporterLayout::for_project_version(
+                SceneUnityVersion::parse("2018.4.20f1").unwrap()
+            ),
+            Some(TextureImporterLayout::Unity2018_4)
+        );
+        let facts = v7_facts();
+        let seven = texture_importer_v7(&facts, None, 1, false, true, 7).unwrap();
+        let nine = texture_importer_v7(&facts, None, 1, false, true, 9).unwrap();
+        assert_eq!(signed_scalar(mapping_field(&seven, "serializedVersion")), 7);
+        assert_eq!(signed_scalar(mapping_field(&nine, "serializedVersion")), 9);
+        assert_eq!(without_version_stamp(&seven), without_version_stamp(&nine));
     }
 }
