@@ -1,5 +1,11 @@
 # RustAssetRipper hand-off — 2026-10-10
 
+## Latest current checkpoint — 2026-10-14 (first real triage, zero errors)
+
+- Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public. Sample inputs read-only; nothing committed from them.
+- Inventoried VRC-AV01/W01/AV03/W02 via rlib-linked probe (triage-grade): containers, versions, class histograms, resource nodes all parse with zero errors; one unknown raw type noted as an observation. Next: object-decode triage on VRC-AV01, then reference-side runs.
+- Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push.
+
 ## Latest current checkpoint — 2026-10-14 (acceptance corpus registered)
 
 - Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are now the top acceptance corpus per user direction; synthetic only for minimization/regression. Strict anonymity in all public surfaces (IDs + truncated hashes only; samples never committed).

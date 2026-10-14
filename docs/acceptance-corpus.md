@@ -47,9 +47,9 @@ version-routing blocker exists at the TypeTree level.
 
 | ID | Rust replay | Inventory | Reference export | Semantic diff | Verdict |
 |----|-------------|-----------|------------------|---------------|---------|
-| VRC-AV01 | pending | pending | pending | pending | — |
+| VRC-AV01 | probe done | done: 2 nodes, 1 file (2022.3.22f1, tree), 2753 objs, 1.5MB resource node | pending | pending | parse-OK; decode/export pending |
 | VRC-AV02 | pending | pending | pending | pending | — |
-| VRC-AV03 | pending | pending | pending | pending | — |
+| VRC-AV03 | probe done | done: 3 nodes, 1 file (inner 2018.4.20f1, tree), 260 objs, 16MB resource node | pending | pending | parse-OK; decode/export pending |
 | VRC-AV04 | pending | pending | pending | pending | — |
 | VRC-AV05 | pending | pending | pending | pending | — |
 | VRC-AV06 | pending | pending | pending | pending | — |
@@ -58,8 +58,8 @@ version-routing blocker exists at the TypeTree level.
 | VRC-AV09 | pending | pending | pending | pending | — |
 | VRC-AV10 | pending | pending | pending | pending | — |
 | VRC-AV11 | pending | pending | pending | pending | — |
-| VRC-W01 | pending | pending | pending | pending | — |
-| VRC-W02 | pending | pending | pending | pending | — |
+| VRC-W01 | probe done | done: 3 nodes, 2 files (2022.3.22f1, trees), 1008 objs, 243KB resource node | pending | pending | parse-OK; decode/export pending |
+| VRC-W02 | probe done | done: fmt-7 bundle, 3 nodes, 2 files (2019.4.31f1, trees), 46 objs, 12MB resource node | pending | pending | parse-OK; decode/export pending |
 | VRC-W03 | pending | pending | pending | pending | — |
 | VRC-W04 | pending | pending | pending | pending | — |
 | VRC-W05 | pending | pending | pending | pending | — |
@@ -72,6 +72,31 @@ version-routing blocker exists at the TypeTree level.
 
 Acceptance order: smallest first (VRC-AV01, VRC-W01), then by size.
 Reference outputs and Rust outputs stay in gitignored local scratch only.
+
+## First triage notes (anonymous, structural only)
+
+Probed with an rlib-linked inventory driver (Oct-13 prebuilt rlib: parse,
+entry reads, metadata histograms only; no object decode, no conversion).
+Findings are triage-grade and must be rechecked against HEAD before any
+become blockers.
+
+- VRC-AV01: dense avatar file — 100 GameObjects/Transforms with 906
+  class-74, 1520 class-114, 11 class-115, 104 class-28, single class-21/43.
+  Zero entry/parse errors.
+- VRC-W01: world file — 172 GameObjects across 2 SerializedFiles, broad
+  renderer/collider/audio/lighting class spread including one class-83.
+  Zero entry/parse errors.
+- VRC-AV03: inner SerializedFile reports 2018.4.20f1 while the bundle tag
+  reads 6000.0.60f1 (build Editor vs content runtime; routing uses inner
+  versions). Carries a 16MB resource node, one class-89 Cubemap, and one
+  unknown raw type 1773428102 (parsed without error; identity open).
+  Zero entry/parse errors.
+- VRC-W02: oldest container (fmt 7) parses cleanly; small world graph with
+  scene-level classes (20/104/108/150/157/196 family). Zero entry/parse
+  errors.
+
+No container/metadata blocker surfaced in the first four. Next: object
+decode triage on VRC-AV01 (class-74/114 heavy), then reference-side runs.
 
 ## Open tooling gaps
 
