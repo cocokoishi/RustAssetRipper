@@ -389,7 +389,17 @@ fn convert_crunched_texture(
             byte_count: image.data.len(),
         })?;
     let mut info = CrnTextureInfo::default();
-    if !info.crnd_get_texture_info(image.data, data_size) {
+    // The vendored decoder indexes attacker-controlled header offsets without
+    // bounds checks (header level loop, table and palette section slices), so
+    // malformed input can panic inside header parsing. The decoder keeps no
+    // global state (verified: no statics in the vendored crate), so catching
+    // the panic here converts a crash into the same loud invalid-header error
+    // a clean rejection produces.
+    let header_ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        info.crnd_get_texture_info(image.data, data_size)
+    }))
+    .unwrap_or(false);
+    if !header_ok {
         return Err(TextureConvertError::CrunchDecodeFailed {
             reason: "invalid CRN header",
         });
@@ -470,22 +480,32 @@ fn convert_crunched_texture(
         }
     })?;
     decoded_pixels.resize(pixel_count, 0_u32);
-    let decode_result = if unity_crunch {
-        texture2ddecoder::decode_unity_crunch_faces(
-            image.data,
-            image.width,
-            image.height,
-            image.depth,
-            &mut decoded_pixels,
-        )
-    } else {
-        texture2ddecoder::decode_crunch_faces(
-            image.data,
-            image.width,
-            image.height,
-            image.depth,
-            &mut decoded_pixels,
-        )
+    // Same containment as header parsing: section and level unpacking slice
+    // attacker-controlled offsets, so a crafted header that survives the
+    // checks above can still panic inside the decoder. A caught panic maps to
+    // the same loud decode failure an error return produces.
+    let decode_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if unity_crunch {
+            texture2ddecoder::decode_unity_crunch_faces(
+                image.data,
+                image.width,
+                image.height,
+                image.depth,
+                &mut decoded_pixels,
+            )
+        } else {
+            texture2ddecoder::decode_crunch_faces(
+                image.data,
+                image.width,
+                image.height,
+                image.depth,
+                &mut decoded_pixels,
+            )
+        }
+    }));
+    let decode_result = match decode_result {
+        Ok(inner) => inner,
+        Err(_) => Err("CRN decoder panicked on malformed input"),
     };
     decode_result.map_err(|reason| TextureConvertError::CrunchDecodeFailed { reason })?;
 
@@ -1089,6 +1109,55 @@ mod tests {
                 "cut {cut} must fail loudly"
             );
         }
+    }
+
+    #[test]
+    fn malicious_crn_headers_fail_loudly_instead_of_panicking() {
+        // The vendored decoder slices attacker-controlled header offsets
+        // without bounds checks. Both bombs below panicked before the
+        // boundary containment landed; each must now fail with a loud error.
+        let data = &include_bytes!("../../tests/fixtures/crunch/classic_dxt1.crn")[..];
+        let version = UnityVersion::parse("2017.2.0f1").unwrap();
+        // A short buffer with a large level count drives the header level
+        // loop past the buffer end.
+        let mut level_bomb = data[..96].to_vec();
+        level_bomb[16] = 8;
+        let image = TextureImage {
+            texture_format: 28,
+            graphics_format: 0,
+            width: 512,
+            height: 512,
+            depth: 1,
+            image_size: level_bomb.len(),
+            data: &level_bomb,
+        };
+        assert_eq!(
+            convert_to_bitmap_with_unity_version(&image, Some(version)),
+            Err(TextureConvertError::CrunchDecodeFailed {
+                reason: "invalid CRN header"
+            }),
+            "level bomb"
+        );
+        // A full-length buffer with a huge table offset survives header
+        // parsing and reaches section unpacking.
+        let mut tables_bomb = data.to_vec();
+        tables_bomb[67..70].copy_from_slice(&[0xFF; 3]);
+        let image = TextureImage {
+            texture_format: 28,
+            graphics_format: 0,
+            width: 512,
+            height: 512,
+            depth: 1,
+            image_size: tables_bomb.len(),
+            data: &tables_bomb,
+        };
+        assert_eq!(
+            convert_to_bitmap_with_unity_version(&image, Some(version)),
+            Err(TextureConvertError::CrunchDecodeFailed {
+                reason: "CRN decoder panicked on malformed input"
+            }),
+            "tables bomb"
+        );
     }
 
     #[test]

@@ -3,6 +3,16 @@
 ## 2026-10-14 Truncated-CRN clean-failure regression
 
 - Gap: the CRN wrapper never faced truncated input; a short read must fail loudly, never panic or return a short-but-Ok bitmap. New test cuts the committed DXT1 fixture at eight points (empty through mid-payload) and asserts every cut errors through the production wrapper.
+- Actions run `38509369203` is fully green on both platforms (truncation regression included), with warnings-denied Clippy, release builds, changed-line formatting, and repository hygiene.
+
+## 2026-10-14 CRN decoder panic containment (malicious headers)
+
+- Finding: the truncation green run only proves short reads fail; the header-declared total-size gate rejects those before unpacking. Static audit of the vendored decoder found two panic sites that gate cannot cover: the header level loop reads `p_data[70+i*4..]` for an attacker-controlled level count, and table/palette section unpacking slices attacker-controlled offsets, all without bounds checks (`copy_from_slice`/`[ofs..]` panic on short input). A short buffer with a large level count panics inside header parsing; a full-length buffer with a huge table offset survives parsing and panics in section unpacking. Both are reachable through `convert_crunched_texture`.
+- Fix: contain both decoder call sites (`crnd_get_texture_info` and the classic/Unity face decoders) with `catch_unwind` mapping to the same loud `CrunchDecodeFailed` errors clean rejections produce. Soundness: the vendored crate keeps no global state (verified by source search), so a caught panic cannot poison later calls; OOM-class aborts are unaffected as before.
+- Regression: a level-count bomb (96-byte prefix with levels 8) and a table-offset bomb (full-length fixture with `tables_ofs` set to `0xFFFFFF`) each assert their loud error instead of a panic.
+- Local checks: `git diff --check` exit 0; single-file `rustfmt --check` clean. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No user input was read; Phase 1 remains open and Phase 2 remains locked. Unity import/runtime and UABEA were NOT RUN.
+
+- Gap: the CRN wrapper never faced truncated input; a short read must fail loudly, never panic or return a short-but-Ok bitmap. New test cuts the committed DXT1 fixture at eight points (empty through mid-payload) and asserts every cut errors through the production wrapper.
 - Local checks: `git diff --check` exit 0; single-file `rustfmt --check` clean. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No user input was read; Phase 1 remains open and Phase 2 remains locked. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 Crunch guard-arm regression (no new fixtures)
