@@ -1,5 +1,10 @@
 # Validation log
 
+## 2026-10-14 Full corpus baselined (22/22); new shapes catalogued
+
+- Final two reference baselines with saved inventories: 2022.3.6f1 world exact on anim/controller/cs/ogg/unity with a playable output and small material/texture/shader gaps; the 287MB giant exact on anim/controller/cs/ogg/unity with flare/playable outputs and small gaps in both directions. New shapes across the corpus: playable, flare, terrainlayer, blendtree/state sub-docs, renderTexture/texture2D raw outputs, otf/ttf fonts, physicMaterial. Every sample now has a reference leg; the Rust export leg and semantic diffs remain the open work.
+- Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No sample content committed; outputs quarantined in gitignored scratch. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Twenty baselines; largest shader gap noted
 
 - Two more baselines with saved inventories: largest avatar exact on anim/cs/controller/ogg with sub-document output and small texture/material gaps plus a 27-vs-37 shader gap; mid-large world exact on anim/controller/cs/ogg/unity with a terrainlayer output and the largest shader gap so far (72 vs 103). Texture overages and gaps both recur; shader gaps scale with content size. All observations, not verdicts.

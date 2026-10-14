@@ -70,8 +70,8 @@ gaps are expected on both sides through engine-asset redirects; see
 | VRC-W07 | probe done | decode 42222/42222 OK | done: 3284 files; 79/79 anim, 27/27 controller, 55/55 cs, 27/27 ogg, 1 unity, 9 ttf; 332 mat vs 343 class-21, 383 texture files vs 386 class-28, 72 shader vs 86 class-48 (observations; largest material gap so far) | pending | parse+decode-OK; export pending |
 | VRC-W08 | probe done | decode 1993/1993 OK | done: 526 files; 4/4 anim, 30/30 mat, 4/4 controller, 20/20 cs, 2/2 ogg, 1 unity; 131 texture files vs 121 class-28 (overage: cubemap/sprite-derived PNGs suspected amid 10 class-89 and 34 sprite pairs), 34 shader vs 40 class-48 (observations) | pending | parse+decode-OK; export pending |
 | VRC-W09 | probe done | decode 10587/10587 OK | done: 2099 files; 58/58 anim, 13/13 controller, 67/67 cs, 26/26 ogg, 1 unity, 1 terrainlayer, 1 overrideController; 205 mat vs 214 class-21, 291 texture files vs 300 class-28, 72 shader vs 103 class-48 (observations; largest shader gap) | pending | parse+decode-OK; export pending |
-| VRC-W10 | probe done | decode 72365/72365 OK | pending | pending | parse+decode-OK; export pending |
-| VRC-W11 | probe done | decode 33974/33974 OK | pending | pending | parse+decode-OK; export pending |
+| VRC-W10 | probe done | decode 72365/72365 OK | done: 2182 files; 1/1 anim, 1/1 controller, 29/29 cs, 1/1 ogg, 1 unity, 1 playable, inner 2022.3.6f1; 86 mat vs 91 class-21, 247 texture files vs 249 class-28, 44 shader vs 52 class-48 (observations) | pending | parse+decode-OK; export pending |
+| VRC-W11 | probe done | decode 33974/33974 OK | done: 2207 files; 93/93 anim, 8/8 controller, 39/39 cs, 1/1 ogg, 1 unity, 1 flare, 1 playable; 141 mat vs 145 class-21, 260 png vs 257 class-28, 53 shader vs 59 class-48 (observations) | pending | parse+decode-OK; export pending |
 
 Acceptance order: smallest first (VRC-AV01, VRC-W01), then by size.
 Reference outputs and Rust outputs stay in gitignored local scratch only.
