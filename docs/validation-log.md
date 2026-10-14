@@ -1,5 +1,10 @@
 # Validation log
 
+## 2026-10-14 Twelve baselines; unknown raw-type IDs recur across samples
+
+- Two more world baselines with saved inventories: first exact on anim/controller/cs/unity with material/texture/shader gaps plus big class-222/224 families and an unknown raw type also seen elsewhere; second exact on anim/controller/cs/ogg/unity/renderTexture with a 104-vs-103 texture overage. The unknown raw-type IDs (850595691, 1773428102, 1818360608/9) recur across samples, suggesting well-known SDK/stripped types rather than per-file accidents — flagged as a static identification task (no samples needed). New shapes: physicMaterial, otf/ttf fonts. All observations, not verdicts.
+- Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No sample content committed; outputs quarantined in gitignored scratch. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Ten baselines; bundle-tag vs inner-version divergence confirmed
 
 - Three more reference baselines with saved Rust inventories: audio-heavy avatar exact on anim/ogg/png/mat/controller/cs (2-vs-3 shader gap); large avatar exact on anim/mat/controller/cs/ogg with 248-vs-249 png and 8-vs-12 shader gaps amid 992 MonoBehaviours; BlendTree avatar exact on anim/png/mat/controller/cs with sub-document outputs (4 blendtree, 1 state) and a 7-vs-8 shader gap. All three 6000-tagged bundles carry 2022.3.22f1 inner content, confirming the tag/content split is systematic. Texture gaps stay tiny; shader gaps stay content-dependent; all observations, not verdicts.

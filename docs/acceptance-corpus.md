@@ -64,8 +64,8 @@ gaps are expected on both sides through engine-asset redirects; see
 | VRC-W01 | probe done | done: 3 nodes, 2 files (2022.3.22f1, trees), 1008 objs, 243KB resource node; decode 1008/1008 OK | done: 478 files incl 1 unity, 1 ogg, 102 png vs 104 class-28 (observation, not a verdict) | pending | parse+decode-OK; export pending |
 | VRC-W02 | probe done | done: fmt-7 bundle, 3 nodes, 2 files (2019.4.31f1, trees), 46 objs, 12MB resource node; decode 46/46 OK | done: 37 files incl 1 unity, 1 ogg, 2/2 png, 5/5 cs | pending | parse+decode-OK; export pending |
 | VRC-W03 | probe done | decode 2274/2274 OK | done: 1080 files; 7/7 anim, 44/44 cs, 3/3 controller, 4/4 ogg, 1 unity, 37 prefab; 43 mat vs 46 class-21, 43 shader vs 63 class-48, 169 texture files vs 173 class-28 (observations); class-213 x91 noted | pending | parse+decode-OK; export pending |
-| VRC-W04 | probe done | decode 15871/15871 OK | pending | pending | parse+decode-OK; export pending |
-| VRC-W05 | probe done | decode 1441/1441 OK | pending | pending | parse+decode-OK; export pending |
+| VRC-W04 | probe done | decode 15871/15871 OK | done: 787 files; 30/30 anim, 6/6 controller, 38/38 cs, 1 unity; 107 mat vs 111 class-21, 101 texture files vs 108 class-28, 9 shader vs 16 class-48 (observations); big class-222/224 families and unknown raw type 850595691 noted | pending | parse+decode-OK; export pending |
+| VRC-W05 | probe done | decode 1441/1441 OK | done: 637 files; 2/2 anim, 1/1 controller, 27/27 cs, 3/3 ogg, 1 unity, 1 renderTexture; 27 mat vs 29 class-21, 104 texture files vs 103 class-28, 36 shader vs 43 class-48 (observations); unknown raw types 850595691/1773428102/1818360609 recur across samples | pending | parse+decode-OK; export pending |
 | VRC-W06 | probe done | decode 426664/426664 OK | pending | pending | parse+decode-OK; export pending |
 | VRC-W07 | probe done | decode 42222/42222 OK | pending | pending | parse+decode-OK; export pending |
 | VRC-W08 | probe done | decode 1993/1993 OK | pending | pending | parse+decode-OK; export pending |

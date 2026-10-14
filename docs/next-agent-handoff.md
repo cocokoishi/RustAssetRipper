@@ -1,5 +1,11 @@
 # RustAssetRipper hand-off — 2026-10-10
 
+## Latest current checkpoint — 2026-10-14 (twelve baselines, recurring IDs)
+
+- Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public. Sample inputs read-only; nothing committed from them (reference outputs quarantined in gitignored scratch).
+- Twelve reference baselines captured; unknown raw-type IDs recur across samples (static identification task queued); font/physicMaterial shapes noted. Next: remaining large-sample baselines plus Rust-side export comparison once a binary strategy exists.
+- Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push.
+
 ## Latest current checkpoint — 2026-10-14 (ten baselines, tag split)
 
 - Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public. Sample inputs read-only; nothing committed from them (reference outputs quarantined in gitignored scratch).
