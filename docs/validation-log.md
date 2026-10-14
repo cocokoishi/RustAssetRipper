@@ -4,6 +4,7 @@
 
 - The OGG sidecar differed in shape, not just IDs: 2018.4 writes stamp 6 with six-field settings and top-level preload, versus Rust's 2022.3 shape. Fixed with a dedicated 2018.4 builder dispatched by project version, pinned by a shape unit test. Formatting and Clippy clean locally; release rebuilt.
 - Fresh replay plus re-audit: the OGG sidecar matches (additional diffs 4 to 3); audio stays packet-identical (76/76). Remaining: the raw cubemap route and paired-content diffs. No regressions.
+- Actions run `38589287504` is fully green on both platforms (2018.4 audio importer body), including warnings-denied Clippy, the release build, changed-line formatting, and the public-repository hygiene job.
 - Local checks: `git diff --check` exit 0; `cargo check`/`cargo clippy` clean; module tests green. Full validation via GitHub Actions after push. Sample input read-only; outputs quarantined. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 Importer version stamp fixed; audio body and cubemap remain
