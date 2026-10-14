@@ -1,5 +1,11 @@
 # RustAssetRipper hand-off — 2026-10-10
 
+## Latest current checkpoint — 2026-10-14 (first Rust replay: parity)
+
+- Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public. Sample input read-only; outputs quarantined in gitignored scratch.
+- First HEAD replay (smallest avatar) exits 0 with per-extension histogram identical to reference in every row; semantic content diff next (pair by stable identity). Open: CLI object count vs file objects (9780 vs 2753).
+- Local checks: `git diff --check` exit 0. Product validation via GitHub Actions after push.
+
 ## Latest current checkpoint — 2026-10-14 (HEAD binary ready)
 
 - Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public. Sample inputs read-only; nothing committed from them or outputs.
