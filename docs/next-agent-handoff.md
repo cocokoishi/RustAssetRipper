@@ -1,5 +1,11 @@
 # RustAssetRipper hand-off — 2026-10-10
 
+## Latest current checkpoint — 2026-10-14 (acceptance corpus registered)
+
+- Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are now the top acceptance corpus per user direction; synthetic only for minimization/regression. Strict anonymity in all public surfaces (IDs + truncated hashes only; samples never committed).
+- Registered `docs/acceptance-corpus.md` (22 samples, container facts, TPK coverage OK) and recorded the pending FSB5 CI success. Next: Rust-side structural triage from smallest sample upward; binary procurement still open.
+- Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push.
+
 ## Latest current checkpoint — 2026-10-14 (FSB5 export-project integration)
 
 - Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Phase 1 open, Phase 2 locked; no user input, Unity, or UABEA used.

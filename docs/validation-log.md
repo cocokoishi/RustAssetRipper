@@ -1,5 +1,11 @@
 # Validation log
 
+## 2026-10-14 Real-sample acceptance corpus registered (anonymous)
+
+- User direction: real VRCA/VRCW become the top acceptance corpus; synthetic coverage only minimizes/reproduces/locks real findings. Registered `docs/acceptance-corpus.md`: 22 UnityFS samples under anonymous IDs (kind+size order) with desensitized hashes, sizes, bundle format versions, and Unity revisions. Header-only reads; no sample content opened. All four Unity revisions have TPK rows, so no version-routing blocker at the TypeTree level. FSB5 project-test run `38528593227` is fully green on both platforms (recorded late: lib 1,765, CLI 131).
+- Tooling gaps stated in the ledger: no HEAD Rust binary obtainable without local builds or permission changes (triage via rlib probes with caveats; gate replays need a binary strategy), and no headless reference export driver yet.
+- Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No sample content committed; all outputs stay in gitignored scratch. Phase 1 remains open and Phase 2 remains locked pending the stage gate; real inputs used as locally authorized acceptance data only. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 FSB5 export-project integration test
 
 - New: `export_project_emits_fsb5_audio_ogg_and_importer` covers the 2022.3-gated project audio binary route end to end. Groundwork: `make_audio_clip_file` was refactored into a version-parameterized `make_audio_clip_file_with_version` (existing 3.5 callers byte-identical), and the test uses a 2022.3 fixture with the silent stereo FSB5 bytes. Tree-walk asserts find one remuxed Ogg (magic plus 5 packets with zero audio payloads) and its `AudioImporter` sidecar. If routing declines the binary path, CI reports the actual file list.
