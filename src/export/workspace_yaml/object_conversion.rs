@@ -1594,6 +1594,7 @@ fn set_animation_clip_editor_field(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_scene_object_editor_format(
     editor_root: &mut SerializedValue,
     source_root: &SerializedValue,
@@ -1730,10 +1731,10 @@ fn renderer_static_batch_marks(root: &SerializedValue) -> bool {
             .unwrap_or(0);
         return first != 0 || count != 0;
     }
-    if let Ok(Some(subset)) = root.unique_field_in_base_chain("m_SubsetIndices") {
-        if let SerializedValue::Array(items) = subset {
-            return !items.is_empty();
-        }
+    if let Ok(Some(SerializedValue::Array(items))) =
+        root.unique_field_in_base_chain("m_SubsetIndices")
+    {
+        return !items.is_empty();
     }
     false
 }
