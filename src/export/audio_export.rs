@@ -2443,10 +2443,10 @@ mod tests {
         assert_eq!(&wav[..4], b"RIFF");
         assert_eq!(&wav[8..12], b"WAVE");
         assert_eq!(u16::from_le_bytes(wav[22..24].try_into().unwrap()), 6);
-        assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()), 44_100);
+        assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()), 48_000);
         assert_eq!(
             u32::from_le_bytes(wav[28..32].try_into().unwrap()),
-            44_100 * 24
+            48_000 * 24
         );
         assert_eq!(u16::from_le_bytes(wav[32..34].try_into().unwrap()), 24);
         assert_eq!(u16::from_le_bytes(wav[34..36].try_into().unwrap()), 32);
