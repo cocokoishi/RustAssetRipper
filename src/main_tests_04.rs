@@ -1491,7 +1491,7 @@
             include_bytes!("../tests/fixtures/crn-texture-512.assets"),
         )
         .unwrap();
-        let input = TestInputDirectory {
+        let _input_guard = TestInputDirectory {
             directory,
             files: vec![source_path.clone(), output_path.clone()],
             subdirectories: Vec::new(),
