@@ -1442,11 +1442,14 @@ mod tests {
         ] {
             assert!(string_needs_quotes(value), "{value:?} needs quotes");
         }
-        // An empty string emits bare (reads back as null in both).
+        // An empty string emits bare with no trailing space (the frozen
+        // `Write(ReadOnlySpan)` skips empty values before the delayed space),
+        // and the key takes the baseline `m_` formatting. It reads back as
+        // null in both.
         let body = mapping(&[("m_Name", UnityYamlNode::string(""))]);
         assert_eq!(
             write_unity_yaml_mapping(&body, UnityYamlWriteLimits::default()).unwrap(),
-            "m_Name: \n"
+            "m_name:\n"
         );
     }
 
