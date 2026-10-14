@@ -3,6 +3,7 @@
 ## 2026-10-14 Three more reference baselines (observations, not verdicts)
 
 - Reference exports done for three more samples (all structural counts only): smallest-2018-inner avatar 144 files (png/anim/cs/ogg exact vs class counts; 13 materials vs 14 class-21 and 8 shaders vs 10 class-48 noted as observations), oldest world 37 files (unity/ogg/png/cs exact), second avatar 473 files (class breakdown pending). Ledger rows updated. All gaps stay observations until Rust-side exports exist to compare against.
+- Actions run `38539717840` is fully green on both platforms (docs-only change), including the public-repository hygiene job.
 - Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No sample content committed; outputs quarantined in gitignored scratch. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 Reference export driver green; first baseline (VRC-AV01)
