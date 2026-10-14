@@ -4,6 +4,7 @@
 
 - NavMeshSettings gains its default build-settings struct on 2019.4 (exact values, prefab headers reverted per the editor tree). Formatting and Clippy (warnings-denied locally) clean; release rebuilt.
 - Fresh replay plus re-audit: the 2019.4 world converges (zero real-diff classes, zero unpaired). Regression replays with the same binary: 2018.4 avatar unchanged (only proven-equivalent Avatar), 2022.3 avatar unchanged (only known Avatar style), 2022.3 world still converged.
+- Actions run `38646160434` is fully green on both platforms (NavMesh build settings), including warnings-denied Clippy, the release build, changed-line formatting, and the public-repository hygiene job.
 - Local checks: `git diff --check` exit 0; `cargo check`/`cargo clippy` clean; module tests green. Full validation via GitHub Actions after push. Sample input read-only; outputs quarantined. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 External refs plus 2019.4 rows fixed; NavMesh remains
