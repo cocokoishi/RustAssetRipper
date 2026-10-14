@@ -1,5 +1,11 @@
 # Validation log
 
+## 2026-10-14 Texture pre-decode and dispatch audit (all guarded, no change)
+
+- Sweep follow-ups verified clean, so no code changed: Xbox360 adjacent-swap rejects odd counts loudly (tested), Switch unswizzle uses fully checked u64 arithmetic with named overflow errors plus short-buffer tests, and `decode_texture` has exactly one production caller with a correctly sized output (short-output unreachable; short-input covered by the decoder sweep). Compression wrappers (gzip/brotli/LZ4/zstd) enforce output caps with fallible allocation by design.
+- Robustness posture after the recent arc: untrusted bytes meet loud errors at the CRN boundary (contained panics included), FSB5/Vorbis/Ogg paths, all 94 decoder routes, bitmap allocation, and decompression caps. Still open and needing real inputs: multi-face/multi-mip CRN, image-writer/CLI integration, real-audio table decode, non-Vorbis codecs, and Unity import/runtime.
+- Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No user input was read; Phase 1 remains open and Phase 2 remains locked. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Sprite module docs corrected (bone/physics work completed earlier)
 
 - Stale-claim check: `src/resources/sprite.rs` module docs said `GeneratePhysicsShape` and the `SetBoneGeometry` body "remain open", but the capability completed across two modules: `fill_sprite_metadata` ports the decision kernel (gates, PPU scaling) while the texture project route owns extraction and the importer path serializes outline, physics-shape, bone, and geometry fields, all covered by the bone/atlas/outline suites. Corrected the doc block to describe the implemented split; the source's own `Edges` TODO (matched by our empty-list retention) is unchanged.

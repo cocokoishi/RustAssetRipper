@@ -1,5 +1,11 @@
 # RustAssetRipper hand-off — 2026-10-10
 
+## Latest current checkpoint — 2026-10-14 (robustness sweep consolidation)
+
+- Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Phase 1 open, Phase 2 locked; no user input, Unity, or UABEA used.
+- Verified the remaining pre-decode surfaces clean (swap, swizzle, dispatch reachability, decompression caps); no change needed. Robustness arc state: CRN/Vorbis/Ogg/decoders/allocation/bombs all verified or fixed; reality-dependent remainder is multi-face/mips, writers/CLI, real audio, codecs, Unity.
+- Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push.
+
 ## Latest current checkpoint — 2026-10-14 (sprite docs corrected)
 
 - Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Phase 1 open, Phase 2 locked; no user input, Unity, or UABEA used.
