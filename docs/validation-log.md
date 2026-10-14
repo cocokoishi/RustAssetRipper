@@ -3,6 +3,7 @@
 ## 2026-10-14 HEAD release binary built locally in 10m27s
 
 - Background `cargo build --release --locked --bin assetripper-rs` finished clean: `target/release/assetripper-rs.exe` (15MB) reports version 0.1.0. Gate-level Rust export replays are now unblocked with a HEAD binary; first replay plus reference-vs-Rust semantic diff is the next round's work. Machine stayed responsive throughout (no intervention needed); disk impact to be checked before large replays.
+- Actions run `38560738577` is fully green on both platforms (docs-only change), including the public-repository hygiene job.
 - Local checks: `git diff --check` exit 0. Validation of product code continues via GitHub Actions after push. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 Prior acceptance program found; binary build restarted
