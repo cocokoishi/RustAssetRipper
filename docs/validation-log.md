@@ -3,6 +3,7 @@
 ## 2026-10-14 Twelve baselines; unknown raw-type IDs recur across samples
 
 - Two more world baselines with saved inventories: first exact on anim/controller/cs/unity with material/texture/shader gaps plus big class-222/224 families and an unknown raw type also seen elsewhere; second exact on anim/controller/cs/ogg/unity/renderTexture with a 104-vs-103 texture overage. The unknown raw-type IDs (850595691, 1773428102, 1818360608/9) recur across samples, suggesting well-known SDK/stripped types rather than per-file accidents — flagged as a static identification task (no samples needed). New shapes: physicMaterial, otf/ttf fonts. All observations, not verdicts.
+- Actions run `38545338294` is fully green on both platforms (docs-only change), including the public-repository hygiene job.
 - Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No sample content committed; outputs quarantined in gitignored scratch. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 Ten baselines; bundle-tag vs inner-version divergence confirmed
