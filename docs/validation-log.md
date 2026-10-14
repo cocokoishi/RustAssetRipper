@@ -3,6 +3,7 @@
 ## 2026-10-14 Prior acceptance program found; binary build restarted
 
 - Reading current repo docs overturned two working assumptions: prior sessions ran a deep real-sample program (six alias-named samples, dozens of export replays with a locally built release binary, full audit toolchain, per-class differential findings) and the alias set is larger than the stale snapshot suggested. Consequences recorded in the ledger: one corpus ID confirmed against the prior set by exact size plus inner version; other cross-walks unconfirmed (small object-count deltas noted, possibly conventions or updates); pre-existing probable-original-names in Oct 11-13 evidence flagged for owner adjudication with no unilateral history action; no new exposures added. Since local release builds have direct precedent on this machine and disk recovered, a background HEAD release build was started; gate replays unblock when it lands.
+- Actions run `38559457120` is fully green on both platforms (docs-only change), including the public-repository hygiene job.
 - Local checks: `git diff --check` exit 0. No local Cargo test run (validation delegated to GitHub Actions after push; the release build above is a binary procurement run, not a test run). Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 Reference exports are nondeterministic by design (methodology)
