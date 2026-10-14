@@ -3935,14 +3935,14 @@ mod blend_tree_source_tests {
 }
 
 #[cfg(test)]
-mod real_vrcw_tests {
+mod modern_controller_root_tests {
     use super::*;
 
     #[test]
     fn unity_2022_controller_root_omits_input_only_fields() {
         let mut body = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
         body.insert_field("serializedVersion", signed(5)).unwrap();
-        body.insert_field("m_Name", UnityYamlNode::string("moon_doll"))
+        body.insert_field("m_Name", UnityYamlNode::string("SampleController"))
             .unwrap();
         body.insert_field("m_AnimatorParameters", empty_sequence())
             .unwrap();

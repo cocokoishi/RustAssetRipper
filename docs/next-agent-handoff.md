@@ -1,5 +1,11 @@
 # RustAssetRipper hand-off — 2026-10-10
 
+## Latest current checkpoint — 2026-10-14 (privacy remediation in current sources)
+
+- Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Phase 1 open, Phase 2 locked; no user input, Unity, or UABEA used.
+- Scanned tracked sources for identity leaks: original bundle filenames already absent; remediated two export-ID tests, one controller-root test module/fixture, and four provenance comments to generic descriptors with technical substance intact. Re-scan clean. Shared history untouched per the no-rewrite rule. See the validation-log entry.
+- Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push.
+
 ## Latest current checkpoint — 2026-10-14 (I18N decision-logic audit, no code change)
 
 - Worktree `../main-work` (detached at `45d2778`); the Desktop checkout's conflicts and local changes are untouched. Phase 1 open, Phase 2 locked; no user input, Unity, or UABEA used.

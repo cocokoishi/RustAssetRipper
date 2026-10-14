@@ -189,8 +189,8 @@ mod tests {
 
     #[test]
     fn pseudo_random_export_ids_match_frozen_timeline_group_children() {
-        // Frozen source `Lost Kitten.playable` child export IDs in document order
-        // (after the `11400000` root) from `青岚山河卷` (Unity 2022.3.6f1): the
+        // Frozen-source timeline playable child export IDs in document order
+        // (after the `11400000` root, Unity 2022.3.6f1): the
         // source `AssetsExportCollection.GenerateExportID` assigns
         // `GetPseudoRandomExportId(asset, m_exportIDs.Count)`, i.e. zero-based
         // insertion seeds, not sequential `11400001`-style modifiers.
@@ -210,8 +210,8 @@ mod tests {
     }
 
     #[test]
-    fn pseudo_random_export_ids_match_frozen_玉京烟霞_controller_subdocs() {
-        // Frozen `ahoge.controller` sub-document export IDs from `松月云庭图`
+    fn pseudo_random_export_ids_match_frozen_controller_subdocs() {
+        // Frozen single-state controller sub-document export IDs
         // (Unity 2022.3.22f1): the source `AnimatorControllerExportCollection` inherits
         // the default `GenerateExportID` (`GetPseudoRandomExportId(asset,
         // m_exportIDs.Count)`), and `AddAsset` skips the controller itself, so the
@@ -220,12 +220,12 @@ mod tests {
         assert_eq!(
             get_pseudo_random_export_id(1107, 0, version_2022_3_22),
             1107709254077376921i64,
-            "ahoge layer machine seed 0"
+            "layer machine seed 0"
         );
         assert_eq!(
             get_pseudo_random_export_id(1102, 1, version_2022_3_22),
             1102730242686860875i64,
-            "ahoge child state seed 1"
+            "child state seed 1"
         );
     }
 

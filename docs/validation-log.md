@@ -1,5 +1,12 @@
 # Validation log
 
+## 2026-10-14 Privacy remediation in current sources (no history rewritten)
+
+- Rule basis: the workspace privacy rules require public code, test names, comments, and docs to use only assigned classical-Chinese aliases; original input filenames, transliterations, and sample-content object names must not appear. Historical pushed content is left untouched per the no-rewrite rule; only current versions change.
+- Scan (tracked `src`/`tools`/`tests` via `git grep`): the six original bundle filenames have zero hits. Remaining identity tokens were confined to two test sites and four comments: two export-ID tests (romaji test name, original object names in comments and assert messages) in `src/export/ids.rs`, one synthetic controller-root test module and fixture value in `src/export/project_workflow/animator_controller.rs`, and four provenance comments in `src/export/workspace_yaml/object_conversion.rs`. Extension strings (`.controller`), synthetic fixture names, Unity engine API field names, and built-in product vocabulary were classified generic and kept.
+- Change: renamed the test and module to generic descriptors and reworded the comments to reference frozen-source behavior without identities. Technical substance (class IDs, seeds, expected ID values, Unity versions in code, renderer class lists) is unchanged. Re-scanned after editing: zero hits for all scanned patterns.
+- Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No user input was read; Phase 1 remains open and Phase 2 remains locked. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Localization decision-logic audit (PRODUCT-I18N-001 logic verified; UI surface stays open)
 
 - Scope: the locale-independent rules in `src/localization.rs` (default code, 23-code table, hyphenation tables, existence, `LoadLanguage` decision). The 272-key string tables, per-key fallback, and picker names stay with the future UI surface per the module docs; no localized-message consumer exists.

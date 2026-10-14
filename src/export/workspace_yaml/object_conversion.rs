@@ -79,11 +79,11 @@ fn should_use_scene_editor_type_tree(class_id: i32, unity_version_text: Option<&
                     | 84
                     | 96
                     | 153
-                    // 玉京烟霞 breadth: LineRenderer and SpriteRenderer are IRenderers
+                    // Breadth probe: LineRenderer and SpriteRenderer are IRenderers
                     // with full editor base on 2022.3 (probed); same truncation.
                     | 120
                     | 212
-                    // 玉京烟霞 breadth: LensFlare and FlareLayer carry full editor
+                    // Breadth probe: LensFlare and FlareLayer carry full editor
                     // base on 2022.3 (probed); same truncation, no extra format.
                     | 123
                     | 124
@@ -1611,8 +1611,8 @@ fn apply_scene_object_editor_format(
             reference_graph,
         ),
         // The frozen `EditorFormatConverter.Convert(IRenderer)` covers every
-        // renderer; 23/137/199 were the first transcribed, 96 came from 云栖仙府
-        // breadth, and 120/212 from 玉京烟霞 breadth (all probed on 2022.3).
+        // renderer; 23/137/199 were the first transcribed, 96/120/212 came from
+        // renderer breadth probes (all probed on 2022.3).
         23 | 96 | 120 | 137 | 199 | 212 => apply_renderer_editor_format(editor_root),
         _ => Ok(()),
     }
@@ -2476,8 +2476,8 @@ fn apply_nav_mesh_settings_editor_defaults(root: &mut SerializedValue) -> Result
 /// default, mirroring the source's unconditional assignments.
 ///
 /// Field names and value shapes follow the 2022.3 editor TypeTree node names; the
-/// numeric values reproduce the frozen method exactly (verified against the frozen
-/// `Lost KittenSettings.lighting` export, which carries these defaults verbatim).
+/// numeric values reproduce the frozen method exactly (verified against a frozen
+/// scene-settings export, which carries these defaults verbatim).
 /// Fields absent from the active editor layout are left untouched, matching the
 /// versioned generated-class behavior of the source.
 fn apply_lighting_settings_editor_defaults(root: &mut SerializedValue) -> Result<(), String> {
