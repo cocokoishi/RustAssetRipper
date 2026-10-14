@@ -3,6 +3,7 @@
 ## 2026-10-14 Sixteen baselines; largest material gap noted
 
 - Two more baselines with saved inventories: audio-visual avatar exact on anim/mat/controller/cs/ogg with tiny texture/shader gaps (6000 tag over 2022 inner content again); large world exact on anim/controller/cs/ogg/unity with the largest material gap so far (332 vs 343) plus texture/shader gaps and font outputs. Material gaps are no longer negligible-singletons; the redirect-parity diff will need per-asset resolution rather than count arithmetic. All observations, not verdicts.
+- Actions run `38549593635` is fully green on both platforms (docs-only change), including the public-repository hygiene job.
 - Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No sample content committed; outputs quarantined in gitignored scratch. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 Fourteen baselines; scale extreme exports cleanly
