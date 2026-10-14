@@ -2147,11 +2147,7 @@ mod tests {
 
     /// Minimal version-1 container holding two one-byte zero packets and a
     /// declared sample count of 128, mirroring the reconstruction test layout.
-    fn silent_table_backed_container(
-        channel_code: u64,
-        rate_code: u64,
-        setup_crc: u32,
-    ) -> Vec<u8> {
+    fn silent_table_backed_container(channel_code: u64, rate_code: u64, setup_crc: u32) -> Vec<u8> {
         let packet_data = [1u8, 0, 0, 1, 0, 0];
         let mut fsb5 = vec![0u8; 60];
         fsb5[..4].copy_from_slice(b"FSB5");
@@ -2160,8 +2156,7 @@ mod tests {
         fsb5[12..16].copy_from_slice(&16u32.to_le_bytes());
         fsb5[20..24].copy_from_slice(&(packet_data.len() as u32).to_le_bytes());
         fsb5[24..28].copy_from_slice(&15u32.to_le_bytes());
-        let sample_header =
-            (u64::from(128u32) << 34) | (channel_code << 5) | (rate_code << 1) | 1;
+        let sample_header = (u64::from(128u32) << 34) | (channel_code << 5) | (rate_code << 1) | 1;
         fsb5.extend_from_slice(&sample_header.to_le_bytes());
         fsb5.extend_from_slice(&[0x08, 0, 0, 0x16]);
         fsb5.extend_from_slice(&setup_crc.to_le_bytes());
@@ -2175,10 +2170,9 @@ mod tests {
         // zero packets prime lewton's overlap window and then decode to 128
         // silent frames under the table setup, so the rebuilt Ogg preserves
         // the packets and the WAV conversion yields exact silence.
-        for (channels, rate_code, setup_crc) in [
-            (2u8, 8u64, 0xA722_97FFu32),
-            (1u8, 9u64, 0x070B_A3B6u32),
-        ] {
+        for (channels, rate_code, setup_crc) in
+            [(2u8, 8u64, 0xA722_97FFu32), (1u8, 9u64, 0x070B_A3B6u32)]
+        {
             let channel_code = u64::from(channels - 1);
             let fsb5 = silent_table_backed_container(channel_code, rate_code, setup_crc);
             let (rebuilt_ogg, extension) = super::decode_fsb5_vorbis(&fsb5, 1024 * 1024).unwrap();
