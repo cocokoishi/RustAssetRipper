@@ -3,6 +3,7 @@
 ## 2026-10-14 Meta timeCreated edges match DateTimeOffset exactly
 
 - Check: the `.meta` timestamp bounds (`-62_135_596_800`/`253_402_300_799`) equal .NET `DateTimeOffset` min/max in Unix seconds (verified by day-count arithmetic), but only interior values were tested. New test pins inclusive acceptance at both edges and rejection one second outside each.
+- Actions run `38518765626` is fully green on both platforms (timestamp edge test included), with warnings-denied Clippy, release builds, changed-line formatting, and repository hygiene.
 - Local checks: `git diff --check` exit 0; single-file `rustfmt --check` clean. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No user input was read; Phase 1 remains open and Phase 2 remains locked. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 CRN guard sweep completed (all six arms)
