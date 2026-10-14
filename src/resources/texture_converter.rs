@@ -1068,6 +1068,30 @@ mod tests {
     }
 
     #[test]
+    fn truncated_crn_headers_and_payloads_fail_cleanly() {
+        // Truncated input must fail loudly at every cut point: neither a
+        // panic nor a short-but-Ok bitmap may escape the production wrapper.
+        let data = &include_bytes!("../../tests/fixtures/crunch/classic_dxt1.crn")[..];
+        let version = UnityVersion::parse("2017.2.0f1").unwrap();
+        for cut in [0usize, 1, 16, 64, 128, 512, 1024, 4096] {
+            let end = cut.min(data.len());
+            let image = TextureImage {
+                texture_format: 28,
+                graphics_format: 0,
+                width: 512,
+                height: 512,
+                depth: 1,
+                image_size: end,
+                data: &data[..end],
+            };
+            assert!(
+                convert_to_bitmap_with_unity_version(&image, Some(version)).is_err(),
+                "cut {cut} must fail loudly"
+            );
+        }
+    }
+
+    #[test]
     fn unpack_normal_reconstructs_blue() {
         // The reference swaps alpha and red: the output red is the input
         // alpha and the output alpha is the input red; blue is recomputed
