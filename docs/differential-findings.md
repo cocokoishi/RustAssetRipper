@@ -1,5 +1,9 @@
 # Source behavior and differential findings
 
+## DIFF-CURVE-TANGENTMODE-2018-001 — editor-default keyframe tangentMode (fixed)
+
+AudioSource and ParticleSystem curves differed by one field: the 2018.4 Keyframe v3 serializes seven fields without `tangentMode`, while the reference editor layout carries it and exports default 0 (all 127 reference values are 0; stride math rules out data presence). Fixed with a document-level backfill inserting `tangentMode: 0` before `weightedMode` in `m_Curve` keyframes when no editor tree was applied, pinned by a unit test. MonoBehaviour documents are excluded: their curves serialize through managed layouts without the slot (proven by a 114 doc the first pass broke and the gate restored). Re-audit: class 82 resolves fully with no regressions. Status: fixed and validated on the reporting sample.
+
 ## DIFF-DOC-STAMPS-2018-001 — document version stamps follow the editor layout (fixed)
 
 Two stamp gaps shared one rule: reference documents stamp the editor layout version, while Rust stamped the release/file tree version on paths without an editor tree. Fixed twice: the shared workspace path now reads the TPK editor root version for 2018.4/2019.4 (fail-open), and the dedicated controller pipeline version-gates its two hardcoded AnimatorState/StateMachine stamps (2018.4 stamps 5, others 6). Pinned by a TPK-data regression test; controller workflow tests green. Re-audit: classes 1102/1107 resolve fully with no regressions. Status: fixed and validated on the reporting sample.

@@ -1,6 +1,6 @@
 use super::super::object_conversion::{
     apply_game_object_header_backfill, apply_generic_header_backfill,
-    prefab_header_backfill_version,
+    apply_keyframe_tangent_mode_backfill, prefab_header_backfill_version,
 };
 use crate::export::unity_yaml::{
     UnityYamlDocument, UnityYamlMappingStyle, UnityYamlNode, UnityYamlScalar, UnityYamlWriteLimits,
@@ -127,5 +127,58 @@ fn generic_backfill_inserts_universal_headers_only() {
         output.match_indices("m_ObjectHideFlags").count(),
         1,
         "headers are not duplicated"
+    );
+}
+
+fn keyframe_without_tangent_mode() -> UnityYamlNode {
+    let mut key = UnityYamlNode::mapping(UnityYamlMappingStyle::Flow);
+    for (name, value) in [
+        ("time", UnityYamlScalar::Float32(0.5)),
+        ("value", UnityYamlScalar::Float32(1.0)),
+        ("inSlope", UnityYamlScalar::Float32(0.0)),
+        ("outSlope", UnityYamlScalar::Float32(0.0)),
+        ("weightedMode", UnityYamlScalar::Signed(0)),
+        ("inWeight", UnityYamlScalar::Float32(0.33)),
+        ("outWeight", UnityYamlScalar::Float32(0.33)),
+    ] {
+        key.insert_field(name, UnityYamlNode::scalar(value))
+            .unwrap();
+    }
+    key
+}
+
+#[test]
+fn tangent_mode_backfill_targets_curve_keyframes_only() {
+    let mut curve = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    let mut keys =
+        UnityYamlNode::sequence(crate::export::unity_yaml::UnityYamlSequenceStyle::Block);
+    keys.push(keyframe_without_tangent_mode()).unwrap();
+    let mut complete = keyframe_without_tangent_mode();
+    complete.insert_field("tangentMode", signed(7)).unwrap();
+    keys.push(complete).unwrap();
+    curve.insert_field("m_Curve", keys).unwrap();
+    let mut body = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    body.insert_field("serializedVersion", signed(2)).unwrap();
+    body.insert_field("rolloffCustomCurve", curve).unwrap();
+    body.insert_field("m_Enabled", signed(1)).unwrap();
+    let mut document = UnityYamlDocument::object(82, 44, "AudioSource", body, false)
+        .expect("test AudioSource document builds");
+    apply_keyframe_tangent_mode_backfill(&mut document);
+    // A second pass is a no-op: insertion skips keyframes already completed.
+    apply_keyframe_tangent_mode_backfill(&mut document);
+    let output = render(&document);
+    key_order(
+        &output,
+        &[
+            "outSlope",
+            "tangentMode: 0",
+            "weightedMode",
+            "tangentMode: 7",
+        ],
+    );
+    assert_eq!(
+        output.match_indices("tangentMode").count(),
+        2,
+        "exactly the missing keyframe gains the default"
     );
 }

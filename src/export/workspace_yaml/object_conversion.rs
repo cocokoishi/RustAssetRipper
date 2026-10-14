@@ -947,6 +947,11 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
                 apply_generic_header_backfill(&mut document)
             };
             backfill.map_err(|message| scene_editor_format_error(source, class_id, message))?;
+            // MonoBehaviour curves serialize through managed layouts without a
+            // tangentMode slot, so the editor default must not be added there.
+            if class_id != 114 {
+                apply_keyframe_tangent_mode_backfill(&mut document);
+            }
         }
         Ok(Some(document))
     }
@@ -1889,6 +1894,71 @@ pub(super) fn insert_editor_headers(entries: &mut Vec<(UnityYamlNode, UnityYamlN
             entries.insert(insert_at, (yaml_plain_node(name), value));
             insert_at += 1;
         }
+    }
+}
+
+/// Inserts the editor-default keyframe `tangentMode` into decoded animation
+/// curves whose serialized layout lacks it.
+///
+/// Some layouts (e.g. the 2018.4 Keyframe v3) serialize seven fields without
+/// `tangentMode`; the reference editor layout carries the field and exports
+/// its default 0. Objects converted through an editor TypeTree gain it from
+/// editor defaults; versions without a ported editor tree need it here.
+/// Insertion targets `m_Curve` keyframe items that carry `time` and
+/// `weightedMode` but no `tangentMode`, placing the default before
+/// `weightedMode` to match the reference field order. Other shapes select no
+/// completion rather than guessing a position. MonoBehaviour documents are
+/// excluded by the caller: their curves serialize through managed layouts
+/// without a tangentMode slot.
+pub(super) fn apply_keyframe_tangent_mode_backfill(document: &mut UnityYamlDocument) {
+    let UnityYamlNodeKind::Mapping { entries, .. } = &mut document.root.kind else {
+        return;
+    };
+    let Some((_, body)) = entries.first_mut() else {
+        return;
+    };
+    backfill_tangent_mode_in_node(body);
+}
+
+fn backfill_tangent_mode_in_node(node: &mut UnityYamlNode) {
+    match &mut node.kind {
+        UnityYamlNodeKind::Mapping { entries, .. } => {
+            if let Some(index) = yaml_field_index(entries, "m_Curve") {
+                if let UnityYamlNodeKind::Sequence { items, .. } = &mut entries[index].1.kind {
+                    for item in items.iter_mut() {
+                        let UnityYamlNodeKind::Mapping {
+                            entries: keyframe, ..
+                        } = &mut item.kind
+                        else {
+                            continue;
+                        };
+                        if yaml_field_index(keyframe, "tangentMode").is_some()
+                            || yaml_field_index(keyframe, "time").is_none()
+                        {
+                            continue;
+                        }
+                        if let Some(weighted) = yaml_field_index(keyframe, "weightedMode") {
+                            keyframe.insert(
+                                weighted,
+                                (
+                                    yaml_plain_node("tangentMode"),
+                                    UnityYamlNode::scalar(UnityYamlScalar::Signed(0)),
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+            for (_, value) in entries.iter_mut() {
+                backfill_tangent_mode_in_node(value);
+            }
+        }
+        UnityYamlNodeKind::Sequence { items, .. } => {
+            for item in items.iter_mut() {
+                backfill_tangent_mode_in_node(item);
+            }
+        }
+        UnityYamlNodeKind::Scalar(_) => {}
     }
 }
 
