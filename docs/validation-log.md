@@ -1,5 +1,11 @@
 # Validation log
 
+## 2026-10-14 Export path traversal surface audit (source-faithful; parity pinned)
+
+- Audit: asset-derived export paths were traced through file-name fixing (separators neutralized), the unique-name planner, and the diagnostic/script planners. File names cannot carry separators; collection directories are planner constants. Two planners pass hostile shapes through exactly like the frozen source: unknown names stay fully verbatim and unreadable names keep separators/dots through path fixing, so a `../../` asset name plans an escaping path in both implementations. Script namespaces cannot form `..` components (every dot becomes a separator) but can form empty ones. Exploitation needs a malicious bundle, and unknown assets additionally need the non-default unreadable-assets export enabled.
+- New regression `hostile_names_flow_through_the_planners_like_the_source` pins the three shapes (verbatim unknown, fixed unreadable, empty-component script folder) so neither silent sanitizing nor silent widening can drift from the reference. A write-time containment guard would deviate from the source and stays out of scope.
+- Local checks: `git diff --check` exit 0; single-file `rustfmt --check` clean. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No user input was read; Phase 1 remains open and Phase 2 remains locked. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Surround WAV conversion coverage
 
 - Gap: WAV conversion was proven on stereo/mono fixtures only; no test ran the writer past two channels. New test decodes the 5.1 silent container through Ogg rebuild into WAV and pins the multichannel header (6 channels, 48,000 Hz, byte rate, 24-byte block alignment, 32-bit depth, 128-frame fact chunk, data length, total length) plus exact-silence data.

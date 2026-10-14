@@ -1,5 +1,11 @@
 # RustAssetRipper hand-off — 2026-10-10
 
+## Latest current checkpoint — 2026-10-14 (export traversal audit + parity pin)
+
+- Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Phase 1 open, Phase 2 locked; no user input, Unity, or UABEA used.
+- Traced hostile asset names through the export planners: file names neutralize separators, but unknown/unreadable planners pass `../../` shapes through exactly like the frozen source (pinned by a new parity test); script namespaces cannot form `..`. Exploit needs a malicious bundle plus (for unknown) a non-default setting. No product change: a write-time guard would deviate from the reference.
+- Local checks: `git diff --check` exit 0; single-file `rustfmt --check` clean. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push.
+
 ## Latest current checkpoint — 2026-10-14 (surround WAV conversion test)
 
 - Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Phase 1 open, Phase 2 locked; no user input, Unity, or UABEA used.

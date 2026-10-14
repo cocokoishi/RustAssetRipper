@@ -393,6 +393,58 @@ mod tests {
     }
 
     #[test]
+    fn hostile_names_flow_through_the_planners_like_the_source() {
+        // Parity pin, not an endorsement: the frozen exporters sanitize none
+        // of these shapes either. Unknown names stay fully verbatim,
+        // unreadable names keep separators and dots through path fixing, and
+        // script namespace dots become separators (so `..` components cannot
+        // arise there, but empty ones can). Reaching disk additionally needs a
+        // malicious bundle, and unknown assets need the non-default
+        // unreadable-assets export enabled.
+        let file_system = TestFileSystem::default();
+        let mut state = UniqueNameState::default();
+        let planned = plan_unknown_export_paths(
+            "Project",
+            "MonoBehaviour",
+            "../../evil",
+            HostPathPlatform::Windows,
+            &mut state,
+            &file_system,
+        )
+        .unwrap();
+        assert_eq!(
+            planned.subdirectory,
+            "Project\\AssetRipper\\UnknownAssets\\MonoBehaviour"
+        );
+        assert_eq!(planned.file_name, "../../evil.unknown");
+
+        let planned = plan_unreadable_export_paths(
+            "Project",
+            "Texture2D",
+            "../../evil",
+            HostPathPlatform::Windows,
+            &mut state,
+            &file_system,
+        )
+        .unwrap();
+        assert_eq!(
+            planned.subdirectory,
+            "Project\\AssetRipper\\UnreadableAssets\\Texture2D"
+        );
+        assert_eq!(planned.file_name, "../../evil.unreadable");
+
+        let (folder, file) = script_export_sub_path(
+            "Assembly-CSharp.dll",
+            "a..b",
+            "Player",
+            HostPathPlatform::Windows,
+        )
+        .unwrap();
+        assert_eq!(folder, "Scripts\\Assembly-CSharp\\a\\\\b");
+        assert_eq!(file, "Player.cs");
+    }
+
+    #[test]
     fn unknown_paths_keep_names_verbatim_with_unique_resolution() {
         let mut file_system = TestFileSystem::default();
         let mut state = UniqueNameState::default();
