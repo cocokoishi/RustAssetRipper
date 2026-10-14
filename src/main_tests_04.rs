@@ -1516,3 +1516,62 @@
         // DXT1Crunched carries alpha, so the writer selects RGBA color type 6.
         assert_eq!(png[25], 6);
     }
+
+    #[test]
+    fn export_project_emits_crn_texture_png_and_importer() {
+        // The same hand-built CRN fixture through the full project pipeline:
+        // collections, importer planning, PNG bytes, and the `.meta` sidecar.
+        // File discovery walks the output tree instead of assuming a layout.
+        let directory = TestInputDirectory::new_root();
+        let source_path = directory.join("crn-texture.assets");
+        let output_root = directory.join("project-crn-texture");
+        fs::write(
+            &source_path,
+            include_bytes!("../tests/fixtures/crn-texture-512.assets"),
+        )
+        .unwrap();
+        let _input_guard = TestInputDirectory {
+            directory,
+            files: vec![source_path.clone()],
+            subdirectories: Vec::new(),
+        };
+
+        super::run(
+            [
+                std::ffi::OsString::from("export-project"),
+                output_root.clone().into_os_string(),
+                source_path.clone().into_os_string(),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+
+        fn collect_files(path: &std::path::Path, files: &mut Vec<PathBuf>) {
+            for entry in fs::read_dir(path).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if entry.file_type().unwrap().is_dir() {
+                    collect_files(&path, files);
+                } else {
+                    files.push(path);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        collect_files(&output_root, &mut files);
+        let pngs: Vec<_> = files
+            .iter()
+            .filter(|path| path.extension().is_some_and(|ext| ext == "png"))
+            .collect();
+        assert_eq!(pngs.len(), 1, "expected exactly one PNG in {files:?}");
+        let png = fs::read(pngs[0]).unwrap();
+        assert!(png.len() > 1000, "PNG body is nontrivial");
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+        assert_eq!(u32::from_be_bytes(png[16..20].try_into().unwrap()), 512);
+        assert_eq!(u32::from_be_bytes(png[20..24].try_into().unwrap()), 512);
+        assert_eq!(png[25], 6);
+        let mut meta_path = pngs[0].clone();
+        meta_path.as_mut_os_string().push(".meta");
+        let meta = fs::read_to_string(&meta_path).unwrap();
+        assert!(meta.contains("TextureImporter:"), "{meta}");
+    }

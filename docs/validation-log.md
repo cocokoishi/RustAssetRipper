@@ -1,5 +1,10 @@
 # Validation log
 
+## 2026-10-14 CRN export-project integration test
+
+- New: `export_project_emits_crn_texture_png_and_importer` drives the same hand-built CRN fixture through the full `export-project` pipeline in-process, then walks the output tree (no assumed layout) to assert exactly one PNG with the 512x512 RGBA envelope plus its `TextureImporter` sidecar. This answers the open collection-admission question empirically: if the texture is skipped or misrouted, CI reports the actual file list.
+- Local checks: single-file `rustfmt --check` clean in the new region (remaining hunks pre-existing), `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No user input was read; Phase 1 remains open and Phase 2 remains locked. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Parity rows updated for CLI integration evidence
 
 - Corrected four rows whose evidence/open-items went stale after the recent integration arc: `EXP-CLI-EXPORT-TEXTURE-001` (three CLI tests now, Crunch CLI covered), `RES-TEXTURE-CRUNCH-001` (guard/containment/truncation/sweep/export-texture evidence recorded; open items narrowed to new variants, multi-face/mips, project export, Unity), `RES-AUDIO-001` (eight CLI tests with FSB5 success paths), `EXP-AUDIO-EXPORT-001` (successful decode plus both CLI formats now covered). No status was inflated: converter-centric rows stay honest about missing real-sample/Unity legs.
