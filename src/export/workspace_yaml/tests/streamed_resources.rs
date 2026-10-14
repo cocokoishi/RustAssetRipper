@@ -419,7 +419,9 @@ fn workspace_yaml_export_resolves_and_embeds_streamed_mesh_bytes() {
     .expect("streamed Mesh should be exported");
     let yaml = write_unity_yaml_documents(&[document], UnityYamlWriteLimits::default()).unwrap();
 
-    assert!(yaml.contains("m_Data: 3"));
+    // The vertex blob keeps its serialized m_DataSize name: every Unity tree
+    // uses it and reference output preserves it.
+    assert!(yaml.contains("m_DataSize: 3"));
     assert!(yaml.contains("_typelessdata: 323334"));
     assert!(yaml.contains("offset: 0"));
     assert!(yaml.contains("size: 0"));
