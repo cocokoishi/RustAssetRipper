@@ -1028,7 +1028,9 @@ mod tests {
         // Caller-arg mismatches against a valid CRN fixture exercise the
         // production guard arms without new fixtures: face count, serialized
         // dimensions, codec agreement, and header validity each fail with
-        // their own reason instead of mis-decoding.
+        // their own reason instead of mis-decoding. Byte surgery on the
+        // level-count field covers the two remaining arms (zero levels hit
+        // the dimensions gate; fifteen levels exceed the 512-side mip chain).
         let data = &include_bytes!("../../tests/fixtures/crunch/classic_dxt1.crn")[..];
         let version = UnityVersion::parse("2017.2.0f1").unwrap();
         fn image(
@@ -1048,6 +1050,10 @@ mod tests {
                 data,
             }
         }
+        let mut no_levels = data.to_vec();
+        no_levels[16] = 0;
+        let mut too_many_levels = data.to_vec();
+        too_many_levels[16] = 15;
         for (name, texture_format, width, height, depth, bytes, reason) in [
             (
                 "faces",
@@ -1084,6 +1090,24 @@ mod tests {
                 1,
                 &[0; 64][..],
                 "invalid CRN header",
+            ),
+            (
+                "no-levels",
+                28,
+                512,
+                512,
+                1,
+                no_levels.as_slice(),
+                "CRN header has invalid dimensions, mip count, or face count",
+            ),
+            (
+                "too-many-levels",
+                28,
+                512,
+                512,
+                1,
+                too_many_levels.as_slice(),
+                "CRN mip count exceeds the dimensions' full mip chain",
             ),
         ] {
             assert_eq!(

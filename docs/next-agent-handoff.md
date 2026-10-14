@@ -1,5 +1,11 @@
 # RustAssetRipper hand-off — 2026-10-10
 
+## Latest current checkpoint — 2026-10-14 (CRN guard sweep complete)
+
+- Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Phase 1 open, Phase 2 locked; no user input, Unity, or UABEA used.
+- Extended the guard test with level-count surgery: all six production guard arms now pinned. Remaining CRN reality gaps unchanged (multi-face/mip fixtures, writers/CLI, Unity).
+- Local checks: `git diff --check` exit 0; single-file `rustfmt --check` clean. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push.
+
 ## Latest current checkpoint — 2026-10-14 (robustness sweep consolidation)
 
 - Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Phase 1 open, Phase 2 locked; no user input, Unity, or UABEA used.

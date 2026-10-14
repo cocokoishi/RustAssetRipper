@@ -1,5 +1,10 @@
 # Validation log
 
+## 2026-10-14 CRN guard sweep completed (all six arms)
+
+- Follow-up: the guard test covered four arms; level-count surgery on the committed fixture closes the last two (zero levels hit the dimensions gate, fifteen levels exceed the 512-side mip chain). Every production guard arm in `convert_crunched_texture` now has a regression: header validity, dimensions/levels/faces, serialized dimensions, mip-chain bound, codec agreement, version gate, plus truncation, both decoder bombs, and the unknown-format/oversize entry checks.
+- Local checks: `git diff --check` exit 0; single-file `rustfmt --check` clean. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No user input was read; Phase 1 remains open and Phase 2 remains locked. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Texture pre-decode and dispatch audit (all guarded, no change)
 
 - Sweep follow-ups verified clean, so no code changed: Xbox360 adjacent-swap rejects odd counts loudly (tested), Switch unswizzle uses fully checked u64 arithmetic with named overflow errors plus short-buffer tests, and `decode_texture` has exactly one production caller with a correctly sized output (short-output unreachable; short-input covered by the decoder sweep). Compression wrappers (gzip/brotli/LZ4/zstd) enforce output caps with fallible allocation by design.
