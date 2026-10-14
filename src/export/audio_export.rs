@@ -2283,6 +2283,137 @@ mod tests {
     }
 
     #[test]
+    fn ogg_packet_lacing_terminates_segments_per_spec() {
+        // RFC 3533 lacing: full 255-byte segments plus a final short segment;
+        // an exact multiple needs the zero terminator, and empty packets take
+        // one zero segment.
+        assert_eq!(super::ogg_packet_lacing(0).unwrap(), [0]);
+        assert_eq!(super::ogg_packet_lacing(1).unwrap(), [1]);
+        assert_eq!(super::ogg_packet_lacing(254).unwrap(), [254]);
+        assert_eq!(super::ogg_packet_lacing(255).unwrap(), [255, 0]);
+        assert_eq!(super::ogg_packet_lacing(256).unwrap(), [255, 1]);
+        assert_eq!(super::ogg_packet_lacing(510).unwrap(), [255, 255, 0]);
+        let lacing = super::ogg_packet_lacing(65_025).unwrap();
+        assert_eq!(lacing.len(), 256);
+        assert!(lacing[..255].iter().all(|&size| size == 255));
+        assert_eq!(lacing[255], 0);
+    }
+
+    struct ParsedOggPage {
+        flags: u8,
+        granule: u64,
+        sequence: u32,
+        serial: u32,
+        lacing: Vec<u8>,
+        body: Vec<u8>,
+    }
+
+    /// Split writer output into pages, verifying each stored checksum with
+    /// the writer's CRC function. Returns the pages in emission order.
+    fn parse_ogg_pages_validating_checksums(bytes: &[u8]) -> Vec<ParsedOggPage> {
+        let mut pages = Vec::new();
+        let mut offset = 0usize;
+        while offset < bytes.len() {
+            let header = &bytes[offset..offset + 27];
+            assert_eq!(&header[..4], b"OggS");
+            assert_eq!(header[4], 0);
+            let segment_count = usize::from(header[26]);
+            let lacing = bytes[offset + 27..offset + 27 + segment_count].to_vec();
+            let body_len: usize = lacing.iter().map(|size| usize::from(*size)).sum();
+            let body_start = offset + 27 + segment_count;
+            let body = bytes[body_start..body_start + body_len].to_vec();
+            let stored = u32::from_le_bytes(bytes[offset + 22..offset + 26].try_into().unwrap());
+            let mut zeroed_header = header.to_vec();
+            zeroed_header[22..26].fill(0);
+            let mut checksum = super::ogg_crc32_update(0, &zeroed_header);
+            checksum = super::ogg_crc32_update(checksum, &lacing);
+            checksum = super::ogg_crc32_update(checksum, &body);
+            assert_eq!(checksum, stored, "page {} checksum", pages.len());
+            pages.push(ParsedOggPage {
+                flags: header[5],
+                granule: u64::from_le_bytes(header[6..14].try_into().unwrap()),
+                sequence: u32::from_le_bytes(header[18..22].try_into().unwrap()),
+                serial: u32::from_le_bytes(header[14..18].try_into().unwrap()),
+                lacing,
+                body,
+            });
+            offset = body_start + body_len;
+        }
+        pages
+    }
+
+    #[test]
+    fn ogg_writer_fragments_oversize_packets_across_pages() {
+        // A 70,000-byte packet needs 275 lacing values, so it spans two
+        // pages: BOS without EOS and unknown (`u64::MAX`) granule first, then
+        // a continued EOS page carrying the declared granule.
+        let packet = vec![0xABu8; 70_000];
+        let mut writer = super::OggPacketWriter::default();
+        let mut output = super::LimitedAudioWriter::new(1_000_000);
+        writer.write_packet(&mut output, &packet, 77, true).unwrap();
+        let pages = parse_ogg_pages_validating_checksums(&output.bytes);
+        assert_eq!(pages.len(), 2);
+        assert_eq!((pages[0].flags, pages[0].sequence), (0x02, 0));
+        assert_eq!(pages[0].granule, u64::MAX);
+        assert_eq!(pages[0].lacing.len(), 255);
+        assert!(pages[0].lacing.iter().all(|&size| size == 255));
+        assert_eq!((pages[1].flags, pages[1].sequence), (0x01 | 0x04, 1));
+        assert_eq!(pages[1].granule, 77);
+        assert_eq!(pages[1].lacing.len(), 20);
+        assert_eq!(pages[0].serial, 1);
+        assert_eq!(pages[1].serial, 1);
+        let mut reassembled = pages[0].body.clone();
+        reassembled.extend_from_slice(&pages[1].body);
+        assert_eq!(reassembled, packet);
+    }
+
+    #[test]
+    fn ogg_writer_groups_small_packets_and_marks_stream_end() {
+        // Three small packets share one BOS+EOS page; a fourth packet past
+        // the count heuristic flushes a BOS-only page first.
+        let mut writer = super::OggPacketWriter::default();
+        let mut output = super::LimitedAudioWriter::new(1_000_000);
+        let packets: [&[u8]; 3] = [
+            b"0123456789",
+            b"01234567890123456789",
+            b"012345678901234567890123456789",
+        ];
+        for (index, packet) in packets.iter().enumerate() {
+            let last = index + 1 == packets.len();
+            writer
+                .write_packet(&mut output, packet, index as u64, last)
+                .unwrap();
+        }
+        let pages = parse_ogg_pages_validating_checksums(&output.bytes);
+        assert_eq!(pages.len(), 1);
+        assert_eq!((pages[0].flags, pages[0].sequence), (0x02 | 0x04, 0));
+        assert_eq!(pages[0].granule, 2);
+        assert_eq!(pages[0].lacing, [10, 20, 30]);
+        let mut body = Vec::new();
+        for packet in packets {
+            body.extend_from_slice(packet);
+        }
+        assert_eq!(pages[0].body, body);
+
+        let mut writer = super::OggPacketWriter::default();
+        let mut output = super::LimitedAudioWriter::new(1_000_000);
+        let chunk = vec![0xCDu8; 1500];
+        for index in 0..4 {
+            writer
+                .write_packet(&mut output, &chunk, index, false)
+                .unwrap();
+        }
+        writer.write_packet(&mut output, b"tail", 4, true).unwrap();
+        let pages = parse_ogg_pages_validating_checksums(&output.bytes);
+        assert_eq!(pages.len(), 2);
+        assert_eq!((pages[0].flags, pages[0].sequence), (0x02, 0));
+        assert_eq!(pages[0].granule, 3);
+        assert_eq!((pages[1].flags, pages[1].sequence), (0x04, 1));
+        assert_eq!(pages[1].granule, 4);
+        assert_eq!(pages[1].body, b"tail".to_vec());
+    }
+
+    #[test]
     fn exporter_warnings_name_the_asset_like_the_source() {
         assert_eq!(
             native_audio_empty_warning("Music"),

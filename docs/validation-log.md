@@ -1,5 +1,10 @@
 # Validation log
 
+## 2026-10-14 Ogg writer structural coverage (lacing, fragmentation, grouping)
+
+- Gap: `ogg_packet_lacing`, `write_fragmented_packet`, and the page-grouping heuristics had no direct coverage; production and fixture packets are all small enough to stay on the single-page path. New tests pin the lacing table (empty packets, exact-multiple terminators, the 65,025-byte maximum), a 70,000-byte fragmented packet (BOS/continued/EOS flags, `u64::MAX` granule on the non-final page, checksums, byte-exact reassembly), and multi-packet grouping (shared BOS+EOS page plus the count-heuristic flush). A checksum-validating page parser helper backs the structural assertions.
+- Local checks: `git diff --check` exit 0; single-file `rustfmt --check` clean. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No user input was read; Phase 1 remains open and Phase 2 remains locked. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Ogg page writer audit and checksum proof
 
 - Audit: `OggPacketWriter`/`write_ogg_page`/`ogg_packet_lacing`/`ogg_crc32_update` checked arm-by-arm against RFC 3533 page structure. Capture version 0, continued/BOS/EOS flags, little-endian granule, 32-bit serial, sequence increment with overflow error, 255-entry/65,025-byte page caps, exact-multiple lacing terminators, empty-page suppression, `-1` granule on non-final fragments, MSB-first CRC with zeroed checksum field, and bounded lacing allocation all match the spec. Page grouping heuristics are RFC-legal by construction; source page-split parity stays deferred as zero-gain per `DIFF-OPAQUE-OGG-FRAMING-001`.
