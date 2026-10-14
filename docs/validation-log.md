@@ -3,6 +3,7 @@
 ## 2026-10-14 Fourteen baselines; scale extreme exports cleanly
 
 - Two more baselines with saved inventories: mesh/constraint-heavy avatar exact on anim/png/controller/cs/ogg with small material/shader gaps; the 426664-object scale extreme exports 9679 files with anim/png/controller/cs/ogg/unity exact, near-exact materials, a 139-vs-169 shader gap, one overrideController, and one real class-29 Crunch texture in the wild. Three more large raw-type IDs identified statically (SpriteAtlas, AimConstraint, LookAtConstraint). All gaps stay observations.
+- Actions run `38548163756` is fully green on both platforms (docs-only change), including the public-repository hygiene job.
 - Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No sample content committed; outputs quarantined in gitignored scratch. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 Recurring raw-type IDs identified as engine classes (static)
