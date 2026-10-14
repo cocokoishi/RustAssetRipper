@@ -1,5 +1,10 @@
 # Validation log
 
+## 2026-10-14 AV02 converges on current binary
+
+- Fresh replay plus re-audit on the 2022.3 avatar: zero real-diff classes except the Avatar doc, proven content-identical modulo YAML style (strict token equality over 122927 chars); zero unpaired files; no regressions from the central backfill/engine/audio changes.
+- Local checks: replay exit 0; audit clean. Sample input read-only; outputs quarantined. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 NavMesh fixed; W02 converges with clean regressions
 
 - NavMeshSettings gains its default build-settings struct on 2019.4 (exact values, prefab headers reverted per the editor tree). Formatting and Clippy (warnings-denied locally) clean; release rebuilt.
