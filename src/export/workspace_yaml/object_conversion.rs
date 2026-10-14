@@ -85,6 +85,9 @@ fn should_use_scene_editor_type_tree(class_id: i32, unity_version_text: Option<&
                     // with full editor base on 2022.3 (probed); same truncation.
                     | 120
                     | 212
+                    // Breadth probe: the Animation component carries full
+                    // editor base on 2022.3 (probed); same truncation.
+                    | 111
                     // Breadth probe: LensFlare and FlareLayer carry full editor
                     // base on 2022.3 (probed); same truncation, no extra format.
                     | 123
@@ -4216,6 +4219,7 @@ mod tests {
             153,
             120,
             212,
+            111,
             123,
             124,
             850_595_691,

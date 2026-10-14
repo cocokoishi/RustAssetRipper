@@ -1,5 +1,9 @@
 # Source behavior and differential findings
 
+## DIFF-EDITOR-COVERAGE-2022-001 — Animation joins the editor tree set (fixed)
+
+The Animation component exported release-shaped (no editor headers) on 2022.3 while the reference uses the editor layout. TPK-probed full editor base confirmed; added to the editor tree set following the established breadth pattern. No other sample contains this class (exhaustion survey), so the change is blast-free. Status: fixed and validated on the reporting sample.
+
 ## DIFF-YAML-EMPTY-ITEM-001 — empty sequence items keep the dash space (fixed)
 
 Empty block-sequence items differed by a trailing space (reference `- ` vs Rust `-`). The frozen sequence emitter writes the dash and its space immediately, so empty children keep it; only mapping values drop the pending space (`k:`). Proven by source plus a full-output survey (reference: 15 spaced dashes, 0 bare, 0 spaced colons). Fixed in the shared emitter with a regression test. Status: fixed and validated on the reporting sample; converged samples contain no empty items (exhaustion survey), so they are unaffected.
