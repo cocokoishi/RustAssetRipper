@@ -4,6 +4,7 @@
 
 - Probe: eleven hostile packets (0xFF runs, single-bit edges, mixed, patterned) against three table setups under mono/stereo production identification — 55 decodes, zero panics (every case errors or decodes empty at the decoder level). Production maps decode errors to loud `Fsb5DecodeFailed`, so no containment is needed on this path, unlike the CRN decoder.
 - Regression: two hostile packet shapes through end-to-end production decode assert the loud validation failure. The silent-packet builder now delegates to a packet-parameterized core.
+- Actions run `38511292575` is fully green on both platforms (hostile-packet regression included), with warnings-denied Clippy, release builds, changed-line formatting, and repository hygiene.
 - Local checks: `git diff --check` exit 0; single-file `rustfmt --check` clean. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No user input was read; Phase 1 remains open and Phase 2 remains locked. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 Truncated-CRN clean-failure regression
