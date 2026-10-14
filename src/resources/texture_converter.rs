@@ -1161,6 +1161,43 @@ mod tests {
     }
 
     #[test]
+    fn short_inputs_fail_loudly_across_all_texture_decoders() {
+        // Every decoder must reject truncated input with an error, never a
+        // panic and never a silent short decode. Dimensions stay valid so
+        // only the input length varies; seven bytes starve even the smallest
+        // 4x4 block format.
+        let texture_formats = [
+            48, 35, 26, 24, 25, 10, 11, 12, 34, 41, 42, 43, 44, 45, 46, 47, 30, 32, 21, 1, 2, 13,
+            7, 63, 62, 3, 4, 5, 6, 8, 14, 9, 72, 73, 74, 15, 16, 17, 18, 19, 20, 22, 75, 76, 77,
+            78, 79, 80, 81, 82,
+        ];
+        let graphics_formats = [
+            1, 3, 4, 9, 21, 37, 45, 49, 54, 55, 56, 57, 60, 66, 68, 87, 89, 90, 93, 95, 96, 98,
+            100, 102, 104, 106, 107, 108, 110, 112, 118, 119, 121, 123, 125, 126, 127, 128, 129,
+            131, 133, 135, 137, 139,
+        ];
+        let mut output = [0u8; 64];
+        for format in texture_formats {
+            for len in [0usize, 1, 7] {
+                let input = vec![0xABu8; len];
+                assert!(
+                    decode_texture(format, 0, &input, 4, 4, &mut output).is_err(),
+                    "texture format {format} accepted {len} input bytes"
+                );
+            }
+        }
+        for format in graphics_formats {
+            for len in [0usize, 1, 7] {
+                let input = vec![0xABu8; len];
+                assert!(
+                    decode_texture(0, format, &input, 4, 4, &mut output).is_err(),
+                    "graphics format {format} accepted {len} input bytes"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn unpack_normal_reconstructs_blue() {
         // The reference swaps alpha and red: the output red is the input
         // alpha and the output alpha is the input red; blue is recomputed

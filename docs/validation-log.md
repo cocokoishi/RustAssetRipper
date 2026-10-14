@@ -1,5 +1,10 @@
 # Validation log
 
+## 2026-10-14 Short-input sweep across all texture decoders
+
+- Gap: `decode_texture` dispatches to 60+ format decoders with no input-length gate; no test faced any decoder with truncated input. New test drives one discriminant per decoder on both the texture-format and graphics-format routes (50 + 44 entries) with 0/1/7-byte inputs at valid 4x4 dimensions: every call must fail loudly, never panic and never silently accept. If CI reports a panic or an `Ok`, the offending decoder needs a length guard next.
+- Local checks: `git diff --check` exit 0; single-file `rustfmt --check` clean. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No user input was read; Phase 1 remains open and Phase 2 remains locked. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Hostile Ogg inputs stay panic-free and well-formed
 
 - Gap: the Ogg converter faced only empty, garbage-prefix, and limit inputs; structured hostility (truncations, corrupt segment tables/checksums/granules) was untested, leaving the `ogg` crate reader's panic posture unknown. New test runs seven truncations plus three first-page corruptions through production conversion: every outcome must be a loud error, the documented empty output, or a well-formed WAV (RIFF/WAVE, full header).
