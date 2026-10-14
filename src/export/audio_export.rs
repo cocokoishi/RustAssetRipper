@@ -2414,6 +2414,25 @@ mod tests {
     }
 
     #[test]
+    fn fsb5_rebuild_enforces_the_configured_output_limit() {
+        // The byte limit guards the rebuilt Ogg as well as the later WAV: an
+        // exact fit succeeds while one byte less fails loudly with the
+        // offending limit attached.
+        let fsb5 = silent_table_backed_container(1, 8, 0xA722_97FF);
+        let (rebuilt, _) = super::decode_fsb5_vorbis(&fsb5, 1024 * 1024).unwrap();
+        let full_size = rebuilt.len();
+        assert!(full_size > 0);
+        let (refitting, _) = super::decode_fsb5_vorbis(&fsb5, full_size).unwrap();
+        assert_eq!(refitting.len(), full_size);
+        assert_eq!(
+            super::decode_fsb5_vorbis(&fsb5, full_size - 1).unwrap_err(),
+            super::AudioDecodeError::DecodedDataLimitExceeded {
+                limit: full_size - 1
+            }
+        );
+    }
+
+    #[test]
     fn exporter_warnings_name_the_asset_like_the_source() {
         assert_eq!(
             native_audio_empty_warning("Music"),
