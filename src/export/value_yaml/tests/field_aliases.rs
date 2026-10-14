@@ -919,7 +919,6 @@ fn buffer_vertex_compute_yaml_aliases_are_type_scoped() {
         ("m_Matrix.m_Index", "m_OffsetInConstantBuffer"),
         ("m_Struct.m_Index", "m_OffsetInConstantBuffer"),
         ("m_Vector.m_Index", "m_OffsetInConstantBuffer"),
-        ("m_Vertex.m_DataSize", "m_Data"),
         ("m_Compute.m_Kernels", "m_KernelParents"),
     ] {
         assert_eq!(
@@ -927,6 +926,10 @@ fn buffer_vertex_compute_yaml_aliases_are_type_scoped() {
             Some(alias)
         );
     }
+    // VertexData keeps its serialized name: every Unity tree (2018.4 through
+    // 6000.0, release and editor) calls the blob m_DataSize, and reference
+    // output preserves it.
+    assert!(!hints.field_name_aliases.contains_key("m_Vertex.m_DataSize"));
 
     let value = SerializedValue::Struct(vec![
         field("m_Index", SerializedValue::I32(99)),
@@ -970,13 +973,13 @@ fn buffer_vertex_compute_yaml_aliases_are_type_scoped() {
         "m_OffsetInConstantBuffer: 2",
         "m_OffsetInConstantBuffer: 3",
         "m_OffsetInConstantBuffer: 4",
-        "m_Data: 5",
+        "m_DataSize: 5",
         "m_KernelParents: 6",
     ] {
         assert!(output.contains(expected), "missing {expected}");
     }
     assert!(!output.contains("m_Set:"));
-    assert!(!output.contains("m_DataSize:"));
+    assert!(!output.contains("m_Data: 5"));
     assert!(!output.contains("m_Kernels:"));
     assert!(!output.contains("m_Index: 2"));
 }

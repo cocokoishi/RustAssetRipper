@@ -53,7 +53,6 @@ pub(super) fn baseline_type_scoped_field_aliases(
     const BINDING_ALIASES: &[(&str, &str)] = &[("m_Set", "m_EncodedData")];
     const CONSTANT_BUFFER_PARAMETER_ALIASES: &[(&str, &str)] =
         &[("m_Index", "m_OffsetInConstantBuffer")];
-    const VERTEX_DATA_ALIASES: &[(&str, &str)] = &[("m_DataSize", "m_Data")];
     const COMPUTE_SHADER_VARIANT_ALIASES: &[(&str, &str)] = &[("m_Kernels", "m_KernelParents")];
     const SHADER_ALIASES: &[(&str, &str)] = &[("m_SubProgramBlob", "m_CompressedBlob")];
     const GAME_OBJECT_ALIASES: &[(&str, &str)] = &[("m_Component", "m_Components")];
@@ -80,7 +79,6 @@ pub(super) fn baseline_type_scoped_field_aliases(
         "MatrixParameter" | "StructParameter" | "VectorParameter" => {
             CONSTANT_BUFFER_PARAMETER_ALIASES
         }
-        "VertexData" => VERTEX_DATA_ALIASES,
         "ComputeShaderPlatformVariant" => COMPUTE_SHADER_VARIANT_ALIASES,
         "Shader" => SHADER_ALIASES,
         "GameObject" => GAME_OBJECT_ALIASES,

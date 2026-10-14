@@ -348,3 +348,27 @@ fn class_editor_field_deltas_insert_defaults_and_drop_release_fields() {
     apply_class_editor_field_backfill(&mut document, 33);
     assert!(!render(&document).contains("m_WarningMessage"));
 }
+
+#[test]
+fn mesh_optimizer_flag_slots_before_stream_data() {
+    let mut body = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    body.insert_field("m_MeshMetrics", signed(0)).unwrap();
+    let mut stream = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    stream.insert_field("offset", signed(0)).unwrap();
+    body.insert_field("m_StreamData", stream).unwrap();
+    let mut document =
+        UnityYamlDocument::object(43, 51, "Mesh", body, false).expect("test Mesh document builds");
+    apply_class_editor_field_backfill(&mut document, 43);
+    // A second pass is a no-op: insertion skips fields already present.
+    apply_class_editor_field_backfill(&mut document, 43);
+    let output = render(&document);
+    key_order(
+        &output,
+        &["m_MeshMetrics", "m_MeshOptimized: 1", "m_StreamData"],
+    );
+    assert_eq!(
+        output.match_indices("m_MeshOptimized").count(),
+        1,
+        "the optimizer flag is not duplicated"
+    );
+}

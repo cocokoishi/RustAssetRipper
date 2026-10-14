@@ -1,5 +1,9 @@
 # Source behavior and differential findings
 
+## DIFF-MESH-FIELDS-2018-001 — Mesh optimizer flag and vertex-data name (fixed)
+
+Mesh documents differed by two independent gaps: the editor-only `m_MeshOptimized` bool defaulting to true (proven absent from both the TPK and the file's own TypeTree, so the data carries no such bytes), fixed with a table row in the class backfill; and the vertex blob key rendered as `m_Data` instead of `m_DataSize`. The rename came from an unconditional old-to-new field alias, but every Unity tree (2018.4 through 6000.0, release and editor) and the 2018.4 reference output use `m_DataSize`, so the alias entry was removed and its tests corrected to pin passthrough. Re-audit: class 43 resolves fully with no regressions. Status: fixed and validated on the reporting sample.
+
 ## DIFF-CLASS-FIELD-DELTAS-2018-001 — class-specific editor field deltas (fixed)
 
 Animator, Light, and ParentConstraint documents differed by single editor-default fields (plus a release-only Light struct the editor omits). Fixed with a table-driven document backfill (insert with anchors, remove release-only, never rewrite source values), pinned by a unit test covering all three rows plus the no-op case. Re-audit: classes 95/108/1773428102 resolve fully with no regressions. Status: fixed and validated on the reporting sample.

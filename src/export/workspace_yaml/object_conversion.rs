@@ -2089,7 +2089,9 @@ struct ClassEditorFieldDelta {
 }
 
 /// One defaulted field insertion: placed after `after` when present, else
-/// before `before` when present, else appended.
+/// before `before` when present, else appended. An empty `after` selects the
+/// `before` anchor directly (used when the predecessor is an array item with
+/// no plain mapping key).
 struct ClassFieldInsert {
     name: &'static str,
     after: &'static str,
@@ -2122,8 +2124,20 @@ impl ClassFieldDefault {
 /// Class-specific editor deltas proven against reference output. The Animator
 /// warning message, the Light shadow metrics, and the ParentConstraint lock
 /// flag are editor defaults absent from the data; the Light baking output is
-/// a release-only struct the editor layout omits.
+/// a release-only struct the editor layout omits. The Mesh optimizer flag is
+/// an editor-only bool defaulting to true (both the TPK and the file's own
+/// TypeTree lack it, so the data carries no such bytes).
 const CLASS_EDITOR_FIELD_DELTAS: &[ClassEditorFieldDelta] = &[
+    ClassEditorFieldDelta {
+        class_id: 43,
+        inserts: &[ClassFieldInsert {
+            name: "m_MeshOptimized",
+            after: "",
+            before: "m_StreamData",
+            value: ClassFieldDefault::Boolean(true),
+        }],
+        removes: &[],
+    },
     ClassEditorFieldDelta {
         class_id: 95,
         inserts: &[ClassFieldInsert {
