@@ -3,6 +3,7 @@
 ## 2026-10-14 Full-corpus factory triage (637216/637216 OK, zero failures)
 
 - Extended the probe with per-object `materialize_object` through embedded reference layouts: every one of the 637216 decoded corpus objects also constructs (counts match decode exactly). Ledger gained a factory section. Honest caveats kept: triage grade, construction-OK is not export-OK, values unvalidated, workspace/collections/export and reference side untouched.
+- Actions run `38536817434` is fully green on both platforms (docs-only change), including the public-repository hygiene job.
 - Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. Sample inputs read-only; no sample content committed. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 Full-corpus decode sweep (637216/637216 OK, zero failures)
