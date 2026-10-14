@@ -1,5 +1,10 @@
 # Validation log
 
+## 2026-10-14 Real-sample decode triage (4067/4067 OK, zero failures)
+
+- Extended the inventory probe with per-object payload decode across the same four samples: 2753 + 1008 + 260 + 46 objects, every one decodes without error, including dense class-74/114 spreads and the unknown raw type. Ledger updated. Honest caveats recorded: stale-rlib triage grade, decode-OK is not semantic-OK, factory/workspace/export untouched, reference side still pending.
+- Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. Sample inputs read-only; no sample content committed. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 First real-sample structural triage (4 samples, zero errors)
 
 - Drove an rlib-linked inventory probe (gitignored scratch; Oct-13 rlib, so triage-grade only) over the first four corpus samples: VRC-AV01 (2 nodes, 2753 objects, dense class-74/114/28 spread), VRC-W01 (2 files, 1008 objects, broad world spread with audio), VRC-AV03 (inner 2018.4.20f1 vs 6000 bundle tag, 16MB resource node, one unknown raw type 1773428102 parsed cleanly), VRC-W02 (fmt-7 bundle, small world graph). Zero container/entry/parse errors in all four. Ledger rows and triage notes updated in `docs/acceptance-corpus.md`; no sample content committed.
