@@ -1,5 +1,11 @@
 # Validation log
 
+## 2026-10-14 Controller root fixed; AV03 converges
+
+- The controller root carried four release-only fields every editor layout omits. Fixed by extending the root-rebuild skip list (reads precede the drop). The Avatar doc is proven content-identical modulo YAML style (strict token equality). Formatting and Clippy (warnings-denied locally) clean; release rebuilt.
+- Fresh replay plus re-audit: real-diff classes 2 to 1 (91 resolves fully); the remaining Avatar doc is semantically equivalent with zero unpaired files and no regressions.
+- Local checks: `git diff --check` exit 0; `cargo check`/`cargo clippy` clean; module tests green. Full validation via GitHub Actions after push. Sample input read-only; outputs quarantined. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Mesh fields fixed; 2 classes remain
 
 - Mesh editor layout adds default-true MeshOptimized (data proven byte-absent) and keeps the m_DataSize blob name (an unconditional alias renamed it wrongly at every version). Fixed with a table row plus alias removal (tests corrected). Formatting and Clippy (warnings-denied locally) clean; release rebuilt.

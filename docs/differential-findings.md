@@ -1,5 +1,13 @@
 # Source behavior and differential findings
 
+## DIFF-CONTROLLER-ROOT-2018-001 — controller root release-only fields (fixed)
+
+The AnimatorController root carried four release-only fields the editor layout omits at every version (TPK-probed, both reference outputs confirm): the runtime clip list, the behaviour vector description, the bound behaviour list (bound into states/machines, then dropped), and the multithreaded flag. Fixed by extending the existing root-rebuild skip list; reads happen before the drop so motion/behaviour resolution is unaffected. Controller workflow tests green. Re-audit: class 91 resolves fully with no regressions. Status: fixed and validated on the reporting sample.
+
+## DIFF-AVATAR-STYLE-2018-001 — Avatar skeleton tables are flow-vs-block only (equivalent)
+
+The Avatar document differs from the reference solely in YAML mapping style (flow vs block) for its skeleton tables: entry counts identical both sides, and the full token streams (keys, values, signs, decimals, order) are exactly identical over 40,752 characters after stripping only formatting. YAML flow and block mappings are semantically identical, and Unity parses both the same way. Status: proven semantically equivalent; no code change.
+
 ## DIFF-MESH-FIELDS-2018-001 — Mesh optimizer flag and vertex-data name (fixed)
 
 Mesh documents differed by two independent gaps: the editor-only `m_MeshOptimized` bool defaulting to true (proven absent from both the TPK and the file's own TypeTree, so the data carries no such bytes), fixed with a table row in the class backfill; and the vertex blob key rendered as `m_Data` instead of `m_DataSize`. The rename came from an unconditional old-to-new field alias, but every Unity tree (2018.4 through 6000.0, release and editor) and the 2018.4 reference output use `m_DataSize`, so the alias entry was removed and its tests corrected to pin passthrough. Re-audit: class 43 resolves fully with no regressions. Status: fixed and validated on the reporting sample.

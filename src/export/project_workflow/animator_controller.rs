@@ -2950,6 +2950,18 @@ fn insert_generated_controller_fields(
                 | "m_TOS"
                 | "m_AnimatorParameters"
                 | "m_AnimatorLayers"
+                // Release-only fields the editor layout omits at every version
+                // (TPK-probed): the runtime clip list and the behaviour vector
+                // description. Modern projects additionally rebuild the root
+                // through normalize_modern_controller_root_body.
+                | "m_AnimationClips"
+                | "m_StateMachineBehaviourVectorDescription"
+                // The root behaviour list is bound into states and machines by
+                // bind_behaviours, then dropped like the other release-only
+                // fields; the multithreaded flag never appears in any editor
+                // layout either. Both are absent from every reference root.
+                | "m_StateMachineBehaviours"
+                | "m_MultiThreadedStateMachine"
         ) {
             continue;
         }
