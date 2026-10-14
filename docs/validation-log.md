@@ -4,6 +4,7 @@
 
 - Mirrored the frozen editor-format static rule: renderers with non-default static-batch info (or non-empty subset indices on older layouts) mark their GameObject all-static. The mark is computed from attached renderer components through the reference graph at assignment time and applied to the editor field with loud failure on absence. Condition unit tests pass locally (2 new), formatting clean, release binary rebuilt.
 - Fresh replay plus re-audit: class 1 goes to 172/172 exact; zero classes with real diffs, zero unpaired documents, no regressions. The world is now fully clean except encoder-only PNG bytes (pixel-identical), the by-design auxiliary path map, and per-run GUID randomness (all normalized by the audit discipline).
+- The static-marking commit failed CI Clippy first (two lints: argument count on the extended editor-format function, collapsible match in the subset-indices branch); fixed with the repo-precedent allow attribute plus a collapsed pattern, verified by local Clippy, and Actions run `38575316264` is fully green on both platforms.
 - Local checks: `git diff --check` exit 0; `cargo check --locked --all-targets` exit 0; module tests green. Full validation via GitHub Actions after push. Sample input read-only; outputs quarantined. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 Sprite engine redirects fixed; world re-audit clean except static flags
