@@ -3,6 +3,7 @@
 ## 2026-10-14 Sprite module docs corrected (bone/physics work completed earlier)
 
 - Stale-claim check: `src/resources/sprite.rs` module docs said `GeneratePhysicsShape` and the `SetBoneGeometry` body "remain open", but the capability completed across two modules: `fill_sprite_metadata` ports the decision kernel (gates, PPU scaling) while the texture project route owns extraction and the importer path serializes outline, physics-shape, bone, and geometry fields, all covered by the bone/atlas/outline suites. Corrected the doc block to describe the implemented split; the source's own `Edges` TODO (matched by our empty-list retention) is unchanged.
+- Actions run `38515885218` is fully green on both platforms (docs-only change), with warnings-denied Clippy, release builds, changed-line formatting, and repository hygiene.
 - Local checks: `git diff --check` exit 0; single-file `rustfmt --check` clean. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No user input was read; Phase 1 remains open and Phase 2 remains locked. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 CRN bombs cover both decoder families
