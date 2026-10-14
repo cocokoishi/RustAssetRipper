@@ -70,11 +70,23 @@ gaps are expected on both sides through engine-asset redirects; see
 | VRC-W07 | probe done | decode 42222/42222 OK | done: 3284 files; 79/79 anim, 27/27 controller, 55/55 cs, 27/27 ogg, 1 unity, 9 ttf; 332 mat vs 343 class-21, 383 texture files vs 386 class-28, 72 shader vs 86 class-48 (observations; largest material gap so far) | pending | parse+decode-OK; export pending |
 | VRC-W08 | probe done | decode 1993/1993 OK | done: 526 files; 4/4 anim, 30/30 mat, 4/4 controller, 20/20 cs, 2/2 ogg, 1 unity; 131 texture files vs 121 class-28 (overage: cubemap/sprite-derived PNGs suspected amid 10 class-89 and 34 sprite pairs), 34 shader vs 40 class-48 (observations) | pending | parse+decode-OK; export pending |
 | VRC-W09 | probe done | decode 10587/10587 OK | done: 2099 files; 58/58 anim, 13/13 controller, 67/67 cs, 26/26 ogg, 1 unity, 1 terrainlayer, 1 overrideController; 205 mat vs 214 class-21, 291 texture files vs 300 class-28, 72 shader vs 103 class-48 (observations; largest shader gap) | pending | parse+decode-OK; export pending |
-| VRC-W10 | probe done | decode 72365/72365 OK | done: 2182 files; 1/1 anim, 1/1 controller, 29/29 cs, 1/1 ogg, 1 unity, 1 playable, inner 2022.3.6f1; 86 mat vs 91 class-21, 247 texture files vs 249 class-28, 44 shader vs 52 class-48 (observations) | pending | parse+decode-OK; export pending |
+| VRC-W10 | probe done (alias cross-walk confirmed by size+version, see notes) | decode 72365/72365 OK | done: 2182 files; 1/1 anim, 1/1 controller, 29/29 cs, 1/1 ogg, 1 unity, 1 playable, inner 2022.3.6f1; 86 mat vs 91 class-21, 247 texture files vs 249 class-28, 44 shader vs 52 class-48 (observations) | pending | parse+decode-OK; export pending |
 | VRC-W11 | probe done | decode 33974/33974 OK | done: 2207 files; 93/93 anim, 8/8 controller, 39/39 cs, 1/1 ogg, 1 unity, 1 flare, 1 playable; 141 mat vs 145 class-21, 260 png vs 257 class-28, 53 shader vs 59 class-48 (observations) | pending | parse+decode-OK; export pending |
 
 Acceptance order: smallest first (VRC-AV01, VRC-W01), then by size.
 Reference outputs and Rust outputs stay in gitignored local scratch only.
+
+## Comparison discipline (established 2026-10-14)
+
+Reference exports regenerate random GUIDs and fresh timestamps on every run
+(verified: two exports of one avatar share the file tree exactly but differ
+in all 1057 sidecars' guid/timeCreated lines, plus 32 YAML assets carrying
+those GUIDs; binary assets are byte-identical). Consequences: never
+byte-compare exports across runs, not even reference-vs-reference; Rust-vs-ref
+diffs must pair assets by stable identity (relative path plus local fileID)
+and compare resolved reference targets rather than raw GUIDs; timeCreated is
+always normalized. The Rust implementation's deterministic per-identity GUIDs
+stay an asset for reproducibility, not a mismatch.
 
 ## First triage notes (anonymous, structural only)
 
@@ -126,15 +138,26 @@ untouched) and values remain unvalidated. Next: reference-side runs.
 
 ## Open tooling gaps
 
-- Runnable Rust binary from HEAD: no CI artifact upload exists (workflow is
-  read-only by design), local cargo builds are ruled out by the machine
-  performance constraint, and no prebuilt binary exists. Triage can proceed
-  through rlib-linked probes with a documented staleness caveat; gate-level
-  replays need a binary strategy (deferred decision, no permission changes
-  without authorization).
-- Reference export driver: scratch headless driver builds clean
-  (Release, 0 warnings); first baseline export done for the smallest
-  avatar (2120 files: 1057 meta, 906 anim, 104 png, 29 asset, 11 cs,
-  5 controller, plus prefab/material/shader/text/configs — mirroring the
-  class inventory); smallest-world baseline running. Outputs quarantined
-  in gitignored scratch, never committed.
+- Runnable Rust binary from HEAD: prior sessions ran local release builds
+  on this machine repeatedly (Oct 11-13 replays) and disk has since
+  recovered, so a background `cargo build --release --locked --bin
+  assetripper-rs` was started in-session; gate replays unblock when it
+  lands. The CI-artifact alternative stays available if local builds prove
+  too heavy (needs owner approval for the workflow change).
+- Reference export driver: done (scratch headless driver, 22/22 baselines).
+
+## Corpus reconciliation notes (anonymous)
+
+- One ID is confirmed against the prior program's alias set by exact byte
+  size plus inner Unity version: VRC-W10 matches the world alias whose
+  input is 73,242,523 bytes at Unity 2022.3.6f1. All other cross-walks
+  stay unconfirmed: prior object counts differ from probe counts by small
+  deltas on near candidates (e.g. two cases differ by exactly 176 objects),
+  which may reflect counting conventions, sample updates, or different
+  files. No ID is asserted to an alias without owner reconciliation; the
+  truncated hashes in this ledger bridge any future mapping.
+- Pre-existing repo docs (Oct 11-13 replay entries) contain probable
+  original asset/object names inside evidence text. Adjudication against
+  the private mapping plus any redaction needs owner decision; shared
+  history is never rewritten unilaterally. No new exposures were added
+  from the current acceptance rounds.

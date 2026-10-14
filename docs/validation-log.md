@@ -1,5 +1,15 @@
 # Validation log
 
+## 2026-10-14 Prior acceptance program found; binary build restarted
+
+- Reading current repo docs overturned two working assumptions: prior sessions ran a deep real-sample program (six alias-named samples, dozens of export replays with a locally built release binary, full audit toolchain, per-class differential findings) and the alias set is larger than the stale snapshot suggested. Consequences recorded in the ledger: one corpus ID confirmed against the prior set by exact size plus inner version; other cross-walks unconfirmed (small object-count deltas noted, possibly conventions or updates); pre-existing probable-original-names in Oct 11-13 evidence flagged for owner adjudication with no unilateral history action; no new exposures added. Since local release builds have direct precedent on this machine and disk recovered, a background HEAD release build was started; gate replays unblock when it lands.
+- Local checks: `git diff --check` exit 0. No local Cargo test run (validation delegated to GitHub Actions after push; the release build above is a binary procurement run, not a test run). Unity import/runtime and UABEA were NOT RUN.
+
+## 2026-10-14 Reference exports are nondeterministic by design (methodology)
+
+- Re-exported one avatar to a fresh directory: file trees byte-identical in listing (2119 files both) but all 1057 sidecars differ (fresh random GUIDs plus timestamps; sampled 30/30 differ in both lines) along with 32 YAML assets embedding those GUIDs, while binary assets (.anim/.png/.cs) are byte-identical. Recorded the comparison discipline in the ledger: pair by stable identity, compare resolved targets, normalize timeCreated, never byte-compare across runs.
+- Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. GUID tokens only; no sample content committed. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Texture attribution rule recorded (static, verified on 3 baselines)
 
 - Read the frozen texture export routing: one bitmap file per Texture2D-or-Cubemap, sprite member files only in non-Yaml sprite mode (default is Yaml, so members stay in importer metadata), `RawTextureExporter` unreferenced dead code in the snapshot, default shaders via dummy-text exporter. Verified against three corpus baselines (one exact 121+10=131, two off-by-one consistent with redirects). Recorded as `DIFF-TEXTURE-ATTRIBUTION-001`; `.texture2D`/`.renderTexture` routing stays an open sub-question.

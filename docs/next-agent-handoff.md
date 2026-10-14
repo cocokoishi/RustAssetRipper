@@ -1,5 +1,17 @@
 # RustAssetRipper hand-off — 2026-10-10
 
+## Latest current checkpoint — 2026-10-14 (prior program found, build on)
+
+- Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public. One corpus ID confirmed against the prior alias set; other cross-walks need owner reconciliation (hashes bridge). Pre-existing probable-original-names flagged for owner adjudication; no new exposures added.
+- Prior sessions' deep acceptance program discovered in current docs (alias replays, audit toolchain, per-class findings); HEAD release build started in background on that precedent. Next: collect binary, gate replays, Rust-vs-ref diffs.
+- Local checks: `git diff --check` exit 0. No local Cargo test run; validation delegated to GitHub Actions after push.
+
+## Latest current checkpoint — 2026-10-14 (comparison discipline set)
+
+- Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public. GUID tokens only; nothing committed from outputs.
+- Reference re-export proves per-run GUID/timestamp regeneration (trees identical, all sidecars differ); ledger now states the pairing discipline. Next: Rust-side export comparison once a binary strategy exists (authorization-blocked; see ledger).
+- Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push.
+
 ## Latest current checkpoint — 2026-10-14 (texture attribution rule)
 
 - Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public. No samples opened for this static finding.
