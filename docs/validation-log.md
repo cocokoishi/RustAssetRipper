@@ -3,6 +3,7 @@
 ## 2026-10-14 Texture attribution rule recorded (static, verified on 3 baselines)
 
 - Read the frozen texture export routing: one bitmap file per Texture2D-or-Cubemap, sprite member files only in non-Yaml sprite mode (default is Yaml, so members stay in importer metadata), `RawTextureExporter` unreferenced dead code in the snapshot, default shaders via dummy-text exporter. Verified against three corpus baselines (one exact 121+10=131, two off-by-one consistent with redirects). Recorded as `DIFF-TEXTURE-ATTRIBUTION-001`; `.texture2D`/`.renderTexture` routing stays an open sub-question.
+- Actions run `38556972588` is fully green on both platforms (docs-only change), including the public-repository hygiene job.
 - Local checks: `git diff --check` exit 0. No local Cargo test/build (machine performance constraint); validation delegated to GitHub Actions after push. No samples opened for this finding. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 Redirect mechanism confirmed quantitatively (reference side)
