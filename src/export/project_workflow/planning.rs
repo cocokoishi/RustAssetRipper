@@ -488,8 +488,24 @@ pub(super) fn plan_routed_asset_files(
                 let source = identity_of(entry);
                 let animation_clip_root = processed_animation_roots
                     .get(&(entry.object.file_index, entry.object.object_index));
+                let sprite_atlas_overlay = if entry.class_id == 213 {
+                    workspace_sprite_atlas_yaml_overlay(
+                        objects,
+                        reference_graph,
+                        entry.object,
+                        source,
+                    )
+                    .map_err(|message| {
+                        invalid_project(format!(
+                            "Sprite {}:{} atlas overlay failed: {message}",
+                            entry.object.file_index, entry.object.path_id
+                        ))
+                    })?
+                } else {
+                    None
+                };
                 let document =
-                    workspace_object_to_unity_yaml_document_with_processed_animation_root(
+                    workspace_object_to_unity_yaml_document_with_processed_animation_root_and_atlas_overlay(
                         workspace,
                         reference_graph,
                         pointer_map,
@@ -505,6 +521,7 @@ pub(super) fn plan_routed_asset_files(
                         animation_clip_root,
                         &streamed_resources,
                         true,
+                        sprite_atlas_overlay,
                     )?;
                 let Some(mut document) = document else {
                     if entry.scriptable_object_group.is_some()
@@ -575,8 +592,24 @@ pub(super) fn plan_routed_asset_files(
                             path_id: child.object.path_id,
                             class_id: child.object.factory.class_id,
                         };
+                        let sprite_atlas_overlay = if child.object.factory.class_id == 213 {
+                            workspace_sprite_atlas_yaml_overlay(
+                                objects,
+                                reference_graph,
+                                child.object,
+                                source,
+                            )
+                            .map_err(|message| {
+                                invalid_project(format!(
+                                    "Sprite {}:{} atlas overlay failed: {message}",
+                                    child.object.file_index, child.object.path_id
+                                ))
+                            })?
+                        } else {
+                            None
+                        };
                         let document =
-                            workspace_object_to_unity_yaml_document_with_streamed_resources(
+                            workspace_object_to_unity_yaml_document_with_processed_animation_root_and_atlas_overlay(
                                 workspace,
                                 reference_graph,
                                 pointer_map,
@@ -589,7 +622,10 @@ pub(super) fn plan_routed_asset_files(
                                         .to_byte_array(),
                                 ),
                                 limits.yaml_collection.object_conversion,
+                                None,
                                 &streamed_resources,
+                                false,
+                                sprite_atlas_overlay,
                             )?
                             .ok_or_else(|| {
                                 invalid_project(format!(
@@ -644,8 +680,24 @@ pub(super) fn plan_routed_asset_files(
                             path_id: child.object.path_id,
                             class_id: child.object.factory.class_id,
                         };
+                        let sprite_atlas_overlay = if child.object.factory.class_id == 213 {
+                            workspace_sprite_atlas_yaml_overlay(
+                                objects,
+                                reference_graph,
+                                child.object,
+                                identity,
+                            )
+                            .map_err(|message| {
+                                invalid_project(format!(
+                                    "Sprite {}:{} atlas overlay failed: {message}",
+                                    child.object.file_index, child.object.path_id
+                                ))
+                            })?
+                        } else {
+                            None
+                        };
                         let mut document =
-                            workspace_object_to_unity_yaml_document_with_streamed_resources(
+                            workspace_object_to_unity_yaml_document_with_processed_animation_root_and_atlas_overlay(
                                 workspace,
                                 reference_graph,
                                 pointer_map,
@@ -658,7 +710,10 @@ pub(super) fn plan_routed_asset_files(
                                         .to_byte_array(),
                                 ),
                                 limits.yaml_collection.object_conversion,
+                                None,
                                 &streamed_resources,
+                                false,
+                                sprite_atlas_overlay,
                             )?
                             .ok_or_else(|| {
                                 invalid_project(format!(

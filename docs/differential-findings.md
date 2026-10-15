@@ -4,9 +4,17 @@
 
 A 2022.3 world with Terrain objects failed project export loudly at the LightingData gate. Implemented following the reference processor: terrains collect like renderers, unlightmapped ones skip, lightmapped ones emit renderer-data entries (index, dynamic, tiling offsets, dynamic/static UVs, probe hash; no UV mesh). Unit-tested for both paths. The reporting export now passes LightingData planning and reaches a deeper sprite-materialization failure, so the terrain path is exercised on real data; entry values await the full audit. Status: implemented, e2e-exercised, audit pending on atlas-packed sprites.
 
-## DIFF-ATLAS-SPRITE-001 — atlas-packed sprite geometry (open)
+## DIFF-ATLAS-SPRITE-001 — atlas-packed sprite geometry (implemented, audit pending)
 
-A 2022.3 world sprite packed in a SpriteAtlas fails materialization loudly: the atlas-copy branch needs cross-object RenderDataMap reads unavailable at conversion time. The previous loud error assumed no sample uses it; this sample does. Status: open, next blocker.
+Atlas-packed sprites failed loudly in two stages, both fixed following the frozen processor. First, the sprite-atlas overlay (which already copies atlas render data and clears the atlas pointer) was only wired into the scene-assignment route; loose-asset sprites convert through the generic planning route with no overlay. Overlays are now built for class 213 in all planning routes and threaded through a crate-internal converter twin, so the public conversion surface is unchanged. The geometry check now inspects both the source and the merged root, proceeding only when both atlas pointers are cleared. Second, the overlay registered resolution entries for null PPtrs, but the YAML walker emits null pointers directly without visiting them, so the unseen-pointer invariant could never hold; null copies no longer push overlay entries. Status: implemented, unit-tested; the reporting export now exits 0.
+
+## DIFF-HASH128-001 — Hash128 formats as unsigned words, never throws (fixed)
+
+A world `LightProbes` hash with high-bit words failed export loudly under a checked-arithmetic overflow model taken from an external probe. Both frozen helpers (`YamlWalker` and `AssemblyDumper`) build words as `uint` and format unconditionally, and the reference output carries the exact hash as a plain string, so the probe exercised a different routine. The formatter is now infallible; the error variant, the probe-based overflow test, and the fixture expectations were corrected (hand-computed values verified by the test plus the exact world hash).
+
+## DIFF-W03-AUDIT-001 — world r5 exports exit 0 with broad diffs under triage (open)
+
+The reporting world export now completes (541 paired, zero unpaired). The first audit pass shows many paired-file differences across common classes; triage is pending to separate comparison hygiene (e.g. GUID mapping) from real product gaps. Status: open.
 
 ## DIFF-EDITOR-COVERAGE-2022-001 — Animation joins the editor tree set (fixed)
 

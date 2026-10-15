@@ -1,5 +1,11 @@
 # RustAssetRipper hand-off — 2026-10-10
 
+## Latest current checkpoint — 2026-10-14 (atlas sprites plus Hash128; world r5 exits 0)
+
+- Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public (only class IDs/counts/field names in docs; audit outputs quarantined).
+- Atlas-sprite overlay threading plus null-overlay fix plus Hash128-uint correction implemented and unit-tested. Reporting world r5 exports exit 0 (541 paired, zero unpaired); broad paired diffs under triage (DIFF-W03-AUDIT-001). Converged set unchanged (AV01-AV11, W01, W02).
+- Local checks: `git diff --check` exit 0; cargo check/clippy (-D warnings locally) + module tests green. Full validation via GitHub Actions after push.
+
 ## Latest current checkpoint — 2026-10-14 (terrain lighting implemented)
 
 - Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public (only class IDs/counts/field names in docs; audit outputs quarantined).

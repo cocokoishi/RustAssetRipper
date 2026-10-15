@@ -651,10 +651,7 @@ fn convert_hash128_value(
                 field_path: field_path.to_owned(),
             });
         }
-        let hash =
-            format_hash128(bytes).map_err(|_| UnityYamlObjectConversionError::Hash128Overflow {
-                field_path: field_path.to_owned(),
-            })?;
+        let hash = format_hash128(bytes);
         mapping
             .insert_field("Hash", UnityYamlNode::string(hash))
             .map_err(UnityYamlObjectConversionError::NodeBuild)?;

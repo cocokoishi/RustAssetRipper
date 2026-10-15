@@ -141,11 +141,11 @@ use super::value_yaml::{
     UnityYamlObjectConversionHints, UnityYamlObjectConversionLimits, UnityYamlObjectFieldMode,
     UnityYamlPPtrRequest, serialized_object_value_to_unity_yaml_document,
 };
+use super::workspace_yaml::sprite_atlas::workspace_sprite_atlas_yaml_overlay;
 use super::workspace_yaml::{
     UnityYamlWorkspaceCollectionLimits, WorkspaceGeneratedLightingDataYamlPointer,
     WorkspaceGeneratedTransformYamlContext, WorkspaceStreamedYamlResourceContext,
-    workspace_object_to_unity_yaml_document_with_processed_animation_root,
-    workspace_object_to_unity_yaml_document_with_streamed_resources,
+    workspace_object_to_unity_yaml_document_with_processed_animation_root_and_atlas_overlay,
     workspace_prefab_hierarchy_to_unity_yaml_with_generated_transforms,
     workspace_scene_assignments_to_unity_yaml_with_project_generated_assets,
 };

@@ -1,5 +1,11 @@
 # Validation log
 
+## 2026-10-14 Atlas sprites resolve; Hash128 corrected; world r5 exports exit 0
+
+- Atlas-packed sprites: overlays now built in all planning routes and threaded through a crate-internal converter twin (public surface unchanged); geometry proceeds only when both atlas pointers are cleared; null PPtrs no longer push unvisitable overlay entries. New unit tests for the resolved path plus the fail-closed path.
+- Hash128 now formats as unsigned words per the frozen exporter (both frozen helpers use uint); the overflow model from an external probe was wrong for export. Fixture and tests corrected, including the exact world hash.
+- Local checks: `git diff --check` exit 0; `cargo check`/`cargo clippy` clean; sprite plus hash128 module tests green; release rebuilt; reporting world export exits 0 (541 paired, zero unpaired; broad paired diffs under triage). Full validation via GitHub Actions after push. Sample input read-only; outputs quarantined. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Terrain lighting implemented; W03 reaches sprite materialization
 
 - Terrain lighting records implemented per the reference processor (skip plus emit paths, unit-tested). The reporting export passes LightingData planning and now fails loudly at atlas-packed sprite materialization (a separate open gap); phase order proves the terrain path ran clean on real data. Formatting and Clippy (warnings-denied locally) clean; release rebuilt.

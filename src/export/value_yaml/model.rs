@@ -190,9 +190,6 @@ pub enum UnityYamlObjectConversionError {
         field_name: String,
         field_index: usize,
     },
-    Hash128Overflow {
-        field_path: String,
-    },
     GuidFieldCount {
         field_path: String,
         expected: usize,
@@ -307,10 +304,6 @@ impl Display for UnityYamlObjectConversionError {
             } => write!(
                 f,
                 "Hash128 byte {field_index} ({field_name:?}) at {field_path:?} is missing, duplicated, or not an unsigned byte"
-            ),
-            Self::Hash128Overflow { field_path } => write!(
-                f,
-                "Hash128 at {field_path:?} overflows the baseline's checked 32-bit arithmetic"
             ),
             Self::GuidFieldCount {
                 field_path,

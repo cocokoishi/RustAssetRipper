@@ -3099,27 +3099,35 @@ fn apply_mesh_editor_format(root: &mut SerializedValue) -> Result<(), String> {
 /// values, in source order with `f32` IEEE semantics.
 ///
 /// The atlas-copy branch (non-null `m_SpriteAtlas` with a `RenderDataKey` map hit)
-/// needs cross-object `RenderDataMap` reads unavailable at conversion time and is
-/// a loud error instead of silent raw values; no authorized sample sprite uses it.
+/// is resolved upstream by the sprite-atlas overlay, which copies the atlas render
+/// data into the source payload and clears the atlas pointer and tags. Geometry
+/// then proceeds on those resolved values. A non-null atlas pointer surviving in
+/// either the source or the merged root means no overlay resolved it, which stays
+/// a loud error instead of silent raw values.
 /// `Has_Pivot`/`Has_Border` follow bundle field presence on the source payload.
 fn apply_sprite_geometry(
     source_payload: &SerializedValue,
     root: &mut SerializedValue,
 ) -> Result<(), String> {
-    let atlas = root
-        .unique_field_in_base_chain("m_SpriteAtlas")
-        .map_err(|error| format!("could not inspect Sprite.m_SpriteAtlas: {error}"))?;
-    match atlas {
-        Some(SerializedValue::PPtr { path_id: 0, .. }) | None => {}
-        Some(SerializedValue::PPtr { file_id, path_id }) => {
-            return Err(format!(
-                "Sprite references SpriteAtlas (fileID {file_id}, PathID {path_id}); atlas-packed sprite RenderDataMap resolution is not implemented"
-            ));
-        }
-        Some(value) => {
-            return Err(format!(
-                "Sprite.m_SpriteAtlas has value {value:?}, expected a PPtr"
-            ));
+    let containers: [(&SerializedValue, &str); 2] = [(source_payload, "source"), (root, "merged")];
+    for (container, container_name) in containers {
+        let atlas = container
+            .unique_field_in_base_chain("m_SpriteAtlas")
+            .map_err(|error| {
+                format!("could not inspect {container_name} Sprite.m_SpriteAtlas: {error}")
+            })?;
+        match atlas {
+            Some(SerializedValue::PPtr { path_id: 0, .. }) | None => {}
+            Some(SerializedValue::PPtr { file_id, path_id }) => {
+                return Err(format!(
+                    "Sprite references SpriteAtlas (fileID {file_id}, PathID {path_id}); atlas-packed sprite RenderDataMap resolution is not implemented"
+                ));
+            }
+            Some(value) => {
+                return Err(format!(
+                    "Sprite.m_SpriteAtlas has value {value:?}, expected a PPtr"
+                ));
+            }
         }
     }
     let rect = read_rect_field(source_payload, "m_Rect")?;
@@ -4094,6 +4102,45 @@ pub fn workspace_object_to_unity_yaml_document_with_processed_animation_root(
     streamed_resources: &WorkspaceStreamedYamlResourceContext<'_, '_>,
     animation_clip_editor_format: bool,
 ) -> Result<Option<UnityYamlDocument>, UnityYamlWorkspaceExportError> {
+    workspace_object_to_unity_yaml_document_with_processed_animation_root_and_atlas_overlay(
+        workspace,
+        reference_graph,
+        pointer_map,
+        object,
+        source,
+        file_id,
+        current_collection_index,
+        missing_reference_guid,
+        limits,
+        processed_animation_root,
+        streamed_resources,
+        animation_clip_editor_format,
+        None,
+    )
+}
+
+/// Convert one workspace object with an optional prebuilt sprite-atlas overlay.
+///
+/// Crate-internal planning routes resolve atlas-packed sprites through
+/// [`workspace_sprite_atlas_yaml_overlay`](super::sprite_atlas::workspace_sprite_atlas_yaml_overlay)
+/// before conversion; the overlay type stays crate-internal so the public
+/// conversion surface does not expose atlas-internals to external callers.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn workspace_object_to_unity_yaml_document_with_processed_animation_root_and_atlas_overlay(
+    workspace: &SerializedFileWorkspace,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+    pointer_map: &ProjectExportPointerMap,
+    object: &WorkspaceObject,
+    source: ExportAssetIdentity,
+    file_id: i64,
+    current_collection_index: usize,
+    missing_reference_guid: Option<[u8; 16]>,
+    limits: UnityYamlObjectConversionLimits,
+    processed_animation_root: Option<&SerializedValue>,
+    streamed_resources: &WorkspaceStreamedYamlResourceContext<'_, '_>,
+    animation_clip_editor_format: bool,
+    sprite_atlas_overlay: Option<WorkspaceSpriteAtlasYamlOverlay>,
+) -> Result<Option<UnityYamlDocument>, UnityYamlWorkspaceExportError> {
     WorkspaceYamlExportContext::new(
         workspace,
         reference_graph,
@@ -4113,7 +4160,7 @@ pub fn workspace_object_to_unity_yaml_document_with_processed_animation_root(
         generated_component_overlay: None,
         generated_prefab_internal: None,
         generated_lighting_data: None,
-        sprite_atlas_overlay: None,
+        sprite_atlas_overlay: sprite_atlas_overlay.as_ref(),
     })
 }
 
@@ -4711,6 +4758,145 @@ mod tests {
         )
         .unwrap();
         assert_eq!(texture_offset, (0.0, 0.0));
+    }
+
+    #[test]
+    fn sprite_geometry_uses_overlay_resolved_atlas_render_data() {
+        fn vec2(x: f32, y: f32) -> SerializedValue {
+            SerializedValue::Struct(vec![
+                SerializedFieldValue {
+                    name: "x".to_owned(),
+                    value: SerializedValue::F32(x),
+                },
+                SerializedFieldValue {
+                    name: "y".to_owned(),
+                    value: SerializedValue::F32(y),
+                },
+            ])
+        }
+        fn rect(x: f32, y: f32, width: f32, height: f32) -> SerializedValue {
+            SerializedValue::Struct(vec![
+                SerializedFieldValue {
+                    name: "x".to_owned(),
+                    value: SerializedValue::F32(x),
+                },
+                SerializedFieldValue {
+                    name: "y".to_owned(),
+                    value: SerializedValue::F32(y),
+                },
+                SerializedFieldValue {
+                    name: "width".to_owned(),
+                    value: SerializedValue::F32(width),
+                },
+                SerializedFieldValue {
+                    name: "height".to_owned(),
+                    value: SerializedValue::F32(height),
+                },
+            ])
+        }
+        // An overlay-resolved source carries the atlas render data in `m_RD`
+        // with a cleared atlas pointer, exactly as the sprite-atlas overlay
+        // rebuilds it. The sprite's own `m_Rect` differs from the atlas
+        // rectangle so the test proves the atlas values drive the output.
+        let source = SerializedValue::Struct(vec![
+            SerializedFieldValue {
+                name: "m_Rect".to_owned(),
+                value: rect(0.0, 0.0, 1024.0, 848.0),
+            },
+            SerializedFieldValue {
+                name: "m_Pivot".to_owned(),
+                value: vec2(0.5, 0.5),
+            },
+            SerializedFieldValue {
+                name: "m_Border".to_owned(),
+                value: SerializedValue::Struct(vec![
+                    SerializedFieldValue {
+                        name: "x".to_owned(),
+                        value: SerializedValue::F32(0.0),
+                    },
+                    SerializedFieldValue {
+                        name: "y".to_owned(),
+                        value: SerializedValue::F32(0.0),
+                    },
+                    SerializedFieldValue {
+                        name: "z".to_owned(),
+                        value: SerializedValue::F32(0.0),
+                    },
+                    SerializedFieldValue {
+                        name: "w".to_owned(),
+                        value: SerializedValue::F32(0.0),
+                    },
+                ]),
+            },
+            SerializedFieldValue {
+                name: "m_Offset".to_owned(),
+                value: vec2(0.0, 0.0),
+            },
+            SerializedFieldValue {
+                name: "m_RD".to_owned(),
+                value: SerializedValue::Struct(vec![
+                    SerializedFieldValue {
+                        name: "textureRect".to_owned(),
+                        value: rect(10.0, 20.0, 256.0, 128.0),
+                    },
+                    SerializedFieldValue {
+                        name: "textureRectOffset".to_owned(),
+                        value: vec2(2.0, 3.0),
+                    },
+                ]),
+            },
+            SerializedFieldValue {
+                name: "m_SpriteAtlas".to_owned(),
+                value: SerializedValue::PPtr {
+                    file_id: 0,
+                    path_id: 0,
+                },
+            },
+        ]);
+        let mut root = source.clone();
+        apply_sprite_geometry(&source, &mut root).unwrap();
+        let out_rect = read_rect_field(&root, "m_Rect").unwrap();
+        assert_eq!(out_rect, (10.0, 20.0, 256.0, 128.0));
+        let out_pivot = read_vec2_field(&root, "m_Pivot").unwrap();
+        assert_eq!(out_pivot, (1.9921875, 3.2890625));
+        let out_offset = read_vec2_field(&root, "m_Offset").unwrap();
+        assert_eq!(out_offset, (382.0, 357.0));
+        let out_texture_offset = read_vec2_field(
+            sprite_struct_field(&root, "Sprite", "m_RD").unwrap(),
+            "textureRectOffset",
+        )
+        .unwrap();
+        assert_eq!(out_texture_offset, (0.0, 0.0));
+    }
+
+    #[test]
+    fn sprite_geometry_rejects_unresolved_atlas_pointers_loudly() {
+        let atlas_pointer = SerializedValue::Struct(vec![SerializedFieldValue {
+            name: "m_SpriteAtlas".to_owned(),
+            value: SerializedValue::PPtr {
+                file_id: 0,
+                path_id: 793,
+            },
+        }]);
+        let null_pointer = SerializedValue::Struct(vec![SerializedFieldValue {
+            name: "m_SpriteAtlas".to_owned(),
+            value: SerializedValue::PPtr {
+                file_id: 0,
+                path_id: 0,
+            },
+        }]);
+        let source_error =
+            apply_sprite_geometry(&atlas_pointer, &mut null_pointer.clone()).unwrap_err();
+        assert!(
+            source_error.contains("RenderDataMap resolution is not implemented"),
+            "unexpected source-atlas error: {source_error}"
+        );
+        let root_error =
+            apply_sprite_geometry(&null_pointer, &mut atlas_pointer.clone()).unwrap_err();
+        assert!(
+            root_error.contains("RenderDataMap resolution is not implemented"),
+            "unexpected root-atlas error: {root_error}"
+        );
     }
 
     fn batch_info_root(first: i32, count: i32) -> SerializedValue {

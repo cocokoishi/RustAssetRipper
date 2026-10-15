@@ -161,11 +161,9 @@ pub(crate) fn workspace_sprite_atlas_yaml_overlay_with_index(
         file_id: 0,
         path_id: 0,
     };
-    pointers.push(WorkspaceSpriteAtlasPointer {
-        field_path: atlas_field_path,
-        path_id: 0,
-        target: ProjectPointerRequest::Null,
-    });
+    // No overlay entry for the cleared atlas pointer: the YAML walker emits
+    // null pointers directly without resolution, so the entry could never be
+    // visited.
     if let Some(atlas_tags) = root
         .unique_field_in_base_chain_mut("m_AtlasTags")
         .map_err(|error| format!("could not inspect Sprite.m_AtlasTags: {error}"))?
@@ -653,11 +651,9 @@ where
             if *source_path_id == 0 {
                 *file_id = 0;
                 *path_id = 0;
-                pointer_overlays.push(WorkspaceSpriteAtlasPointer {
-                    field_path: target_path.to_owned(),
-                    path_id: 0,
-                    target: ProjectPointerRequest::Null,
-                });
+                // Null pointers need no overlay entry: the YAML walker
+                // emits `{fileID: 0}` for them without invoking pointer
+                // resolution, so an entry here could never be visited.
                 return Ok(());
             }
             if *file_id != *source_file_id || *path_id != *source_path_id {
@@ -1188,7 +1184,7 @@ mod tests {
     }
 
     #[test]
-    fn copied_null_atlas_pointer_is_overlaid_instead_of_using_old_sprite_edge() {
+    fn copied_null_atlas_pointer_needs_no_overlay_entry() {
         let source = SerializedValue::PPtr {
             file_id: 4,
             path_id: 0,
@@ -1214,9 +1210,9 @@ mod tests {
                 path_id: 0
             }
         );
-        assert_eq!(overlays.len(), 1);
-        assert_eq!(overlays[0].field_path, "m_RD.texture");
-        assert_eq!(overlays[0].target, ProjectPointerRequest::Null);
+        // The YAML walker emits null pointers directly without invoking
+        // pointer resolution, so an overlay entry could never be visited.
+        assert!(overlays.is_empty());
     }
 
     #[test]
@@ -1322,8 +1318,8 @@ mod tests {
                 .unwrap(),
             &atlas_offset
         );
-        assert_eq!(pointers.len(), 1);
-        assert_eq!(pointers[0].field_path, "m_RD.texture");
-        assert_eq!(pointers[0].target, ProjectPointerRequest::Null);
+        // The null atlas texture needs no overlay entry; the walker emits it
+        // directly.
+        assert!(pointers.is_empty());
     }
 }
