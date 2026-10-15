@@ -32,19 +32,19 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::io::filesystem::VirtualFileSystem;
 use crate::io::platform_structure::PlatformResourceProvider;
 use crate::processing::asset_bundle::{
-    AssetBundleContainerTarget, resolve_asset_bundle_container_reference,
+    resolve_asset_bundle_container_reference, AssetBundleContainerTarget,
 };
 use crate::processing::asset_factory::{
-    ClassLayoutSource, FactoryAssetKind, FactoryUnityVersion, FactoryVersionType,
-    reference_class_layouts,
+    reference_class_layouts, ClassLayoutSource, FactoryAssetKind, FactoryUnityVersion,
+    FactoryVersionType,
 };
 use crate::processing::managed_assembly::{
-    ManagedAssembly, ManagedAssemblyCatalog, ManagedAssemblyLimits, mono_script_export_identity,
+    mono_script_export_identity, ManagedAssembly, ManagedAssemblyCatalog, ManagedAssemblyLimits,
 };
 use crate::processing::scene_collections::{
-    AssetBundleContainerDecodeError, SceneBundleMappingLimits, SceneDefinitionGuidPlan,
-    SceneDefinitionPathSource, SceneGuidWords, SceneManagerKind,
-    extract_asset_bundle_container_references,
+    extract_asset_bundle_container_references, AssetBundleContainerDecodeError,
+    SceneBundleMappingLimits, SceneDefinitionGuidPlan, SceneDefinitionPathSource, SceneGuidWords,
+    SceneManagerKind,
 };
 use crate::processing::scene_hierarchy::{
     WorkspaceSceneAssetCategory, WorkspaceSceneHierarchyScene, WorkspaceSceneObjectIdentity,
@@ -52,14 +52,14 @@ use crate::processing::scene_hierarchy::{
 use crate::processing::scene_naming::SceneUnityVersion;
 use crate::processing::script_identity::ScriptIdentifier;
 use crate::resource::{
+    resolve_and_read_streamed_resource_info, resolve_and_read_streamed_resource_range,
     RootResourceFileCatalog, StreamedResourceContentLimits, StreamedResourceContentResolution,
-    StreamedResourceRange, resolve_and_read_streamed_resource_info,
-    resolve_and_read_streamed_resource_range,
+    StreamedResourceRange,
 };
-use crate::resources::shader::{SHADER_CLASS_ID, ShaderView, script_has_decompiled_text};
+use crate::resources::shader::{script_has_decompiled_text, ShaderView, SHADER_CLASS_ID};
 use crate::serialized_file::object::{
-    ObjectDefaultValueLimits, ParsedObjectPayload, SerializedFieldValue, SerializedValue,
-    default_value_for_type_tree_node,
+    default_value_for_type_tree_node, ObjectDefaultValueLimits, ParsedObjectPayload,
+    SerializedFieldValue, SerializedValue,
 };
 use crate::serialized_file::object_workspace::{ObjectWorkspace, WorkspaceObject};
 use crate::serialized_file::reference_graph::{MultiFilePPtrResolution, MultiFileReferenceGraph};
@@ -72,11 +72,11 @@ use super::collection_kind::ExportCollectionKind;
 use super::collection_paths::{
     plan_script_export_paths, remove_assembly_file_extension, scripts_folder_name,
 };
-use super::empty_script::{MonoScriptIdentity, empty_script_content, is_predefined_assembly};
+use super::empty_script::{empty_script_content, is_predefined_assembly, MonoScriptIdentity};
 use super::export_extension::DEFAULT_EXPORT_EXTENSION;
 use super::path_id_map::{
-    PathIdMapAssetFacts, SerializedGameInfo, build_serialized_file, generated_type_interfaces,
-    has_path_id_map_generated_types, serialize_path_id_map,
+    build_serialized_file, generated_type_interfaces, has_path_id_map_generated_types,
+    serialize_path_id_map, PathIdMapAssetFacts, SerializedGameInfo,
 };
 use super::pointer_map::{
     ExportCollectionPointerMetadata, ExportPointerGuid, ExportPointerMapLimits,
@@ -85,44 +85,43 @@ use super::pointer_map::{
 };
 use super::post_export::PATH_ID_MAP_FILE;
 use super::prefab_collection::{
-    PrefabAssetRepresentation, PrefabExportIdPlan, PrefabExportPlanLimits,
-    PrefabHierarchyAssetGroups, VersionedPrefabAsset, generate_prefab_source_pointer,
-    plan_prefab_export_ids,
+    generate_prefab_source_pointer, plan_prefab_export_ids, PrefabAssetRepresentation,
+    PrefabExportIdPlan, PrefabExportPlanLimits, PrefabHierarchyAssetGroups, VersionedPrefabAsset,
 };
 use super::project_exporter::{
-    ObjectClassFacts, PlannedProjectFile, PlannedProjectMeta, PlannedProjectPostExportFile,
-    PlannedProjectStreamFile, PlannedProjectSupportFile, ProjectExportError, ProjectExportNotice,
-    ProjectExportPlan, ProjectExportSettings, ProjectPathPlanner, ProjectStreamPostExports,
     claim_facts_for_shader_text, execute_project_export_with_streams, export_extension_for,
     lighting_data_native_format_importer_for_version, mesh_native_format_importer_for_version,
     native_format_importer_for_version, object_class_name, package_manifest_json,
     project_version_file, select_collection_with_claim_facts,
-    shader_importer_for_version_with_non_modifiable_textures,
+    shader_importer_for_version_with_non_modifiable_textures, ObjectClassFacts, PlannedProjectFile,
+    PlannedProjectMeta, PlannedProjectPostExportFile, PlannedProjectStreamFile,
+    PlannedProjectSupportFile, ProjectExportError, ProjectExportNotice, ProjectExportPlan,
+    ProjectExportSettings, ProjectPathPlanner, ProjectStreamPostExports,
 };
 use super::project_plan::plan_scene_export_paths;
 use super::reference_assemblies::ReferenceAssemblyMaps;
 use super::resource_extensions::text_export_extension;
 use super::scene_collection::{
-    ExportAssetCollectionIdentity, ExportAssetIdentity, ExportAssetObjectKey,
-    SceneExportIdAssignment, SceneExportIdPlanLimits, SceneHierarchyAssetOrderLimits,
-    plan_workspace_scene_export_ids_with_processed_assets,
+    plan_workspace_scene_export_ids_with_processed_assets, ExportAssetCollectionIdentity,
+    ExportAssetIdentity, ExportAssetObjectKey, SceneExportIdAssignment, SceneExportIdPlanLimits,
+    SceneHierarchyAssetOrderLimits,
 };
 use super::scene_wiring::{
-    WorkspaceSceneProcessing, WorkspaceSceneProcessingLimits, process_workspace_scenes_and_prefabs,
+    process_workspace_scenes_and_prefabs, WorkspaceSceneProcessing, WorkspaceSceneProcessingLimits,
 };
 use super::script_export_flow::{
-    AssemblyExportType, add_assembly_file_extension, assembly_definition_file_name,
-    assembly_definition_json, assembly_export_type, emit_assembly_definitions,
+    add_assembly_file_extension, assembly_definition_file_name, assembly_definition_json,
+    assembly_export_type, emit_assembly_definitions, AssemblyExportType,
 };
 use super::script_hashing::{
-    ScriptHashLimits, calculate_assembly_guid, calculate_script_file_id_str,
-    calculate_script_guid_str,
+    calculate_assembly_guid, calculate_script_file_id_str, calculate_script_guid_str,
+    ScriptHashLimits,
 };
 use super::settings::StreamingAssetsMode;
 use super::settings_file::{ExportSettingsFile, SerializedSettingsFile};
 use super::shader_export::{
-    YAML_SHADER_EXTENSION, export_shader_text, unity_patches, yaml_shader_patch_texts,
-    yaml_shader_patches,
+    export_shader_text, unity_patches, yaml_shader_patch_texts, yaml_shader_patches,
+    YAML_SHADER_EXTENSION,
 };
 use super::streamed_assets::StreamedYamlAssetLimits;
 use super::texture_project::{
@@ -134,15 +133,16 @@ use super::texture_project::{
     plan_texture_project_export_for_source_version, TextureImporterLayout, TextureProjectPlan,
 };
 use super::unity_yaml::{
-    UnityYamlMappingStyle, UnityYamlNode, UnityYamlSequenceStyle, UnityYamlWriteLimits,
-    project_pointer_to_unity_yaml, write_unity_yaml_documents,
+    project_pointer_to_unity_yaml, write_unity_yaml_documents, UnityYamlMappingStyle,
+    UnityYamlNode, UnityYamlSequenceStyle, UnityYamlWriteLimits,
 };
 use super::value_yaml::{
-    UnityYamlObjectConversionHints, UnityYamlObjectConversionLimits, UnityYamlObjectFieldMode,
-    UnityYamlPPtrRequest, serialized_object_value_to_unity_yaml_document,
+    serialized_object_value_to_unity_yaml_document, UnityYamlObjectConversionHints,
+    UnityYamlObjectConversionLimits, UnityYamlObjectFieldMode, UnityYamlPPtrRequest,
 };
 use super::workspace_yaml::sprite_atlas::workspace_sprite_atlas_yaml_overlay;
 use super::workspace_yaml::{
+    workspace_nav_mesh_build_settings_overlay,
     workspace_object_to_unity_yaml_document_with_atlas_overlay,
     workspace_prefab_hierarchy_to_unity_yaml_with_generated_transforms,
     workspace_scene_assignments_to_unity_yaml_with_project_generated_assets,
@@ -530,8 +530,8 @@ mod scriptable_object_groups;
 mod workspace_identity;
 
 use self::animator_collections::{
-    PreparedControllerCollections, RoutedControllerCollection, RoutedControllerMember,
-    hide_controller_behaviour, prepare_controller_collections,
+    hide_controller_behaviour, prepare_controller_collections, PreparedControllerCollections,
+    RoutedControllerCollection, RoutedControllerMember,
 };
 use self::animator_controller::{
     normalize_controller_collection_documents, rebuild_animator_controller_documents,
@@ -540,17 +540,18 @@ use self::animator_controller::{
 use self::asset_support::*;
 use self::audio_asset::*;
 use self::collection_planning::{
+    build_project_pointer_map, prepare_generated_collections,
     GeneratedCollectionPreparationContext, PreparedGeneratedCollections, ProjectPointerPlan,
-    ProjectPointerPlanningContext, build_project_pointer_map, prepare_generated_collections,
+    ProjectPointerPlanningContext,
 };
 use self::font_asset::*;
 use self::importer_metadata::*;
 use self::lighting_asset::*;
 use self::object_routing::route_project_objects;
 use self::planning::{
+    plan_lighting_data_files, plan_prefab_files, plan_routed_asset_files, plan_scene_files,
     LightingDataPlanningContext, PrefabPlanningContext, ProjectExportPlanBuilder,
-    RoutedAssetPlanningContext, ScenePlanningContext, StagedProjectFiles, plan_lighting_data_files,
-    plan_prefab_files, plan_routed_asset_files, plan_scene_files,
+    RoutedAssetPlanningContext, ScenePlanningContext, StagedProjectFiles,
 };
 use self::scene_collections::*;
 use self::script_exports::*;

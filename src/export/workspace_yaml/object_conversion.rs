@@ -37,7 +37,10 @@ use super::model::{
     WorkspaceGeneratedLightingDataYamlPointer, WorkspaceGeneratedPrefabInternalPointer,
     WorkspaceStreamedYamlResourceContext, WorkspaceYamlExportContext,
 };
-use super::sprite_atlas::{WorkspaceSpriteAtlasPointer, WorkspaceSpriteAtlasYamlOverlay};
+use super::sprite_atlas::{
+    field_path_in_base_chain, unique_reference_for_field, WorkspaceSpriteAtlasPointer,
+    WorkspaceSpriteAtlasYamlOverlay,
+};
 
 fn should_use_scene_editor_type_tree(class_id: i32, unity_version_text: Option<&str>) -> bool {
     let Some(version) = unity_version_text.and_then(FactoryUnityVersion::parse) else {
@@ -151,6 +154,8 @@ pub(super) struct WorkspaceYamlObjectConversionRequest<'object> {
     pub(super) generated_prefab_internal: Option<&'object WorkspaceGeneratedPrefabInternalPointer>,
     pub(super) generated_lighting_data: Option<&'object WorkspaceGeneratedLightingDataYamlPointer>,
     pub(super) sprite_atlas_overlay: Option<&'object WorkspaceSpriteAtlasYamlOverlay>,
+    pub(super) nav_mesh_build_settings_overlay:
+        Option<&'object WorkspaceNavMeshBuildSettingsOverlay>,
 }
 
 impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'graph, 'provider> {
@@ -169,6 +174,7 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
             generated_prefab_internal,
             generated_lighting_data,
             sprite_atlas_overlay,
+            nav_mesh_build_settings_overlay,
         } = request;
         let workspace = self.workspace;
         let reference_graph = self.reference_graph;
@@ -645,7 +651,17 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
                     .map_err(|message| scene_editor_format_error(source, class_id, message))?;
             }
             if class_id == 196 {
-                apply_nav_mesh_settings_editor_defaults(&mut root)
+                if let Some(overlay) = nav_mesh_build_settings_overlay {
+                    if overlay.source != source {
+                        return Err(scene_editor_format_error(
+                            source,
+                            class_id,
+                            "NavMesh build-settings overlay does not match the source NavMeshSettings identity"
+                                .to_owned(),
+                        ));
+                    }
+                }
+                apply_nav_mesh_settings_editor_format(&mut root, nav_mesh_build_settings_overlay)
                     .map_err(|message| scene_editor_format_error(source, class_id, message))?;
             }
             if class_id == 850595691 {
@@ -3429,29 +3445,203 @@ fn apply_texture_editor_format(root: &mut SerializedValue) -> Result<(), String>
     Ok(())
 }
 
+/// Editor `m_BuildSettings` values sourced from the referenced class-238 `NavMeshData`,
+/// mirroring the frozen `NavMeshSettingsExtensions.ConvertToEditorFormat` branches:
+/// a null (or dangling) `m_NavMeshData` keeps the standalone defaults, `m_NavMeshParams`
+/// maps five fields over those defaults, and `m_NavMeshBuildSettings` copies field-for-field
+/// like the generated `CopyValues`.
+pub struct WorkspaceNavMeshBuildSettingsOverlay {
+    pub source: ExportAssetIdentity,
+    pub settings: WorkspaceNavMeshBuildSettingsSource,
+}
+
+pub enum WorkspaceNavMeshBuildSettingsSource {
+    /// Pre-5.6 `m_NavMeshParams` floats, applied over the standalone defaults exactly like
+    /// the frozen `SetValues(INavMeshParams)`.
+    NavMeshParams {
+        walkable_radius: f32,
+        walkable_height: f32,
+        walkable_climb: f32,
+        tile_size: f32,
+        cell_size: f32,
+    },
+    /// 5.6+ `m_NavMeshBuildSettings` struct, copied by field name.
+    BuildSettings(SerializedValue),
+}
+
+/// Resolve the class-238 `NavMeshData` behind a class-196 `NavMeshSettings.m_NavMeshData`
+/// pointer through the reference graph and the decoded object workspace.
+///
+/// Returns `None` when the pointer is absent, null, or dangles (the frozen `NavMeshDataP`
+/// is null in all three cases, so the standalone defaults apply). Any other failure to
+/// determine the source values is an explicit error rather than silently writing defaults.
+pub fn workspace_nav_mesh_build_settings_overlay(
+    objects: &ObjectWorkspace,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+    object: &WorkspaceObject,
+    source: ExportAssetIdentity,
+) -> Result<Option<WorkspaceNavMeshBuildSettingsOverlay>, String> {
+    if source.class_id != 196 || object.factory.class_id != 196 {
+        return Err(format!(
+            "NavMesh build-settings overlay received source class {} and workspace class {}",
+            source.class_id, object.factory.class_id
+        ));
+    }
+    let payload = object
+        .payload
+        .as_ref()
+        .map_err(|error| format!("NavMeshSettings payload could not be decoded: {error}"))?;
+    let nav_mesh_data = payload
+        .root
+        .unique_field_in_base_chain("m_NavMeshData")
+        .map_err(|error| format!("could not inspect NavMeshSettings.m_NavMeshData: {error}"))?;
+    let Some(nav_mesh_data) = nav_mesh_data else {
+        return Ok(None);
+    };
+    let SerializedValue::PPtr { file_id, path_id } = nav_mesh_data else {
+        return Err(format!(
+            "NavMeshSettings.m_NavMeshData has value {nav_mesh_data:?}, expected a PPtr"
+        ));
+    };
+    if *path_id == 0 {
+        return Ok(None);
+    }
+    let field_path = field_path_in_base_chain(&payload.root, "m_NavMeshData")?
+        .ok_or_else(|| "NavMeshSettings.m_NavMeshData has no serialized field path".to_owned())?;
+    let reference = unique_reference_for_field(
+        reference_graph,
+        object.file_index,
+        object.object_index,
+        &field_path,
+        *file_id,
+        *path_id,
+    )?;
+    let (data_file_index, data_object_index) = match &reference.resolution {
+        MultiFilePPtrResolution::Object {
+            target_file_index,
+            target_object_index,
+        } => (*target_file_index, *target_object_index),
+        MultiFilePPtrResolution::Null => return Ok(None),
+        resolution => {
+            return Err(format!(
+                "NavMeshSettings.m_NavMeshData at {field_path:?} did not resolve to one loaded object: {resolution:?}"
+            ));
+        }
+    };
+    if reference_graph.object_class_id(data_file_index, data_object_index) != Some(238) {
+        return Err(format!(
+            "NavMeshSettings.m_NavMeshData resolves to class {:?}, expected NavMeshData class 238",
+            reference_graph.object_class_id(data_file_index, data_object_index)
+        ));
+    }
+    if reference_graph.object_scan_is_complete(data_file_index, data_object_index) != Some(true) {
+        return Err(format!(
+            "NavMeshData file {data_file_index} object {data_object_index} has an incomplete reference scan"
+        ));
+    }
+    let data = objects.get(data_file_index, data_object_index).ok_or_else(|| {
+        format!(
+            "NavMeshData file {data_file_index} object {data_object_index} is absent from the decoded object workspace"
+        )
+    })?;
+    let data_payload = data
+        .payload
+        .as_ref()
+        .map_err(|error| format!("NavMeshData payload could not be decoded: {error}"))?;
+    if let Some(params) = data_payload
+        .root
+        .unique_field_in_base_chain("m_NavMeshParams")
+        .map_err(|error| format!("could not inspect NavMeshData.m_NavMeshParams: {error}"))?
+    {
+        let SerializedValue::Struct(_) = params else {
+            return Err(format!(
+                "NavMeshData.m_NavMeshParams has value {params:?}, expected a struct"
+            ));
+        };
+        return Ok(Some(WorkspaceNavMeshBuildSettingsOverlay {
+            source,
+            settings: WorkspaceNavMeshBuildSettingsSource::NavMeshParams {
+                walkable_radius: nav_mesh_param(params, "walkableRadius")?,
+                walkable_height: nav_mesh_param(params, "walkableHeight")?,
+                walkable_climb: nav_mesh_param(params, "walkableClimb")?,
+                tile_size: nav_mesh_param(params, "tileSize")?,
+                cell_size: nav_mesh_param(params, "cellSize")?,
+            },
+        }));
+    }
+    let build_settings = data_payload
+        .root
+        .unique_field_in_base_chain("m_NavMeshBuildSettings")
+        .map_err(|error| format!("could not inspect NavMeshData.m_NavMeshBuildSettings: {error}"))?
+        .ok_or_else(|| {
+            "NavMeshData has neither m_NavMeshParams nor m_NavMeshBuildSettings".to_owned()
+        })?;
+    let SerializedValue::Struct(_) = build_settings else {
+        return Err(format!(
+            "NavMeshData.m_NavMeshBuildSettings has value {build_settings:?}, expected a struct"
+        ));
+    };
+    Ok(Some(WorkspaceNavMeshBuildSettingsOverlay {
+        source,
+        settings: WorkspaceNavMeshBuildSettingsSource::BuildSettings(build_settings.clone()),
+    }))
+}
+
+fn nav_mesh_param(params: &SerializedValue, name: &str) -> Result<f32, String> {
+    let SerializedValue::Struct(fields) = params else {
+        return Err(format!(
+            "NavMeshData.m_NavMeshParams has value {params:?}, expected a struct"
+        ));
+    };
+    let field = fields
+        .iter()
+        .find(|field| field.name == name)
+        .ok_or_else(|| format!("NavMeshData.m_NavMeshParams has no {name} field"))?;
+    match field.value {
+        SerializedValue::F32(value) => Ok(value),
+        ref value => Err(format!(
+            "NavMeshData.m_NavMeshParams.{name} has value {value:?}, expected float"
+        )),
+    }
+}
+
 /// Applies the frozen `NavMeshSettingsExtensions.ConvertToEditorFormat` behavior for the
 /// serialized null-`m_NavMeshData` case: `BuildSettings.SetToDefault()`.
 ///
 /// A non-null `m_NavMeshData` requires reading the referenced class-238 `NavMeshData` payload
 /// (`NavMeshParams` or `NavMeshBuildSettings`) and is deliberately an explicit error rather than
 /// silently writing the standalone defaults.
-fn apply_nav_mesh_settings_editor_defaults(root: &mut SerializedValue) -> Result<(), String> {
-    let nav_mesh_data = root
+/// Applies the frozen `NavMeshSettingsExtensions.ConvertToEditorFormat` behavior.
+///
+/// A null (or dangling) `m_NavMeshData` writes the standalone `BuildSettings.SetToDefault()`
+/// values; a resolved overlay carries the referenced class-238 `NavMeshData` values instead
+/// (`NavMeshParams` mapped over those defaults, `NavMeshBuildSettings` copied field-for-field).
+/// A non-null pointer with no resolved overlay is an explicit error rather than silently
+/// writing the standalone defaults.
+fn apply_nav_mesh_settings_editor_format(
+    root: &mut SerializedValue,
+    overlay: Option<&WorkspaceNavMeshBuildSettingsOverlay>,
+) -> Result<(), String> {
+    let non_null_data = match root
         .unique_field_in_base_chain("m_NavMeshData")
-        .map_err(|error| format!("could not inspect NavMeshSettings.m_NavMeshData: {error}"))?;
-    match nav_mesh_data {
-        Some(SerializedValue::PPtr { path_id: 0, .. }) | None => {}
+        .map_err(|error| format!("could not inspect NavMeshSettings.m_NavMeshData: {error}"))?
+    {
+        Some(SerializedValue::PPtr { path_id: 0, .. }) | None => false,
         Some(SerializedValue::PPtr { file_id, path_id }) => {
-            return Err(format!(
-                "NavMeshSettings.m_NavMeshData is non-null (fileID {file_id}, PathID {path_id}); the referenced NavMeshData payload is not yet read"
-            ));
+            if overlay.is_none() {
+                return Err(format!(
+                    "NavMeshSettings.m_NavMeshData is non-null (fileID {file_id}, PathID {path_id}); the referenced NavMeshData payload is not yet read"
+                ));
+            }
+            true
         }
         Some(value) => {
             return Err(format!(
                 "NavMeshSettings.m_NavMeshData has value {value:?}, expected a PPtr"
             ));
         }
-    }
+    };
+    let _ = non_null_data;
 
     let build_settings = root
         .unique_field_in_base_chain_mut("m_BuildSettings")
@@ -3462,7 +3652,119 @@ fn apply_nav_mesh_settings_editor_defaults(root: &mut SerializedValue) -> Result
             "NavMeshSettings.m_BuildSettings has value {build_settings:?}, expected a struct"
         ));
     };
+    match overlay {
+        None => write_nav_mesh_build_settings_defaults(fields)?,
+        Some(overlay) => match &overlay.settings {
+            WorkspaceNavMeshBuildSettingsSource::NavMeshParams {
+                walkable_radius,
+                walkable_height,
+                walkable_climb,
+                tile_size,
+                cell_size,
+            } => {
+                write_nav_mesh_build_settings_defaults(fields)?;
+                set_nav_mesh_build_settings_float(fields, "agentRadius", *walkable_radius)?;
+                set_nav_mesh_build_settings_float(fields, "agentHeight", *walkable_height)?;
+                set_nav_mesh_build_settings_float(fields, "agentClimb", *walkable_climb)?;
+                // The frozen `(int)navParams.TileSize` truncates toward zero; real tile
+                // sizes are small positives where Rust `as` matches exactly.
+                set_nav_mesh_build_settings_int(fields, "tileSize", *tile_size as i32)?;
+                set_nav_mesh_build_settings_float(fields, "cellSize", *cell_size)?;
+            }
+            WorkspaceNavMeshBuildSettingsSource::BuildSettings(source) => {
+                copy_nav_mesh_build_settings_fields(fields, source, "m_BuildSettings")?;
+            }
+        },
+    }
+    Ok(())
+}
 
+/// Copies a 5.6+ `m_NavMeshBuildSettings` struct field-for-field like the generated
+/// `CopyValues`: every editor field takes the same-named source value, recursing into
+/// nested structs such as `debug`. Source-only fields have no generated assignment and
+/// stay untouched, exactly as the frozen conversion leaves them.
+fn copy_nav_mesh_build_settings_fields(
+    target: &mut [SerializedFieldValue],
+    source: &SerializedValue,
+    context: &str,
+) -> Result<(), String> {
+    let SerializedValue::Struct(source_fields) = source else {
+        return Err(format!(
+            "NavMeshData {context} has value {source:?}, expected a struct"
+        ));
+    };
+    for target_field in target.iter_mut() {
+        let Some(source_field) = source_fields
+            .iter()
+            .find(|field| field.name == target_field.name)
+        else {
+            continue;
+        };
+        let field_context = format!("{context}.{}", target_field.name);
+        copy_nav_mesh_build_settings_value(
+            &mut target_field.value,
+            &source_field.value,
+            &field_context,
+        )?;
+    }
+    Ok(())
+}
+
+fn copy_nav_mesh_build_settings_value(
+    target: &mut SerializedValue,
+    source: &SerializedValue,
+    context: &str,
+) -> Result<(), String> {
+    match (&mut *target, source) {
+        (SerializedValue::Struct(target_fields), SerializedValue::Struct(source_fields)) => {
+            for target_field in target_fields.iter_mut() {
+                let Some(source_field) = source_fields
+                    .iter()
+                    .find(|field| field.name == target_field.name)
+                else {
+                    continue;
+                };
+                let field_context = format!("{context}.{}", target_field.name);
+                copy_nav_mesh_build_settings_value(
+                    &mut target_field.value,
+                    &source_field.value,
+                    &field_context,
+                )?;
+            }
+            Ok(())
+        }
+        (SerializedValue::Bool(target), SerializedValue::Bool(source)) => {
+            *target = *source;
+            Ok(())
+        }
+        (SerializedValue::I32(target), SerializedValue::I32(source)) => {
+            *target = *source;
+            Ok(())
+        }
+        (SerializedValue::U32(target), SerializedValue::U32(source)) => {
+            *target = *source;
+            Ok(())
+        }
+        (SerializedValue::U8(target), SerializedValue::U8(source)) => {
+            *target = *source;
+            Ok(())
+        }
+        (SerializedValue::F32(target), SerializedValue::F32(source)) => {
+            *target = *source;
+            Ok(())
+        }
+        _ => Err(format!(
+            "NavMeshData {context} has value {source:?}, incompatible with editor value {target:?}"
+        )),
+    }
+}
+
+/// Writes the frozen `NavMeshBuildSettingsExtensions.SetToDefault` values into the
+/// editor `m_BuildSettings` struct: every listed field must exist with a matching scalar
+/// shape, and `debug.m_Flags` is zeroed.
+fn write_nav_mesh_build_settings_defaults(
+    fields: &mut [SerializedFieldValue],
+) -> Result<(), String> {
     // Field names follow the source editor TypeTree node names; `buildHeightMesh` is the
     // Unity 2022.3 spelling of the source `AccuratePlacement` property.
     const DEFAULTS: &[(&str, SceneEditorFormatDefault)] = &[
@@ -3515,6 +3817,44 @@ fn apply_nav_mesh_settings_editor_defaults(root: &mut SerializedValue) -> Result
         ));
     };
     *value = 0;
+    Ok(())
+}
+
+fn set_nav_mesh_build_settings_float(
+    fields: &mut [SerializedFieldValue],
+    name: &str,
+    value: f32,
+) -> Result<(), String> {
+    let field = fields
+        .iter_mut()
+        .find(|field| field.name == name)
+        .ok_or_else(|| format!("NavMeshSettings.m_BuildSettings has no {name} field"))?;
+    let SerializedValue::F32(target) = &mut field.value else {
+        return Err(format!(
+            "NavMeshSettings.m_BuildSettings.{name} has value {:?}, expected float",
+            field.value
+        ));
+    };
+    *target = value;
+    Ok(())
+}
+
+fn set_nav_mesh_build_settings_int(
+    fields: &mut [SerializedFieldValue],
+    name: &str,
+    value: i32,
+) -> Result<(), String> {
+    let field = fields
+        .iter_mut()
+        .find(|field| field.name == name)
+        .ok_or_else(|| format!("NavMeshSettings.m_BuildSettings has no {name} field"))?;
+    let SerializedValue::I32(target) = &mut field.value else {
+        return Err(format!(
+            "NavMeshSettings.m_BuildSettings.{name} has value {:?}, expected int",
+            field.value
+        ));
+    };
+    *target = value;
     Ok(())
 }
 
@@ -4080,6 +4420,7 @@ pub fn workspace_object_to_unity_yaml_document(
         generated_prefab_internal: None,
         generated_lighting_data: None,
         sprite_atlas_overlay: None,
+        nav_mesh_build_settings_overlay: None,
     })?
     else {
         return Err(UnityYamlWorkspaceExportError::ImageTextureSkippedWithoutContent { source });
@@ -4101,6 +4442,7 @@ pub fn workspace_object_to_unity_yaml_document_with_streamed_resources(
     missing_reference_guid: Option<[u8; 16]>,
     limits: UnityYamlObjectConversionLimits,
     streamed_resources: &WorkspaceStreamedYamlResourceContext<'_, '_>,
+    nav_mesh_build_settings_overlay: Option<WorkspaceNavMeshBuildSettingsOverlay>,
 ) -> Result<Option<UnityYamlDocument>, UnityYamlWorkspaceExportError> {
     workspace_object_to_unity_yaml_document_with_processed_animation_root(
         workspace,
@@ -4115,6 +4457,7 @@ pub fn workspace_object_to_unity_yaml_document_with_streamed_resources(
         None,
         streamed_resources,
         false,
+        nav_mesh_build_settings_overlay,
     )
 }
 
@@ -4134,6 +4477,7 @@ pub fn workspace_object_to_unity_yaml_document_with_processed_animation_root(
     processed_animation_root: Option<&SerializedValue>,
     streamed_resources: &WorkspaceStreamedYamlResourceContext<'_, '_>,
     animation_clip_editor_format: bool,
+    nav_mesh_build_settings_overlay: Option<WorkspaceNavMeshBuildSettingsOverlay>,
 ) -> Result<Option<UnityYamlDocument>, UnityYamlWorkspaceExportError> {
     workspace_object_to_unity_yaml_document_with_atlas_overlay(
         workspace,
@@ -4149,6 +4493,7 @@ pub fn workspace_object_to_unity_yaml_document_with_processed_animation_root(
         streamed_resources,
         animation_clip_editor_format,
         None,
+        nav_mesh_build_settings_overlay,
     )
 }
 
@@ -4173,6 +4518,7 @@ pub(crate) fn workspace_object_to_unity_yaml_document_with_atlas_overlay(
     streamed_resources: &WorkspaceStreamedYamlResourceContext<'_, '_>,
     animation_clip_editor_format: bool,
     sprite_atlas_overlay: Option<WorkspaceSpriteAtlasYamlOverlay>,
+    nav_mesh_build_settings_overlay: Option<WorkspaceNavMeshBuildSettingsOverlay>,
 ) -> Result<Option<UnityYamlDocument>, UnityYamlWorkspaceExportError> {
     WorkspaceYamlExportContext::new(
         workspace,
@@ -4194,6 +4540,7 @@ pub(crate) fn workspace_object_to_unity_yaml_document_with_atlas_overlay(
         generated_prefab_internal: None,
         generated_lighting_data: None,
         sprite_atlas_overlay: sprite_atlas_overlay.as_ref(),
+        nav_mesh_build_settings_overlay: nav_mesh_build_settings_overlay.as_ref(),
     })
 }
 
@@ -4997,5 +5344,247 @@ mod tests {
         assert!(!renderer_static_batch_marks(&SerializedValue::Struct(
             vec![]
         )));
+    }
+
+    fn nav_mesh_editor_root(data_file_id: i32, data_path_id: i64) -> SerializedValue {
+        fn scalar(name: &str, value: SerializedValue) -> SerializedFieldValue {
+            SerializedFieldValue {
+                name: name.to_owned(),
+                value,
+            }
+        }
+        SerializedValue::Struct(vec![
+            scalar(
+                "m_NavMeshData",
+                SerializedValue::PPtr {
+                    file_id: data_file_id,
+                    path_id: data_path_id,
+                },
+            ),
+            scalar(
+                "m_BuildSettings",
+                SerializedValue::Struct(vec![
+                    scalar("agentTypeID", SerializedValue::I32(0)),
+                    scalar("agentRadius", SerializedValue::F32(0.0)),
+                    scalar("agentHeight", SerializedValue::F32(0.0)),
+                    scalar("agentSlope", SerializedValue::F32(0.0)),
+                    scalar("agentClimb", SerializedValue::F32(0.0)),
+                    scalar("ledgeDropHeight", SerializedValue::F32(0.0)),
+                    scalar("maxJumpAcrossDistance", SerializedValue::F32(0.0)),
+                    scalar("minRegionArea", SerializedValue::F32(0.0)),
+                    scalar("manualCellSize", SerializedValue::I32(0)),
+                    scalar("cellSize", SerializedValue::F32(0.0)),
+                    scalar("manualTileSize", SerializedValue::I32(0)),
+                    scalar("tileSize", SerializedValue::I32(0)),
+                    scalar("buildHeightMesh", SerializedValue::I32(0)),
+                    scalar("maxJobWorkers", SerializedValue::U32(0)),
+                    scalar("preserveTilesOutsideBounds", SerializedValue::I32(0)),
+                    scalar(
+                        "debug",
+                        SerializedValue::Struct(vec![scalar("m_Flags", SerializedValue::U8(255))]),
+                    ),
+                ]),
+            ),
+        ])
+    }
+
+    fn nav_mesh_build_settings_field<'a>(
+        root: &'a SerializedValue,
+        name: &str,
+    ) -> &'a SerializedValue {
+        let SerializedValue::Struct(fields) = root else {
+            panic!("navmesh test root is not a struct");
+        };
+        let settings = fields
+            .iter()
+            .find(|field| field.name == "m_BuildSettings")
+            .expect("navmesh test root has m_BuildSettings");
+        let SerializedValue::Struct(settings_fields) = &settings.value else {
+            panic!("navmesh m_BuildSettings is not a struct");
+        };
+        &settings_fields
+            .iter()
+            .find(|field| field.name == name)
+            .unwrap_or_else(|| panic!("navmesh m_BuildSettings has no {name}"))
+            .value
+    }
+
+    fn nav_mesh_test_source() -> ExportAssetIdentity {
+        ExportAssetIdentity {
+            collection: ExportAssetCollectionIdentity::SerializedFile { file_index: 0 },
+            object_index: 3,
+            path_id: 7,
+            class_id: 196,
+        }
+    }
+
+    #[test]
+    fn nav_mesh_null_data_writes_standalone_defaults() {
+        let mut root = nav_mesh_editor_root(0, 0);
+        apply_nav_mesh_settings_editor_format(&mut root, None).unwrap();
+        assert_eq!(
+            nav_mesh_build_settings_field(&root, "agentRadius"),
+            &SerializedValue::F32(0.5)
+        );
+        assert_eq!(
+            nav_mesh_build_settings_field(&root, "tileSize"),
+            &SerializedValue::I32(256)
+        );
+        assert_eq!(
+            nav_mesh_build_settings_field(&root, "cellSize"),
+            &SerializedValue::F32(1.0 / 6.0)
+        );
+    }
+
+    #[test]
+    fn nav_mesh_params_overlay_maps_five_fields_over_defaults() {
+        let mut root = nav_mesh_editor_root(1, 4526);
+        let overlay = WorkspaceNavMeshBuildSettingsOverlay {
+            source: nav_mesh_test_source(),
+            settings: WorkspaceNavMeshBuildSettingsSource::NavMeshParams {
+                walkable_radius: 1.5,
+                walkable_height: 2.5,
+                walkable_climb: 0.75,
+                tile_size: 64.9,
+                cell_size: 0.125,
+            },
+        };
+        apply_nav_mesh_settings_editor_format(&mut root, Some(&overlay)).unwrap();
+        assert_eq!(
+            nav_mesh_build_settings_field(&root, "agentRadius"),
+            &SerializedValue::F32(1.5)
+        );
+        assert_eq!(
+            nav_mesh_build_settings_field(&root, "agentHeight"),
+            &SerializedValue::F32(2.5)
+        );
+        assert_eq!(
+            nav_mesh_build_settings_field(&root, "agentClimb"),
+            &SerializedValue::F32(0.75)
+        );
+        // The frozen `(int)TileSize` truncates toward zero.
+        assert_eq!(
+            nav_mesh_build_settings_field(&root, "tileSize"),
+            &SerializedValue::I32(64)
+        );
+        assert_eq!(
+            nav_mesh_build_settings_field(&root, "cellSize"),
+            &SerializedValue::F32(0.125)
+        );
+        // Untouched fields keep the standalone defaults.
+        assert_eq!(
+            nav_mesh_build_settings_field(&root, "agentSlope"),
+            &SerializedValue::F32(45.0)
+        );
+    }
+
+    #[test]
+    fn nav_mesh_build_settings_overlay_copies_source_fields() {
+        let mut root = nav_mesh_editor_root(1, 4526);
+        let source = SerializedValue::Struct(vec![
+            SerializedFieldValue {
+                name: "agentRadius".to_owned(),
+                value: SerializedValue::F32(0.2),
+            },
+            SerializedFieldValue {
+                name: "tileSize".to_owned(),
+                value: SerializedValue::I32(128),
+            },
+            SerializedFieldValue {
+                name: "debug".to_owned(),
+                value: SerializedValue::Struct(vec![SerializedFieldValue {
+                    name: "m_Flags".to_owned(),
+                    value: SerializedValue::U8(7),
+                }]),
+            },
+            SerializedFieldValue {
+                name: "sourceOnlyFutureField".to_owned(),
+                value: SerializedValue::I32(9),
+            },
+        ]);
+        // A target-only field keeps its merged value; a source-only field has
+        // no generated assignment and must not appear in the output.
+        if let SerializedValue::Struct(fields) = &mut root {
+            let settings = fields
+                .iter_mut()
+                .find(|field| field.name == "m_BuildSettings")
+                .unwrap();
+            let SerializedValue::Struct(settings_fields) = &mut settings.value else {
+                panic!("navmesh m_BuildSettings is not a struct");
+            };
+            settings_fields.push(SerializedFieldValue {
+                name: "targetOnly".to_owned(),
+                value: SerializedValue::I32(41),
+            });
+        }
+        let overlay = WorkspaceNavMeshBuildSettingsOverlay {
+            source: nav_mesh_test_source(),
+            settings: WorkspaceNavMeshBuildSettingsSource::BuildSettings(source),
+        };
+        apply_nav_mesh_settings_editor_format(&mut root, Some(&overlay)).unwrap();
+        assert_eq!(
+            nav_mesh_build_settings_field(&root, "agentRadius"),
+            &SerializedValue::F32(0.2)
+        );
+        assert_eq!(
+            nav_mesh_build_settings_field(&root, "tileSize"),
+            &SerializedValue::I32(128)
+        );
+        assert_eq!(
+            nav_mesh_build_settings_field(&root, "targetOnly"),
+            &SerializedValue::I32(41)
+        );
+        let SerializedValue::Struct(fields) = &root else {
+            panic!("navmesh test root is not a struct");
+        };
+        let settings = fields
+            .iter()
+            .find(|field| field.name == "m_BuildSettings")
+            .unwrap();
+        let SerializedValue::Struct(settings_fields) = &settings.value else {
+            panic!("navmesh m_BuildSettings is not a struct");
+        };
+        assert!(settings_fields
+            .iter()
+            .all(|field| field.name != "sourceOnlyFutureField"));
+        let debug = settings_fields
+            .iter()
+            .find(|field| field.name == "debug")
+            .unwrap();
+        let SerializedValue::Struct(debug_fields) = &debug.value else {
+            panic!("navmesh debug is not a struct");
+        };
+        assert_eq!(
+            debug_fields
+                .iter()
+                .find(|field| field.name == "m_Flags")
+                .unwrap()
+                .value,
+            SerializedValue::U8(7)
+        );
+    }
+
+    #[test]
+    fn nav_mesh_build_settings_copy_rejects_shape_mismatch() {
+        let mut root = nav_mesh_editor_root(1, 4526);
+        let source = SerializedValue::Struct(vec![SerializedFieldValue {
+            name: "agentRadius".to_owned(),
+            value: SerializedValue::I32(1),
+        }]);
+        let overlay = WorkspaceNavMeshBuildSettingsOverlay {
+            source: nav_mesh_test_source(),
+            settings: WorkspaceNavMeshBuildSettingsSource::BuildSettings(source),
+        };
+        let error = apply_nav_mesh_settings_editor_format(&mut root, Some(&overlay))
+            .expect_err("float/int shape mismatch must fail loudly");
+        assert!(error.contains("incompatible"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn nav_mesh_non_null_data_without_overlay_fails_loudly() {
+        let mut root = nav_mesh_editor_root(1, 4526);
+        let error = apply_nav_mesh_settings_editor_format(&mut root, None)
+            .expect_err("unresolved non-null NavMeshData must fail loudly");
+        assert!(error.contains("not yet read"), "unexpected error: {error}");
     }
 }

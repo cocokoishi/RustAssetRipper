@@ -37,6 +37,7 @@ fn workspace_yaml_export_resolves_and_embeds_streamed_image_texture_bytes() {
         None,
         UnityYamlObjectConversionLimits::default(),
         &context,
+        None,
     )
     .unwrap()
     .expect("streamed image texture should be exported");
@@ -150,6 +151,7 @@ fn workspace_yaml_export_handles_every_generated_image_texture_interface_class()
             None,
             UnityYamlObjectConversionLimits::default(),
             &context,
+            None,
         )
         .unwrap()
         .unwrap_or_else(|| panic!("class {class_id} unexpectedly skipped"));
@@ -230,6 +232,7 @@ fn workspace_yaml_collection_skips_image_texture_with_unset_or_zero_length_strea
             None,
             UnityYamlObjectConversionLimits::default(),
             &context,
+            None,
         )
         .unwrap();
         assert!(document.is_none());
@@ -414,6 +417,7 @@ fn workspace_yaml_export_resolves_and_embeds_streamed_mesh_bytes() {
         None,
         UnityYamlObjectConversionLimits::default(),
         &context,
+        None,
     )
     .unwrap()
     .expect("streamed Mesh should be exported");
@@ -521,6 +525,7 @@ fn workspace_yaml_export_reports_missing_streamed_resource_without_null_or_empty
         None,
         UnityYamlObjectConversionLimits::default(),
         &copy_limited_context,
+        None,
     )
     .unwrap_err();
     match copy_limit_error {
@@ -548,6 +553,7 @@ fn workspace_yaml_export_reports_missing_streamed_resource_without_null_or_empty
             None,
             UnityYamlObjectConversionLimits::default(),
             &context,
+            None,
         ),
         Err(UnityYamlWorkspaceExportError::StreamedResourceMissing {
             path,

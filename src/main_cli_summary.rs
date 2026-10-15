@@ -140,7 +140,7 @@ pub(super) fn print_workspace_summary_with_optional_resources_to<W: io::Write>(
             }
             writeln!(output, "{detail}")?;
         }
-    };
+    }
     writeln!(
         output,
         "AnimatorController source dependencies: {} generated-collection appends modeled, {} source files deferred by incomplete TypeTree data",

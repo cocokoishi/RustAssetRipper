@@ -33,6 +33,7 @@ use assetripper::export::unity_yaml::{write_unity_yaml_documents, UnityYamlWrite
 use assetripper::export::value_yaml::UnityYamlObjectConversionLimits;
 use assetripper::export::workspace_yaml::{
     workspace_assignments_to_unity_yaml_with_streamed_resources,
+    workspace_nav_mesh_build_settings_overlay,
     workspace_object_to_unity_yaml_document_with_streamed_resources,
     UnityYamlWorkspaceCollectionLimits, WorkspaceStreamedYamlResourceContext,
 };

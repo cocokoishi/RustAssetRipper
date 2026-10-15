@@ -1,5 +1,12 @@
 # RustAssetRipper hand-off — 2026-10-10
 
+## Latest current checkpoint — 2026-10-15 (fourth world passes its NavMesh blocker)
+
+- Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public (only class IDs/counts/field names in docs; audit outputs quarantined).
+- The fourth world previously failed loudly at class-196 `NavMeshSettings` because a non-null `m_NavMeshData` had no source-sourcing path. The frozen three-branch `ConvertToEditorFormat` is now fully implemented generically: null/dangling data keeps the standalone defaults, `m_NavMeshParams` maps five fields over those defaults with the source's truncating `(int)` cast, and `m_NavMeshBuildSettings` is copied field-for-field with nested-struct recursion, editor-only fields keeping their merged value and source-only fields getting no assignment (exactly the generated `CopyValues` behavior). A frozen-TPK probe across 5.0 to 6000.0.23 pinned the class-238/196 version boundaries the branches depend on.
+- Local checks: `cargo check` and `clippy -D warnings` clean; 1803 workspace tests pass (6 new focused NavMesh tests); `git diff --check` exit 0; rustfmt clean on edited files. The fourth world's `export-project` replay now exits 0 (previously exit 1); its semantic audit against the frozen reference is the current open step. Converged set unchanged: AV01-AV11, W01-W05.
+- CI gained two jobs so heavier validation runs on Actions instead of locally: a ledger/repository audit (`tools/parity-report.ps1` structure plus the oversized-source report) and release-mode workspace tests. **No repository-tracked job ever reads VRC inputs; the real samples stay local by design.**
+
 ## Latest current checkpoint — 2026-10-14 (third world converges)
 
 - Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public (only class IDs/counts/field names in docs; audit outputs quarantined).

@@ -25,6 +25,7 @@ use super::model::{
     UnityYamlWorkspaceCollectionLimits, WorkspaceGeneratedLightingDataYamlPointer,
     WorkspaceStreamedYamlResourceContext, WorkspaceYamlExportContext,
 };
+use super::object_conversion::workspace_nav_mesh_build_settings_overlay;
 use super::object_conversion::WorkspaceYamlObjectConversionRequest;
 use super::sprite_atlas::workspace_sprite_atlas_yaml_overlay;
 
@@ -380,6 +381,27 @@ fn workspace_assignments_to_unity_yaml_with_context<A: UnityYamlCollectionAssign
                 } else {
                     None
                 };
+                let nav_mesh_build_settings_overlay = if asset.class_id == 196 {
+                    workspace_nav_mesh_build_settings_overlay(
+                        objects,
+                        export_context.reference_graph,
+                        object,
+                        asset,
+                    )
+                    .map_err(|message| {
+                        UnityYamlWorkspaceCollectionError::ObjectExport {
+                            assignment_index,
+                            source: Box::new(
+                                UnityYamlWorkspaceExportError::NavMeshBuildSettingsInvariant {
+                                    source: asset,
+                                    message,
+                                },
+                            ),
+                        }
+                    })?
+                } else {
+                    None
+                };
                 export_context
                     .convert(WorkspaceYamlObjectConversionRequest {
                         object,
@@ -397,6 +419,7 @@ fn workspace_assignments_to_unity_yaml_with_context<A: UnityYamlCollectionAssign
                         generated_prefab_internal: generated_prefab_internal.as_ref(),
                         generated_lighting_data,
                         sprite_atlas_overlay: sprite_atlas_overlay.as_ref(),
+                        nav_mesh_build_settings_overlay: nav_mesh_build_settings_overlay.as_ref(),
                     })
                     .map_err(|source| UnityYamlWorkspaceCollectionError::ObjectExport {
                         assignment_index,

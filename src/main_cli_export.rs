@@ -1914,6 +1914,16 @@ pub(super) fn export_object_yaml_to<W: io::Write>(
         content_limits: StreamedResourceContentLimits::default(),
         staging_limits: StreamedYamlAssetLimits::default(),
     };
+    let nav_mesh_build_settings_overlay = if class_id == 196 {
+        workspace_nav_mesh_build_settings_overlay(&objects, &reference_graph, object, source)
+            .map_err(|message| {
+                invalid_data_owned(format!(
+                    "NavMeshSettings PathID {path_id} build-settings overlay failed: {message}"
+                ))
+            })?
+    } else {
+        None
+    };
     let Some(document) = workspace_object_to_unity_yaml_document_with_streamed_resources(
         &workspace,
         &reference_graph,
@@ -1925,6 +1935,7 @@ pub(super) fn export_object_yaml_to<W: io::Write>(
         None,
         UnityYamlObjectConversionLimits::default(),
         &resource_context,
+        nav_mesh_build_settings_overlay,
     )?
     else {
         writeln!(

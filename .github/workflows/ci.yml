@@ -40,6 +40,42 @@ jobs:
           GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
           GITLEAKS_ENABLE_SUMMARY: "false"
 
+  ledger:
+    name: Ledger and repository audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source without a persistent token
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Structural integrity of docs/feature-parity.md. The parity report itself
+      # exits non-zero while any row is unverified, which is the expected state
+      # until the port finishes, so only duplicate IDs and malformed rows gate.
+      # Nothing here reads data outside the repository.
+      - name: Check the feature ledger structure
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File ./tools/parity-report.ps1 -OutFile ledger-report.json | Out-Null
+          $report = Get-Content -Raw ledger-report.json | ConvertFrom-Json
+          Write-Host ("ledger rows: {0}; recognized status cells: {1}; non-verified: {2}; duplicate ids: {3}; malformed rows: {4}; phase-1 gate: {5}" -f `
+            $report.total_rows, $report.recognized_status_rows, $report.non_verified_count, `
+            @($report.duplicate_ids).Count, @($report.malformed).Count, $report.phase1_gate)
+          if (@($report.duplicate_ids).Count -gt 0) {
+            Write-Error 'docs/feature-parity.md contains duplicate stable IDs'
+            exit 1
+          }
+          if (@($report.malformed).Count -gt 0) {
+            Write-Error 'docs/feature-parity.md contains malformed ledger rows'
+            exit 1
+          }
+
+      - name: Report oversized source files
+        shell: pwsh
+        continue-on-error: true
+        run: ./tools/check-source-file-lengths.ps1
+
   fmt:
     name: Changed Rust formatting
     runs-on: ubuntu-latest
@@ -100,3 +136,20 @@ jobs:
       - name: Build release binaries
         if: ${{ always() && steps.rust_toolchain.outcome == 'success' }}
         run: cargo build --workspace --release --locked
+
+  # Release-mode tests run the suite against optimized code, where overflow and
+  # debug-assertion behavior differs from the debug profile. This is the heaviest
+  # job, so it runs once on Linux rather than on every matrix entry.
+  release-tests:
+    name: Release-mode tests (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out source without a persistent token
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable
+        with:
+          toolchain: stable
+      - run: cargo test --workspace --release --locked

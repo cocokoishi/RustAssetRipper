@@ -30,9 +30,10 @@ pub use model::{
 };
 pub(crate) use object_conversion::workspace_object_to_unity_yaml_document_with_atlas_overlay;
 pub use object_conversion::{
-    workspace_object_to_unity_yaml_document,
+    workspace_nav_mesh_build_settings_overlay, workspace_object_to_unity_yaml_document,
     workspace_object_to_unity_yaml_document_with_processed_animation_root,
     workspace_object_to_unity_yaml_document_with_streamed_resources,
+    WorkspaceNavMeshBuildSettingsOverlay, WorkspaceNavMeshBuildSettingsSource,
 };
 
 #[cfg(test)]

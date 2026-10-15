@@ -504,6 +504,22 @@ pub(super) fn plan_routed_asset_files(
                 } else {
                     None
                 };
+                let nav_mesh_build_settings_overlay = if entry.class_id == 196 {
+                    workspace_nav_mesh_build_settings_overlay(
+                        objects,
+                        reference_graph,
+                        entry.object,
+                        source,
+                    )
+                    .map_err(|message| {
+                        invalid_project(format!(
+                            "NavMeshSettings {}:{} build-settings overlay failed: {message}",
+                            entry.object.file_index, entry.object.path_id
+                        ))
+                    })?
+                } else {
+                    None
+                };
                 let document = workspace_object_to_unity_yaml_document_with_atlas_overlay(
                     workspace,
                     reference_graph,
@@ -520,6 +536,7 @@ pub(super) fn plan_routed_asset_files(
                     &streamed_resources,
                     true,
                     sprite_atlas_overlay,
+                    nav_mesh_build_settings_overlay,
                 )?;
                 let Some(mut document) = document else {
                     if entry.scriptable_object_group.is_some()
@@ -606,6 +623,24 @@ pub(super) fn plan_routed_asset_files(
                         } else {
                             None
                         };
+                        let nav_mesh_build_settings_overlay = if child.object.factory.class_id
+                            == 196
+                        {
+                            workspace_nav_mesh_build_settings_overlay(
+                                    objects,
+                                    reference_graph,
+                                    child.object,
+                                    source,
+                                )
+                                .map_err(|message| {
+                                    invalid_project(format!(
+                                        "NavMeshSettings {}:{} build-settings overlay failed: {message}",
+                                        child.object.file_index, child.object.path_id
+                                    ))
+                                })?
+                        } else {
+                            None
+                        };
                         let document = workspace_object_to_unity_yaml_document_with_atlas_overlay(
                             workspace,
                             reference_graph,
@@ -623,6 +658,7 @@ pub(super) fn plan_routed_asset_files(
                             &streamed_resources,
                             false,
                             sprite_atlas_overlay,
+                            nav_mesh_build_settings_overlay,
                         )?
                         .ok_or_else(|| {
                             invalid_project(format!(
@@ -693,6 +729,24 @@ pub(super) fn plan_routed_asset_files(
                         } else {
                             None
                         };
+                        let nav_mesh_build_settings_overlay = if child.object.factory.class_id
+                            == 196
+                        {
+                            workspace_nav_mesh_build_settings_overlay(
+                                    objects,
+                                    reference_graph,
+                                    child.object,
+                                    identity,
+                                )
+                                .map_err(|message| {
+                                    invalid_project(format!(
+                                        "NavMeshSettings {}:{} build-settings overlay failed: {message}",
+                                        child.object.file_index, child.object.path_id
+                                    ))
+                                })?
+                        } else {
+                            None
+                        };
                         let mut document =
                             workspace_object_to_unity_yaml_document_with_atlas_overlay(
                                 workspace,
@@ -711,6 +765,7 @@ pub(super) fn plan_routed_asset_files(
                                 &streamed_resources,
                                 false,
                                 sprite_atlas_overlay,
+                                nav_mesh_build_settings_overlay,
                             )?
                             .ok_or_else(|| {
                                 invalid_project(format!(

@@ -35,6 +35,10 @@ pub enum UnityYamlWorkspaceExportError {
         source: ExportAssetIdentity,
         message: String,
     },
+    NavMeshBuildSettingsInvariant {
+        source: ExportAssetIdentity,
+        message: String,
+    },
     AnimationClipEditorFormatInvariant {
         source: ExportAssetIdentity,
         message: String,
@@ -219,6 +223,10 @@ impl Display for UnityYamlWorkspaceExportError {
             Self::SpriteAtlasInvariant { source, message } => write!(
                 f,
                 "SpriteAtlas YAML reconstruction failed for {source:?}: {message}"
+            ),
+            Self::NavMeshBuildSettingsInvariant { source, message } => write!(
+                f,
+                "NavMesh build-settings reconstruction failed for {source:?}: {message}"
             ),
             Self::AnimationClipEditorFormatInvariant { source, message } => write!(
                 f,
