@@ -120,6 +120,31 @@ fn should_use_scene_editor_type_tree(class_id: i32, unity_version_text: Option<&
                     | 102
                     | 215
                     | 225
+                    // Breadth probe (fourth world): these classes carry the
+                    // full editor base on 2022.3 (4/4 of m_ObjectHideFlags,
+                    // m_CorrespondingSourceObject, m_PrefabInstance and
+                    // m_PrefabAsset present in the editor tree and absent from
+                    // the release tree) but were exported release-shaped:
+                    // OcclusionCullingSettings (whose editor tree also adds
+                    // m_OcclusionBakeSettings), Projector, Font,
+                    // WheelCollider, AudioLowPassFilter, WindZone,
+                    // NavMeshAgent, AnimatorOverrideController, NavMeshData,
+                    // OcclusionCullingData (whose editor tree also adds
+                    // m_StaticRenderers and m_Portals), LookAtConstraint and
+                    // ScaleConstraint (whose editor trees also add
+                    // m_IsLocked).
+                    | 29
+                    | 119
+                    | 128
+                    | 146
+                    | 169
+                    | 182
+                    | 195
+                    | 221
+                    | 238
+                    | 363
+                    | 1_183_024_399
+                    | 1_818_360_610
             ));
     supported_version && supported_class
 }
@@ -4660,6 +4685,18 @@ mod tests {
             102,
             215,
             225,
+            29,
+            119,
+            128,
+            146,
+            169,
+            182,
+            195,
+            221,
+            238,
+            363,
+            1_183_024_399,
+            1_818_360_610,
         ] {
             assert!(should_use_scene_editor_type_tree(
                 class_id,
@@ -4673,6 +4710,73 @@ mod tests {
         assert!(!should_use_scene_editor_type_tree(43, Some("5.6.0f1")));
         assert!(!should_use_scene_editor_type_tree(90, Some("5.6.0f1")));
         assert!(should_use_scene_editor_type_tree(1, Some("5.6.0f1")));
+    }
+
+    /// Evidence for the fourth-world editor-route additions: every class added
+    /// there must carry the editor base the reference output shows in its
+    /// editor tree and lack all four base fields in the release tree, which is
+    /// the segment's route criterion. `OcclusionCullingSettings` is the one
+    /// class whose editor tree carries only `m_ObjectHideFlags` (matching the
+    /// frozen scene document, which has no prefab fields at all).
+    #[test]
+    fn fourth_world_editor_route_additions_carry_the_full_editor_base() {
+        let version = FactoryUnityVersion::parse("2022.3.22f1").unwrap();
+        const BASE: [&str; 4] = [
+            "m_ObjectHideFlags",
+            "m_CorrespondingSourceObject",
+            "m_PrefabInstance",
+            "m_PrefabAsset",
+        ];
+        for class_id in [
+            29,
+            119,
+            128,
+            146,
+            169,
+            182,
+            195,
+            221,
+            238,
+            363,
+            1_183_024_399,
+            1_818_360_610,
+        ] {
+            let (release, editor) = reference_class_layouts()
+                .tpk_trees(class_id, &version)
+                .unwrap()
+                .unwrap_or_else(|| panic!("class {class_id} must have 2022.3 TPK trees"));
+            for field in BASE {
+                assert!(
+                    !release
+                        .nodes
+                        .iter()
+                        .any(|node| node.name.as_deref() == Some(field)),
+                    "class {class_id} release tree must omit {field}"
+                );
+            }
+            assert!(
+                editor
+                    .nodes
+                    .iter()
+                    .any(|node| node.name.as_deref() == Some("m_ObjectHideFlags")),
+                "class {class_id} editor tree must carry m_ObjectHideFlags"
+            );
+            if class_id != 29 {
+                for field in &BASE[1..] {
+                    assert!(
+                        editor
+                            .nodes
+                            .iter()
+                            .any(|node| node.name.as_deref() == Some(field)),
+                        "class {class_id} editor tree must carry {field}"
+                    );
+                }
+            }
+            assert!(should_use_scene_editor_type_tree(
+                class_id,
+                Some("2022.3.22f1")
+            ));
+        }
     }
 
     #[test]

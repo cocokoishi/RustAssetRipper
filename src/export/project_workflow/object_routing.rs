@@ -448,18 +448,25 @@ fn predefined_engine_texture_dimensions(root: &SerializedValue) -> Option<(i32, 
     Some((*width, *height))
 }
 
-/// Resolves a Sprite render-data texture pointer to the referenced Texture2D
-/// object, mirroring the frozen `sprite.TryGetTexture` gate: a null pointer
-/// yields a lookup with no texture name (which can still match name-only
-/// rows), while a non-null but unresolvable pointer selects no redirect at
-/// all. The outer `None` means "do not consult the table".
-fn resolve_sprite_texture_name(
+/// Resolves a Sprite render-data texture pointer to the name used for the
+/// group's predefined-engine lookup, mirroring the frozen `Cache.Contains(sio.Texture)`
+/// gate.
+///
+/// The outer `None` means "no engine-group redirect applies", which keeps the
+/// sprite's ordinary export: the pointer is unresolvable, the target is not a
+/// Texture2D, or the target texture is not a predefined engine texture once its
+/// name *and* dimensions are considered. `Some(name)` means the whole
+/// `SpriteInformationObject` group redirects, and the sprite's own table entry
+/// is then consulted with that texture name (a null or unreadable name stays
+/// `Some(None)`, preserving the name-only lookup the frozen cache also allows).
+fn resolve_engine_group_texture_name(
     field_path: &str,
     file_id: i32,
     path_id: i64,
     source: &WorkspaceObject,
     objects: &ObjectWorkspace,
     reference_graph: &MultiFileReferenceGraph<'_>,
+    unity_version: Option<&str>,
 ) -> Result<Option<Option<String>>, Box<dyn Error>> {
     let mut matching_edges = reference_graph
         .references_from_object(source.file_index, source.object_index)
@@ -469,22 +476,33 @@ fn resolve_sprite_texture_name(
     let Some(edge) = matching_edges.next() else {
         return Ok(None);
     };
-    match &edge.resolution {
-        MultiFilePPtrResolution::Object {
-            target_file_index,
-            target_object_index,
-        } if reference_graph.object_class_id(*target_file_index, *target_object_index)
-            == Some(crate::export::res_wiring::TEXTURE2D_CLASS_ID) =>
-        {
-            let Some(target) = objects.get(*target_file_index, *target_object_index) else {
-                return Ok(None);
-            };
-            let Ok(payload) = &target.payload else {
-                return Ok(None);
-            };
-            Ok(Some(predefined_engine_object_name(&payload.root)))
-        }
-        _ => Ok(None),
+    let MultiFilePPtrResolution::Object {
+        target_file_index,
+        target_object_index,
+    } = &edge.resolution
+    else {
+        return Ok(None);
+    };
+    if reference_graph.object_class_id(*target_file_index, *target_object_index)
+        != Some(crate::export::res_wiring::TEXTURE2D_CLASS_ID)
+    {
+        return Ok(None);
+    }
+    let Some(target) = objects.get(*target_file_index, *target_object_index) else {
+        return Ok(None);
+    };
+    let Ok(payload) = &target.payload else {
+        return Ok(None);
+    };
+    let Some(name) = predefined_engine_object_name(&payload.root) else {
+        return Ok(None);
+    };
+    let Some((width, height)) = predefined_engine_texture_dimensions(&payload.root) else {
+        return Ok(None);
+    };
+    match predefined_engine_texture_target(&name, width, height, unity_version)? {
+        Some(_) => Ok(Some(Some(name))),
+        None => Ok(None),
     }
 }
 
@@ -994,28 +1012,35 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
             {
                 if let Some(payload) = payload {
                     let name = predefined_engine_object_name(&payload.root);
-                    // The redirect decision is opportunistic: unreadable
-                    // render data keeps the ordinary sprite route, so strict
-                    // sprite reads still fail loudly in their own path. A null
-                    // texture pointer still consults the table with no texture
-                    // name; only an unresolvable non-null pointer skips it.
+                    // The frozen `EngineAssetsExporter` redirects a Sprite only through its
+                    // `SpriteInformationObject`: `Cache.Contains(sio.Texture)` decides the whole
+                    // texture group first (its table is keyed by name *and* dimensions), and only
+                    // then is the sprite's own table entry consulted for the redirected identity.
+                    // A sprite whose texture is an ordinary authored texture keeps its ordinary
+                    // export even when its own name and texture name happen to match an engine
+                    // row; only a null texture pointer falls back to a name-only sprite lookup.
+                    // Unreadable render data keeps the ordinary sprite route, so strict sprite
+                    // reads still fail loudly in their own path.
                     let texture_pointer =
                         crate::export::importer_fields::sprite_render_data_texture_pointer(
                             &payload.root,
                         );
-                    let texture_name = match texture_pointer {
+                    let group_texture_name = match texture_pointer {
                         Ok(None) => Some(None),
-                        Ok(Some((field_path, file_id, path_id))) => resolve_sprite_texture_name(
-                            &field_path,
-                            file_id,
-                            path_id,
-                            object,
-                            objects,
-                            reference_graph,
-                        )?,
+                        Ok(Some((field_path, file_id, path_id))) => {
+                            resolve_engine_group_texture_name(
+                                &field_path,
+                                file_id,
+                                path_id,
+                                object,
+                                objects,
+                                reference_graph,
+                                file.metadata.prefix.unity_version_text.as_deref(),
+                            )?
+                        }
                         Err(_) => None,
                     };
-                    match (name, texture_name) {
+                    match (name, group_texture_name) {
                         (Some(name), Some(texture_name)) => predefined_engine_sprite_target(
                             &name,
                             texture_name.as_deref(),
@@ -2430,6 +2455,34 @@ mod tests {
             .unwrap(),
             None,
             "a missing version selects no engine-assets band"
+        );
+    }
+
+    /// A sprite named like an engine sprite only redirects when its texture
+    /// group is an engine texture. The engine "Background" texture is 32x32,
+    /// so an authored 20x20 "Background" texture must not match: the sprite
+    /// table entry alone is not enough to redirect the sprite.
+    #[test]
+    fn unity_2022_3_authored_sprite_texture_dimensions_block_the_engine_group() {
+        let version = Some("2022.3.22f1");
+        // The sprite row exists and matches on name plus texture name.
+        assert!(
+            predefined_engine_sprite_target("Background", Some("Background"), version)
+                .unwrap()
+                .is_some(),
+            "the 2022.3.11f1 band contains the builtin Background sprite"
+        );
+        // The engine texture identity additionally requires the dimensions.
+        let engine_texture =
+            predefined_engine_texture_target("Background", 32, 32, version).unwrap();
+        assert!(
+            engine_texture.is_some(),
+            "the engine Background texture is registered at 32x32"
+        );
+        assert_eq!(
+            predefined_engine_texture_target("Background", 20, 20, version).unwrap(),
+            None,
+            "an authored 20x20 texture named Background is not the engine texture"
         );
     }
 
