@@ -366,9 +366,7 @@ pub(super) fn append_lighting_data_renderer_records(
                     if local.class_id != 43 || local.path_id == 0 {
                         return Err(invalid_project(format!(
                             "Renderer {:?}:{} has invalid UvMesh identity {:?}",
-                            renderer.identity.collection,
-                            renderer.identity.path_id,
-                            target
+                            renderer.identity.collection, renderer.identity.path_id, target
                         )));
                     }
                     local.path_id
@@ -985,10 +983,9 @@ fn resolve_generated_lighting_data_pointer(
                 // Predefined engine meshes resolve by path ID with the engine
                 // GUID, mirroring the pointer-map engine arm without a lookup.
                 let mut guid = [0; 16];
-                for (index, word)
-                    in crate::export::guid_policy::ENGINE_DEFAULT_RESOURCES_GUID_WORDS
-                        .iter()
-                        .enumerate()
+                for (index, word) in crate::export::guid_policy::ENGINE_DEFAULT_RESOURCES_GUID_WORDS
+                    .iter()
+                    .enumerate()
                 {
                     guid[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
                 }
@@ -999,9 +996,7 @@ fn resolve_generated_lighting_data_pointer(
                 });
             }
             LightingDataUvMeshTarget::Local(local) => {
-                if local.class_id != 43
-                    || request.file_id != 0
-                    || request.path_id != local.path_id
+                if local.class_id != 43 || request.file_id != 0 || request.path_id != local.path_id
                 {
                     return fail(
                         error,
@@ -1389,10 +1384,7 @@ mod tests {
         let SerializedValue::Struct(record) = &records[0] else {
             panic!("data test element is not a struct");
         };
-        let uv_mesh = record
-            .iter()
-            .find(|field| field.name == "uvMesh")
-            .unwrap();
+        let uv_mesh = record.iter().find(|field| field.name == "uvMesh").unwrap();
         assert_eq!(
             uv_mesh.value,
             SerializedValue::PPtr {

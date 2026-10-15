@@ -545,9 +545,7 @@ fn mesh_filter_mesh_target(
             target_object_index,
         } => (*target_file_index, *target_object_index),
         MultiFilePPtrResolution::PredefinedEngineAsset {
-            path_id,
-            class_id,
-            ..
+            path_id, class_id, ..
         } => {
             // The frozen exporter references predefined engine meshes by
             // path ID with the engine GUID; only meshes may flow through.
