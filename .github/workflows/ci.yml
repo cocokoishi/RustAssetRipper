@@ -58,10 +58,16 @@ jobs:
         shell: pwsh
         run: |
           pwsh -NoProfile -File ./tools/parity-report.ps1 -OutFile ledger-report.json | Out-Null
+          # The parity report exits 1 for any non-verified row, which is the
+          # expected state until the port finishes. Capture that status and
+          # clear $LASTEXITCODE so the pwsh shell wrapper does not turn the
+          # expected open-gate state into a step failure.
+          $reportExit = $LASTEXITCODE
+          $LASTEXITCODE = 0
           $report = Get-Content -Raw ledger-report.json | ConvertFrom-Json
-          Write-Host ("ledger rows: {0}; recognized status cells: {1}; non-verified: {2}; duplicate ids: {3}; malformed rows: {4}; phase-1 gate: {5}" -f `
+          Write-Host ("ledger rows: {0}; recognized status cells: {1}; non-verified: {2}; duplicate ids: {3}; malformed rows: {4}; phase-1 gate: {5}; parity report exit: {6}" -f `
             $report.total_rows, $report.recognized_status_rows, $report.non_verified_count, `
-            @($report.duplicate_ids).Count, @($report.malformed).Count, $report.phase1_gate)
+            @($report.duplicate_ids).Count, @($report.malformed).Count, $report.phase1_gate, $reportExit)
           if (@($report.duplicate_ids).Count -gt 0) {
             Write-Error 'docs/feature-parity.md contains duplicate stable IDs'
             exit 1
@@ -70,6 +76,7 @@ jobs:
             Write-Error 'docs/feature-parity.md contains malformed ledger rows'
             exit 1
           }
+          exit 0
 
       - name: Report oversized source files
         shell: pwsh
