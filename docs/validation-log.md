@@ -4,7 +4,7 @@
 
 - LightingData UV meshes may reference default-resources engine meshes; the collector carries them to engine-pointer resolution (record-level unit test; world audit proves all engine entries). Class 134 export display renamed to the generated `PhysicMaterial` spelling; 134/102/215/225 joined the 2022.3 editor set (215 also drops its baked texture).
 - World r3: 395 paired, zero unpaired; zero document diffs; 99/99 PNGs pixel-identical; one Rust-only auxiliary map (known-acceptable).
-- Local checks: `git diff --check` exit 0; full workspace suite green; `cargo clippy` clean; release rebuilt. Full validation via GitHub Actions after push. Sample input read-only; outputs quarantined. Unity import/runtime and UABEA were NOT RUN.
+- Local checks: `git diff --check` exit 0; full workspace suite green; `cargo clippy` clean; release rebuilt. Actions run `38680958234` passed tests plus Clippy on both platforms with only the changed-lines rustfmt check failing; follow-up reformats exactly the edited lines and Actions run `38681756112` is fully green on both platforms. Sample input read-only; outputs quarantined. Unity import/runtime and UABEA were NOT RUN.
 
 ## 2026-10-14 World converges: terrain family, scale stamp, skipped-texture pointers
 
