@@ -1,5 +1,11 @@
 # Validation log
 
+## 2026-10-14 Second world converges: engine meshes, PhysicMaterial spelling, editor breadth
+
+- LightingData UV meshes may reference default-resources engine meshes; the collector carries them to engine-pointer resolution (record-level unit test; world audit proves all engine entries). Class 134 export display renamed to the generated `PhysicMaterial` spelling; 134/102/215/225 joined the 2022.3 editor set (215 also drops its baked texture).
+- World r3: 395 paired, zero unpaired; zero document diffs; 99/99 PNGs pixel-identical; one Rust-only auxiliary map (known-acceptable).
+- Local checks: `git diff --check` exit 0; full workspace suite green; `cargo clippy` clean; release rebuilt. Full validation via GitHub Actions after push. Sample input read-only; outputs quarantined. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 World converges: terrain family, scale stamp, skipped-texture pointers
 
 - Terrain, TerrainCollider, TerrainData, and the 220 group joined the 2022.3 editor set (TPK-probed, regression-tested); Terrain stamps the frozen fixed `0.0512` lightmap scale; streamed Texture2Ds predicted to skip file output now type their pointers Meta while written native lightmaps stay Serialized (skip prediction: streamed housing plus no inline bytes and no viable stream; degenerate native textures still write, which the full bin suite locks).

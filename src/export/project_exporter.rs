@@ -104,9 +104,13 @@ pub fn is_generated_class(class_id: i32) -> bool {
 }
 
 /// The frozen `Pass110` ClassName overrides for classes whose `ClassIDType` enum
-/// name carries a version suffix: export display (`ClassName`, hence collection
-/// directories) uses the unversioned Unity name, while recovery naming keeps the
-/// enum spelling via [`crate::serialized_file::object::class_id_type_name`].
+/// name differs from the generated class name: export display (`ClassName`,
+/// hence collection directories) uses the generated Unity name, while recovery
+/// naming keeps the enum spelling via [`crate::serialized_file::object::class_id_type_name`].
+///
+/// Most entries drop a version suffix (e.g. `319|AvatarMask`); class 134 is a
+/// spelling override instead (enum `PhysicsMaterial`, generated `PhysicMaterial`,
+/// matching the TypeTree root and the reference export directory).
 ///
 /// Ground truth: isolated reflection dump over the SourceGenerated assembly
 /// (`EngineAssetsProbe classnames`, `target/class-original-names.tsv`), which
@@ -116,6 +120,7 @@ pub fn is_generated_class(class_id: i32) -> bool {
 /// this table does not model; all authorized samples are 2022.3.x.
 fn class_original_name(class_id: i32) -> Option<&'static str> {
     match class_id {
+        134 => Some("PhysicMaterial"),
         238 => Some("NavMeshData"),
         258 => Some("LightProbes"),
         319 => Some("AvatarMask"),

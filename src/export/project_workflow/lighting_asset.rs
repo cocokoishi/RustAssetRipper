@@ -318,7 +318,7 @@ pub(super) fn append_lighting_data_renderer_records(
     type_tree: &crate::serialized_file::metadata::TypeTree,
     root: &mut SerializedValue,
     renderers: &[LightingDataRendererInput<'_>],
-) -> Result<Vec<Option<ExportAssetIdentity>>, Box<dyn Error>> {
+) -> Result<Vec<Option<LightingDataUvMeshTarget>>, Box<dyn Error>> {
     let mut uv_mesh_targets = Vec::new();
     uv_mesh_targets
         .try_reserve_exact(renderers.len())
@@ -361,15 +361,31 @@ pub(super) fn append_lighting_data_renderer_records(
             renderer.identity.object_index,
         )?;
         if let Some(target) = renderer.uv_mesh_target {
-            if target.class_id != 43 || target.path_id == 0 {
-                return Err(invalid_project(format!(
-                    "Renderer {:?}:{} has invalid UvMesh identity {:?}",
-                    renderer.identity.collection, renderer.identity.path_id, target
-                )));
-            }
+            let mesh_path_id = match target {
+                LightingDataUvMeshTarget::Local(local) => {
+                    if local.class_id != 43 || local.path_id == 0 {
+                        return Err(invalid_project(format!(
+                            "Renderer {:?}:{} has invalid UvMesh identity {:?}",
+                            renderer.identity.collection,
+                            renderer.identity.path_id,
+                            target
+                        )));
+                    }
+                    local.path_id
+                }
+                LightingDataUvMeshTarget::Engine { path_id } => {
+                    if path_id == 0 {
+                        return Err(invalid_project(format!(
+                            "Renderer {:?}:{} has a null engine UvMesh pointer",
+                            renderer.identity.collection, renderer.identity.path_id
+                        )));
+                    }
+                    path_id
+                }
+            };
             let uv_mesh_pointer = SerializedValue::PPtr {
                 file_id: 0,
-                path_id: target.path_id,
+                path_id: mesh_path_id,
             };
             ensure_lighting_data_value_shape(&data, "uvMesh", &uv_mesh_pointer)?;
             set_required_lighting_data_field(&mut data, "uvMesh", uv_mesh_pointer)?;
@@ -955,45 +971,81 @@ fn resolve_generated_lighting_data_pointer(
                 ),
             );
         };
-        if target.class_id != 43 || request.file_id != 0 || request.path_id != target.path_id {
-            return fail(
-                error,
-                format!(
-                    "UvMesh field {:?} synthetic source pair ({}, {}) does not match Mesh {}",
-                    request.field_path, request.file_id, request.path_id, target.path_id
-                ),
-            );
-        }
-        return match pointer_map.resolve(
-            ProjectPointerRequest::ResolvedAsset(target),
-            asset.collection_index,
-        ) {
-            Ok(ProjectPointerResolution::Mapped(pointer)) => {
-                ProjectPointerResolution::Mapped(pointer)
+        match target {
+            LightingDataUvMeshTarget::Engine { path_id } => {
+                if request.file_id != 0 || request.path_id != path_id {
+                    return fail(
+                        error,
+                        format!(
+                            "UvMesh field {:?} synthetic source pair ({}, {}) does not match engine Mesh {}",
+                            request.field_path, request.file_id, request.path_id, path_id
+                        ),
+                    );
+                }
+                // Predefined engine meshes resolve by path ID with the engine
+                // GUID, mirroring the pointer-map engine arm without a lookup.
+                let mut guid = [0; 16];
+                for (index, word)
+                    in crate::export::guid_policy::ENGINE_DEFAULT_RESOURCES_GUID_WORDS
+                        .iter()
+                        .enumerate()
+                {
+                    guid[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
+                }
+                return ProjectPointerResolution::Mapped(UnityMetaPointer {
+                    file_id: path_id,
+                    guid: ExportPointerGuid::Collection(guid),
+                    asset_type: UnityProjectAssetType::Internal,
+                });
             }
-            Ok(ProjectPointerResolution::MissingExportedTarget { .. }) => fail(
-                error,
-                format!(
-                    "LightingDataAsset UvMesh target {:?}:{} is omitted from project export",
-                    target.collection, target.path_id
-                ),
-            ),
-            Ok(ProjectPointerResolution::UnresolvedInput(unresolved)) => fail(
-                error,
-                format!(
-                    "LightingDataAsset UvMesh target is unresolved: {:?}",
-                    unresolved.resolution
-                ),
-            ),
-            Ok(ProjectPointerResolution::Null) => fail(
-                error,
-                "non-null LightingDataAsset UvMesh unexpectedly mapped to null".to_owned(),
-            ),
-            Err(source) => fail(
-                error,
-                format!("LightingDataAsset UvMesh pointer-map lookup failed: {source}"),
-            ),
-        };
+            LightingDataUvMeshTarget::Local(local) => {
+                if local.class_id != 43
+                    || request.file_id != 0
+                    || request.path_id != local.path_id
+                {
+                    return fail(
+                        error,
+                        format!(
+                            "UvMesh field {:?} synthetic source pair ({}, {}) does not match Mesh {}",
+                            request.field_path,
+                            request.file_id,
+                            request.path_id,
+                            local.path_id
+                        ),
+                    );
+                }
+                return match pointer_map.resolve(
+                    ProjectPointerRequest::ResolvedAsset(local),
+                    asset.collection_index,
+                ) {
+                    Ok(ProjectPointerResolution::Mapped(pointer)) => {
+                        ProjectPointerResolution::Mapped(pointer)
+                    }
+                    Ok(ProjectPointerResolution::MissingExportedTarget { .. }) => fail(
+                        error,
+                        format!(
+                            "LightingDataAsset UvMesh target {:?}:{} is omitted from project export",
+                            local.collection, local.path_id
+                        ),
+                    ),
+                    Ok(ProjectPointerResolution::UnresolvedInput(unresolved)) => fail(
+                        error,
+                        format!(
+                            "LightingDataAsset UvMesh target is unresolved: {:?}",
+                            unresolved.resolution
+                        ),
+                    ),
+                    Ok(ProjectPointerResolution::Null) => fail(
+                        error,
+                        "non-null LightingDataAsset UvMesh unexpectedly mapped to null".to_owned(),
+                    ),
+                    Err(source) => fail(
+                        error,
+                        format!("LightingDataAsset UvMesh pointer-map lookup failed: {source}"),
+                    ),
+                };
+            }
+        }
     }
     if request.field_path == "m_Scene" {
         if request.file_id != 0 || request.path_id != i64::MIN {
@@ -1283,6 +1335,70 @@ mod tests {
         assert_eq!(
             lighting_data.struct_fields().unwrap()[0].value,
             SerializedValue::Array(Vec::new())
+        );
+    }
+
+    #[test]
+    fn engine_uv_mesh_writes_synthetic_pointer_for_later_engine_resolution() {
+        use crate::export::scene_collection::{ExportAssetCollectionIdentity, ExportAssetIdentity};
+
+        let tree = lighting_data_tree_1120();
+        let payload = SerializedValue::Struct(vec![
+            SerializedFieldValue {
+                name: "m_LightmapIndex".to_owned(),
+                value: SerializedValue::U16(0),
+            },
+            SerializedFieldValue {
+                name: "m_LightmapTilingOffset".to_owned(),
+                value: SerializedValue::Struct(vec![]),
+            },
+            SerializedFieldValue {
+                name: "m_LightmapTilingOffsetDynamic".to_owned(),
+                value: SerializedValue::Struct(vec![]),
+            },
+        ]);
+        let input = super::super::LightingDataRendererInput {
+            identity: ExportAssetIdentity {
+                collection: ExportAssetCollectionIdentity::SerializedFile { file_index: 0 },
+                object_index: 3,
+                path_id: 700,
+                class_id: 23,
+            },
+            file_id: 701,
+            value: &payload,
+            uv_mesh_target: Some(super::super::LightingDataUvMeshTarget::Engine { path_id: 10202 }),
+        };
+        let mut root = empty_lighting_data_root();
+        let targets =
+            super::append_lighting_data_renderer_records(&tree, &mut root, &[input]).unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(
+            targets[0],
+            Some(super::super::LightingDataUvMeshTarget::Engine { path_id: 10202 })
+        );
+        let SerializedValue::Struct(fields) = &root else {
+            panic!("LightingDataAsset test root is not a struct");
+        };
+        let data = fields
+            .iter()
+            .find(|field| field.name == "m_LightmappedRendererData")
+            .unwrap();
+        let SerializedValue::Array(records) = &data.value else {
+            panic!("data test field is not an array");
+        };
+        let SerializedValue::Struct(record) = &records[0] else {
+            panic!("data test element is not a struct");
+        };
+        let uv_mesh = record
+            .iter()
+            .find(|field| field.name == "uvMesh")
+            .unwrap();
+        assert_eq!(
+            uv_mesh.value,
+            SerializedValue::PPtr {
+                file_id: 0,
+                path_id: 10202
+            }
         );
     }
 

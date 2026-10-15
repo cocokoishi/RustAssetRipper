@@ -1,5 +1,11 @@
 # RustAssetRipper hand-off — 2026-10-10
 
+## Latest current checkpoint — 2026-10-14 (second world converges)
+
+- Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public (only class IDs/counts/field names in docs; audit outputs quarantined).
+- Second world r3: CONVERGED (395 paired, zero unpaired; zero doc diffs; PNG content proven; one auxiliary map). Converged set: AV01-AV11, W01-W04. Next: W05-W11 worlds pending.
+- Local checks: `git diff --check` exit 0; full workspace suite green; cargo check/clippy (-D warnings locally) clean. Full validation via GitHub Actions after push.
+
 ## Latest current checkpoint — 2026-10-14 (world converges)
 
 - Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public (only class IDs/counts/field names in docs; audit outputs quarantined).

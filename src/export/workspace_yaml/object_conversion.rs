@@ -107,6 +107,16 @@ fn should_use_scene_editor_type_tree(class_id: i32, unity_version_text: Option<&
                     | 154
                     | 156
                     | 220
+                    // Breadth probe: PhysicMaterial carries full editor base
+                    // on 2022.3 (probed); same release truncation.
+                    | 134
+                    // Breadth probe: TextMesh, class 215, and CanvasGroup
+                    // carry full editor base on 2022.3 (probed); same release
+                    // truncation, no extra format. The 215 editor tree also
+                    // omits the baked texture.
+                    | 102
+                    | 215
+                    | 225
             ));
     supported_version && supported_class
 }
@@ -4299,6 +4309,10 @@ mod tests {
             1_818_360_609,
             258,
             218,
+            134,
+            102,
+            215,
+            225,
         ] {
             assert!(should_use_scene_editor_type_tree(
                 class_id,
@@ -4395,6 +4409,10 @@ mod tests {
             1_818_360_609,
             258,
             218,
+            134,
+            102,
+            215,
+            225,
         ] {
             let (_, editor_tree) = reference_class_layouts()
                 .tpk_trees(class_id, &version)

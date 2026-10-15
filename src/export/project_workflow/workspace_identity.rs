@@ -495,7 +495,7 @@ fn mesh_filter_mesh_target(
     mesh_filter: ExportAssetIdentity,
     root: &SerializedValue,
     reference_graph: &MultiFileReferenceGraph<'_>,
-) -> Result<Option<ExportAssetIdentity>, Box<dyn Error>> {
+) -> Result<Option<LightingDataUvMeshTarget>, Box<dyn Error>> {
     let file_index = serialized_file_index(mesh_filter, "MeshFilter")?;
     let pointer = root
         .unique_field_in_base_chain("m_Mesh")
@@ -544,6 +544,27 @@ fn mesh_filter_mesh_target(
             target_file_index,
             target_object_index,
         } => (*target_file_index, *target_object_index),
+        MultiFilePPtrResolution::PredefinedEngineAsset {
+            path_id,
+            class_id,
+            ..
+        } => {
+            // The frozen exporter references predefined engine meshes by
+            // path ID with the engine GUID; only meshes may flow through.
+            if *class_id != 43 {
+                return Err(invalid_project(format!(
+                    "LightingDataAsset MeshFilter {:?}:{} m_Mesh resolves to engine class {class_id}, expected a Mesh",
+                    mesh_filter.collection, mesh_filter.path_id
+                )));
+            }
+            if *path_id == 0 {
+                return Err(invalid_project(format!(
+                    "LightingDataAsset MeshFilter {:?}:{} m_Mesh resolves to a null engine pointer",
+                    mesh_filter.collection, mesh_filter.path_id
+                )));
+            }
+            return Ok(Some(LightingDataUvMeshTarget::Engine { path_id: *path_id }));
+        }
         resolution => {
             return Err(invalid_project(format!(
                 "LightingDataAsset MeshFilter {:?}:{} m_Mesh is unresolved: {resolution:?}",
@@ -565,14 +586,14 @@ fn mesh_filter_mesh_target(
                 mesh_filter.collection, mesh_filter.path_id
             ))
         })?;
-    Ok(Some(ExportAssetIdentity {
+    Ok(Some(LightingDataUvMeshTarget::Local(ExportAssetIdentity {
         collection: ExportAssetCollectionIdentity::SerializedFile {
             file_index: target_file_index,
         },
         object_index: target_object_index,
         path_id: target.path_id,
         class_id: 43,
-    }))
+    })))
 }
 
 pub(super) fn scene_manager_identity(

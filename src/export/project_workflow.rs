@@ -361,7 +361,16 @@ struct RoutedLightingDataAsset {
     source_version: SceneUnityVersion,
     type_tree: crate::serialized_file::metadata::TypeTree,
     root: SerializedValue,
-    renderer_uv_mesh_targets: Vec<Option<ExportAssetIdentity>>,
+    renderer_uv_mesh_targets: Vec<Option<LightingDataUvMeshTarget>>,
+}
+
+/// A `LightingData` UV-mesh source: either a workspace mesh resolved to its
+/// export identity, or a predefined engine mesh (default resources) that the
+/// frozen exporter references by path ID with the engine GUID.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LightingDataUvMeshTarget {
+    Local(ExportAssetIdentity),
+    Engine { path_id: i64 },
 }
 
 #[derive(Clone, Copy)]
@@ -369,7 +378,7 @@ struct LightingDataRendererInput<'object> {
     identity: ExportAssetIdentity,
     file_id: i64,
     value: &'object SerializedValue,
-    uv_mesh_target: Option<ExportAssetIdentity>,
+    uv_mesh_target: Option<LightingDataUvMeshTarget>,
 }
 
 #[derive(Clone, Copy)]

@@ -1,5 +1,13 @@
 # Source behavior and differential findings
 
+## DIFF-EDITOR-COVERAGE-134-PLUS — PhysicMaterial spelling plus more editor classes (done, audited)
+
+A world showed five `PhysicsMaterial/` files against the reference `PhysicMaterial/` directory: the export fallback uses the factory class name, and the `ClassIDType` enum spelling (`PhysicsMaterial`) differs from the generated/serialization spelling (`PhysicMaterial`, matching the TypeTree root and the reference output). Class 134 joined the original-name table, and 134 plus TextMesh, class 215, and CanvasGroup joined the 2022.3 editor set (BoxCollider was already there); the 215 editor tree also omits the baked texture. A systematic enum-vs-TypeTree-root audit for all covered classes stays open as debt. Status: done.
+
+## DIFF-ENGINE-UVMESH-001 — LightingData UV meshes may be engine assets (done, audited)
+
+A world MeshFilter references a default-resources engine mesh for its baked UVs. The reference emits the engine pointer (path ID with the engine GUID); the collector now accepts predefined engine meshes and carries them through a dedicated target variant to the same engine-pointer resolution, unit-tested at record level with the world audit proving all engine entries. Status: done.
+
 ## DIFF-TERRAIN-LIGHTING-001 — Terrain lighting data (done, audited)
 
 Implemented following the reference processor (skip plus emit paths, unit-tested) and proven on the reporting world: its `LightingData` renderer entries match after GUID mapping. Status: done.
