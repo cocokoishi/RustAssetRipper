@@ -612,6 +612,25 @@ fn texture_has_exportable_image_payload(payload: &ParsedObjectPayload) -> bool {
                 .is_some_and(|stream| stream.is_set() && stream.size > 0))
 }
 
+/// Predicts the materialization skip for a streamed generic-asset `Texture2D`:
+/// no inline image bytes and no viable stream range. Dimensions are
+/// irrelevant (degenerate native textures are still written); a set stream
+/// with a positive size is optimistically treated as writable, with missing
+/// or empty resolved bytes left to the loud materialization paths.
+fn texture_lacks_usable_image_data(payload: Option<&ParsedObjectPayload>) -> bool {
+    let Some(payload) = payload else {
+        return false;
+    };
+    let Ok(view) = crate::resources::texture::Texture2DView::from_value(&payload.root) else {
+        return false;
+    };
+    view.image_data.is_empty()
+        && !view
+            .stream_data
+            .as_ref()
+            .is_some_and(|stream| stream.is_set() && stream.size > 0)
+}
+
 fn texture3d_has_exportable_image_payload(payload: &ParsedObjectPayload) -> bool {
     let Ok(view) = crate::resources::texture_array::Texture3DView::from_value(&payload.root) else {
         return false;
@@ -1525,6 +1544,19 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                     selection.collection_name
                 )));
             }
+            // Predict a skipped generic-asset Texture2D file for pointer
+            // typing: a streamed texture without usable image data is
+            // skipped at materialization, while the frozen texture
+            // collection still reports `Meta`. Native lightmap textures
+            // carry inline bytes, and raw-housed textures are written
+            // Predict a skipped generic-asset Texture2D file for pointer
+            // typing: a streamed texture without usable image data is
+            // skipped at materialization, while the frozen texture
+            // collection still reports `Meta`. Written textures (inline
+            // bytes or a viable stream) and other housings stay `Serialized`.
+            let texture_file_skipped = class_id == 28
+                && selection.collection_name == "YamlStreamedAssetExportCollection"
+                && texture_lacks_usable_image_data(payload);
             let (route, skip_reason, fallback_reason) = if engine_guid.is_some() {
                 if selection.exporter != "EngineAssetsExporter"
                     || kind != ExportCollectionKind::Redirect
@@ -1835,6 +1867,7 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                 controller_collection,
                 selection,
                 route,
+                texture_file_skipped,
                 fallback_reason,
                 collection_index,
                 guid,

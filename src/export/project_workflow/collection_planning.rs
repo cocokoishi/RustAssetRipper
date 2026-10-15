@@ -345,6 +345,14 @@ pub(super) fn build_project_pointer_map(
                     | ObjectRoute::ShaderText
             ) {
                 UnityProjectAssetType::Meta
+            } else if entry.route == ObjectRoute::Asset && entry.texture_file_skipped {
+                // A generic-asset Texture2D whose file is skipped for lack of
+                // usable image data still lives in a frozen texture
+                // (binary-asset) collection, which reports `AssetType.Meta`.
+                // Native `.texture2D` lightmap textures carry inline bytes, so
+                // the routing prediction leaves them `Serialized`. The world
+                // `LiberationSans` atlas texture proves the Meta form.
+                UnityProjectAssetType::Meta
             } else if entry.route == ObjectRoute::EngineRedirect {
                 UnityProjectAssetType::Internal
             } else {

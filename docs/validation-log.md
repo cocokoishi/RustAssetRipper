@@ -1,5 +1,11 @@
 # Validation log
 
+## 2026-10-14 World converges: terrain family, scale stamp, skipped-texture pointers
+
+- Terrain, TerrainCollider, TerrainData, and the 220 group joined the 2022.3 editor set (TPK-probed, regression-tested); Terrain stamps the frozen fixed `0.0512` lightmap scale; streamed Texture2Ds predicted to skip file output now type their pointers Meta while written native lightmaps stay Serialized (skip prediction: streamed housing plus no inline bytes and no viable stream; degenerate native textures still write, which the full bin suite locks).
+- World r9: 541 paired, zero unpaired; every doc exact or GUID-mapped except two dangling-pointer docs proven identical after masking (same fileID plus Meta type, per-run GUIDs both sides, no `.meta` to resolve); 167/167 PNGs pixel-identical; 4/4 OGGs packet-identical; one Rust-only auxiliary map (known-acceptable).
+- Local checks: `git diff --check` exit 0; full workspace suite green (1796 lib plus 133 bin); `cargo clippy` clean; release rebuilt. Full validation via GitHub Actions after push. Sample input read-only; outputs quarantined. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Atlas sprites resolve; Hash128 corrected; world r5 exports exit 0
 
 - Atlas-packed sprites: overlays now built in all planning routes and threaded through a crate-internal converter twin (public surface unchanged); geometry proceeds only when both atlas pointers are cleared; null PPtrs no longer push unvisitable overlay entries. New unit tests for the resolved path plus the fail-closed path.

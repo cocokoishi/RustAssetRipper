@@ -265,6 +265,12 @@ struct RoutedObject<'a> {
     controller_collection: Option<RoutedControllerCollection<'a>>,
     selection: super::project_exporter::CollectionSelection,
     route: ObjectRoute,
+    /// Planning-time prediction that a streamed generic-asset `Texture2D`
+    /// will skip its file for lack of usable image data. The materialization
+    /// check re-verifies; the flag only types cross-collection pointers
+    /// (frozen texture collections report `Meta` even when the file is
+    /// skipped, while written textures stay `Serialized`).
+    texture_file_skipped: bool,
     fallback_reason: Option<&'static str>,
     collection_index: usize,
     /// GUID written into the collection's `.meta` file.

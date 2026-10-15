@@ -98,6 +98,15 @@ fn should_use_scene_editor_type_tree(class_id: i32, unity_version_text: Option<&
                     | 1_818_360_608
                     | 1_818_360_609
                     | 258
+                    // Breadth probe: Terrain carries full editor base plus its
+                    // GI fields on 2022.3 (probed); same release truncation.
+                    | 218
+                    // Breadth probe: TerrainCollider, TerrainData, and the
+                    // 220 light-probe group carry full editor base on 2022.3
+                    // (probed); same release truncation, no extra format.
+                    | 154
+                    | 156
+                    | 220
             ));
     supported_version && supported_class
 }
@@ -653,7 +662,10 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
                 )
                 .map_err(|message| scene_editor_format_error(source, class_id, message))?;
             }
-            if matches!(class_id, 1 | 4 | 23 | 96 | 120 | 137 | 199 | 212 | 224) {
+            if matches!(
+                class_id,
+                1 | 4 | 23 | 96 | 120 | 137 | 199 | 212 | 218 | 224
+            ) {
                 apply_scene_object_editor_format(
                     &mut root,
                     export_root,
@@ -1686,6 +1698,9 @@ fn apply_scene_object_editor_format(
         // renderer; 23/137/199 were the first transcribed, 96/120/212 came from
         // renderer breadth probes (all probed on 2022.3).
         23 | 96 | 120 | 137 | 199 | 212 => apply_renderer_editor_format(editor_root),
+        // The frozen `EditorFormatProcessor.ConvertAsync` stamps a fixed
+        // `0.0512` terrain scale unconditionally.
+        218 => apply_terrain_editor_format(editor_root),
         _ => Ok(()),
     }
 }
@@ -2910,6 +2925,14 @@ fn apply_renderer_editor_format(root: &mut SerializedValue) -> Result<(), String
         *path_id = 0;
     }
     Ok(())
+}
+
+fn apply_terrain_editor_format(root: &mut SerializedValue) -> Result<(), String> {
+    set_scene_editor_format_default(
+        root,
+        "m_ScaleInLightmap",
+        SceneEditorFormatDefault::F32(0.0512),
+    )
 }
 
 fn merge_editor_yaml_hints_with_source_fallback(
@@ -4275,6 +4298,7 @@ mod tests {
             1_818_360_608,
             1_818_360_609,
             258,
+            218,
         ] {
             assert!(should_use_scene_editor_type_tree(
                 class_id,
@@ -4370,6 +4394,7 @@ mod tests {
             1_818_360_608,
             1_818_360_609,
             258,
+            218,
         ] {
             let (_, editor_tree) = reference_class_layouts()
                 .tpk_trees(class_id, &version)
@@ -4897,6 +4922,19 @@ mod tests {
             root_error.contains("RenderDataMap resolution is not implemented"),
             "unexpected root-atlas error: {root_error}"
         );
+    }
+
+    #[test]
+    fn terrain_editor_format_stamps_fixed_lightmap_scale() {
+        let mut root = SerializedValue::Struct(vec![SerializedFieldValue {
+            name: "m_ScaleInLightmap".to_owned(),
+            value: SerializedValue::F32(0.0),
+        }]);
+        apply_terrain_editor_format(&mut root).unwrap();
+        let SerializedValue::Struct(fields) = &root else {
+            panic!("terrain test root is not a struct");
+        };
+        assert_eq!(fields[0].value, SerializedValue::F32(0.0512));
     }
 
     fn batch_info_root(first: i32, count: i32) -> SerializedValue {

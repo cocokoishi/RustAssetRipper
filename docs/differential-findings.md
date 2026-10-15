@@ -1,12 +1,28 @@
 # Source behavior and differential findings
 
-## DIFF-TERRAIN-LIGHTING-001 — Terrain lighting data (implemented, pending audit)
+## DIFF-TERRAIN-LIGHTING-001 — Terrain lighting data (done, audited)
 
-A 2022.3 world with Terrain objects failed project export loudly at the LightingData gate. Implemented following the reference processor: terrains collect like renderers, unlightmapped ones skip, lightmapped ones emit renderer-data entries (index, dynamic, tiling offsets, dynamic/static UVs, probe hash; no UV mesh). Unit-tested for both paths. The reporting export now passes LightingData planning and reaches a deeper sprite-materialization failure, so the terrain path is exercised on real data; entry values await the full audit. Status: implemented, e2e-exercised, audit pending on atlas-packed sprites.
+Implemented following the reference processor (skip plus emit paths, unit-tested) and proven on the reporting world: its `LightingData` renderer entries match after GUID mapping. Status: done.
 
-## DIFF-ATLAS-SPRITE-001 — atlas-packed sprite geometry (implemented, audit pending)
+## DIFF-EDITOR-COVERAGE-154-156-218-220 — Terrain family joins the editor tree set (done, audited)
 
-Atlas-packed sprites failed loudly in two stages, both fixed following the frozen processor. First, the sprite-atlas overlay (which already copies atlas render data and clears the atlas pointer) was only wired into the scene-assignment route; loose-asset sprites convert through the generic planning route with no overlay. Overlays are now built for class 213 in all planning routes and threaded through a crate-internal converter twin, so the public conversion surface is unchanged. The geometry check now inspects both the source and the merged root, proceeding only when both atlas pointers are cleared. Second, the overlay registered resolution entries for null PPtrs, but the YAML walker emits null pointers directly without visiting them, so the unseen-pointer invariant could never hold; null copies no longer push overlay entries. Status: implemented, unit-tested; the reporting export now exits 0.
+The world audit showed Terrain, TerrainCollider, TerrainData, and the 220 light-probe group all carrying editor base fields (plus Terrain GI fields and TerrainData's checker field) that the release trees lack. All four TPK editor trees were probed and added to the 2022.3 editor set with regression tests; the three scene/asset docs now map clean. Status: done.
+
+## DIFF-TERRAIN-SCALE-001 — Terrain lightmap scale is a fixed stamp (done, audited)
+
+The reference processor stamps `0.0512` on every Terrain unconditionally. The editor tree only defaults the field to zero, so a dedicated Terrain editor step now applies the stamp with a unit test; the world Terrain doc maps clean. Status: done.
+
+## DIFF-SKIPPED-TEXTURE-POINTER-001 — skipped streamed textures point Meta (done, one known-acceptable pair)
+
+A streamed texture with no usable data is skipped at materialization, but the frozen texture collection still reports `Meta`, so its pointers use the Meta form with the planned GUID. Routing now predicts the skip (streamed housing plus no inline bytes and no viable stream range; dimensions irrelevant, degenerate native textures still write) and types the collection accordingly, while native lightmap textures keep their `Serialized` form. Both world pointers now carry the Meta form with the same fileID. Their GUIDs are per-run on both sides with no `.meta` to resolve through, so the two holding docs stay audit-different on GUID text only (proven identical after masking). Status: done, with a documented known-acceptable GUID pair.
+
+## DIFF-W03-AUDIT-001 — world r5 exports exit 0 with broad diffs under triage (closed)
+
+The first r5 audit pass compared with a wrong source root, prefixing every reference GUID path; rerunning with correct roots collapsed 546 document diffs to 6 real ones, all resolved above except the known-acceptable dangling-GUID pair. World r9: 541 paired, zero unpaired; every doc exact or GUID-mapped except that pair; 167/167 PNGs pixel-identical; 4/4 OGGs packet-identical; one Rust-only auxiliary map (known-acceptable). Status: closed, sample converged.
+
+## DIFF-ATLAS-SPRITE-001 — atlas-packed sprite geometry (done, audited)
+
+Atlas-packed sprites failed loudly in two stages, both fixed following the frozen processor. First, the sprite-atlas overlay (which already copies atlas render data and clears the atlas pointer) was only wired into the scene-assignment route; loose-asset sprites convert through the generic planning route with no overlay. Overlays are now built for class 213 in all planning routes and threaded through a crate-internal converter twin, so the public conversion surface is unchanged. The geometry check now inspects both the source and the merged root, proceeding only when both atlas pointers are cleared. Second, the overlay registered resolution entries for null PPtrs, but the YAML walker emits null pointers directly without visiting them, so the unseen-pointer invariant could never hold; null copies no longer push overlay entries. All world sprite docs map clean in the audit. Status: done.
 
 ## DIFF-HASH128-001 — Hash128 formats as unsigned words, never throws (fixed)
 
