@@ -1,5 +1,15 @@
 # RustAssetRipper hand-off — 2026-10-10
 
+## Latest current checkpoint — 2026-10-15 (fourth world down to one real cluster; next blocker is the predefined Mesh redirect)
+
+- Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public (only class IDs/counts/field names in docs; audit outputs quarantined).
+- The fourth world's r6 replay pairs 4840 files with **zero unmatched** (onlySource fell from 1 to 0), writes the previously missing sprite asset, pairs all 69 class-213 documents, matches every class added to the 2022.3 editor route exactly, and cuts the state class-114 diffs from 1076 to 52. Real differences are now 206 documents in five classes.
+- **Next blocker: the predefined Mesh redirect (DIFF-ENGINE-MESH-CACHE-001).** Two mesh assets the reference never writes are exported, and because they consume names in the shared `Cube` sequence every later mesh suffix shifts by two — the same source mesh is `Cube_27` in the reference and `Cube_29` in the port — which breaks 109 mesh-filter, 30 mesh and 8 mesh-collider documents. The frozen rule is `PredefinedAssetCache`'s `MeshKey(Name, VertexCount, SubMeshCount, LocalAABB)` redirect via `EngineAssetsExporter.TryCreateCollection`; the builtin `Cube` mesh is path ID 10202 with 24 vertices, one sub-mesh and a `(0,0,0)`/`(0.5,0.5,0.5)` box. The port ships tables for materials, shaders, sprites and textures but none for meshes. The recorded fix: extend `tools/probes/engine-assets` with a mesh TSV mode, add the four band tables, and consult them with the decoded vertex count, sub-mesh count and `m_LocalAABB`.
+- Remaining after that: seven Avatar documents whose style proof is pending, 52 state class-114 documents, and the 944 opaque pairs that still need the PNG/OGG content comparison (the reference proven equivalent elsewhere by pixel and packet identity).
+- The first world's r5 regression replay after the routing change stays clean: zero diff classes, zero unpaired, 102/102 PNG pixel-identical, 1/1 OGG packet-identical. The other converged samples still need the same replay before their verdicts are renewed.
+- Local checks: 1805 library + 133 CLI tests pass, warnings-denied Clippy clean, rustfmt and `git diff --check` clean. Disk was recovered to ~3 GB by deleting superseded replay outputs only.
+- CI runs five jobs on Actions (privacy, ledger/repository audit, changed-line rustfmt, Clippy and tests on Ubuntu+Windows, release-mode tests). **No repository-tracked job ever reads VRC inputs; the real samples stay local by design.**
+
 ## Latest current checkpoint — 2026-10-15 (engine-sprite gate and twelve more editor classes)
 
 - Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public (only class IDs/counts/field names in docs; audit outputs quarantined).
