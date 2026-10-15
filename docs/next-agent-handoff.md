@@ -1,5 +1,11 @@
 # RustAssetRipper hand-off — 2026-10-10
 
+## Latest current checkpoint — 2026-10-14 (third world converges)
+
+- Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public (only class IDs/counts/field names in docs; audit outputs quarantined).
+- Third world r1: CONVERGED on the current binary (proven-equivalent Avatar; PNG/OGG content proven; one auxiliary map). Converged set: AV01-AV11, W01-W05. Next: W06-W11 worlds pending.
+- No product code changed this round (docs only).
+
 ## Latest current checkpoint — 2026-10-14 (second world converges)
 
 - Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public (only class IDs/counts/field names in docs; audit outputs quarantined).

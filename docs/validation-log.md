@@ -1,5 +1,10 @@
 # Validation log
 
+## 2026-10-14 Third world converges on current binary
+
+- Fresh replay plus audit (1441 objects): 321 paired files, zero unpaired; zero real-diff classes except one Avatar doc proven content-identical modulo style (strict token equality over 77846 chars). 101/101 PNGs pixel-identical; 3/3 OGGs packet-identical; one Rust-only auxiliary map (known-acceptable). No product changes needed.
+- Local checks: replay exit 0; audit clean. Sample input read-only; outputs quarantined. Unity import/runtime and UABEA were NOT RUN.
+
 ## 2026-10-14 Second world converges: engine meshes, PhysicMaterial spelling, editor breadth
 
 - LightingData UV meshes may reference default-resources engine meshes; the collector carries them to engine-pointer resolution (record-level unit test; world audit proves all engine entries). Class 134 export display renamed to the generated `PhysicMaterial` spelling; 134/102/215/225 joined the 2022.3 editor set (215 also drops its baked texture).
