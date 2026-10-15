@@ -1420,10 +1420,7 @@ mod tests {
             let text = std::str::from_utf8(chunk).unwrap();
             probe[index] = u8::from_str_radix(text, 16).unwrap();
         }
-        assert_eq!(
-            format_hash128(probe),
-            "d37e54f397c997c319081c241079e82b"
-        );
+        assert_eq!(format_hash128(probe), "d37e54f397c997c319081c241079e82b");
     }
 
     #[test]

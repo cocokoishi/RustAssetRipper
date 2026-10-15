@@ -504,25 +504,23 @@ pub(super) fn plan_routed_asset_files(
                 } else {
                     None
                 };
-                let document =
-                    workspace_object_to_unity_yaml_document_with_processed_animation_root_and_atlas_overlay(
-                        workspace,
-                        reference_graph,
-                        pointer_map,
-                        entry.object,
-                        source,
-                        entry.file_id,
-                        entry.collection_index,
-                        Some(
-                            crate::export::script_hashing::UnityGuid::MISSING_REFERENCE
-                                .to_byte_array(),
-                        ),
-                        limits.yaml_collection.object_conversion,
-                        animation_clip_root,
-                        &streamed_resources,
-                        true,
-                        sprite_atlas_overlay,
-                    )?;
+                let document = workspace_object_to_unity_yaml_document_with_atlas_overlay(
+                    workspace,
+                    reference_graph,
+                    pointer_map,
+                    entry.object,
+                    source,
+                    entry.file_id,
+                    entry.collection_index,
+                    Some(
+                        crate::export::script_hashing::UnityGuid::MISSING_REFERENCE.to_byte_array(),
+                    ),
+                    limits.yaml_collection.object_conversion,
+                    animation_clip_root,
+                    &streamed_resources,
+                    true,
+                    sprite_atlas_overlay,
+                )?;
                 let Some(mut document) = document else {
                     if entry.scriptable_object_group.is_some()
                         || entry.controller_collection.is_some()
@@ -608,31 +606,30 @@ pub(super) fn plan_routed_asset_files(
                         } else {
                             None
                         };
-                        let document =
-                            workspace_object_to_unity_yaml_document_with_processed_animation_root_and_atlas_overlay(
-                                workspace,
-                                reference_graph,
-                                pointer_map,
-                                child.object,
-                                source,
-                                child.file_id,
-                                entry.collection_index,
-                                Some(
-                                    crate::export::script_hashing::UnityGuid::MISSING_REFERENCE
-                                        .to_byte_array(),
-                                ),
-                                limits.yaml_collection.object_conversion,
-                                None,
-                                &streamed_resources,
-                                false,
-                                sprite_atlas_overlay,
-                            )?
-                            .ok_or_else(|| {
-                                invalid_project(format!(
-                                    "ScriptableObjectGroup member {}:{} produced no YAML document",
-                                    child.object.file_index, child.object.path_id
-                                ))
-                            })?;
+                        let document = workspace_object_to_unity_yaml_document_with_atlas_overlay(
+                            workspace,
+                            reference_graph,
+                            pointer_map,
+                            child.object,
+                            source,
+                            child.file_id,
+                            entry.collection_index,
+                            Some(
+                                crate::export::script_hashing::UnityGuid::MISSING_REFERENCE
+                                    .to_byte_array(),
+                            ),
+                            limits.yaml_collection.object_conversion,
+                            None,
+                            &streamed_resources,
+                            false,
+                            sprite_atlas_overlay,
+                        )?
+                        .ok_or_else(|| {
+                            invalid_project(format!(
+                                "ScriptableObjectGroup member {}:{} produced no YAML document",
+                                child.object.file_index, child.object.path_id
+                            ))
+                        })?;
                         documents.push(document);
                     }
                     additional_exported_document_count = documents.len().saturating_sub(1);
@@ -697,7 +694,7 @@ pub(super) fn plan_routed_asset_files(
                             None
                         };
                         let mut document =
-                            workspace_object_to_unity_yaml_document_with_processed_animation_root_and_atlas_overlay(
+                            workspace_object_to_unity_yaml_document_with_atlas_overlay(
                                 workspace,
                                 reference_graph,
                                 pointer_map,

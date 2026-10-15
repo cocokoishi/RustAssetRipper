@@ -143,11 +143,11 @@ use super::value_yaml::{
 };
 use super::workspace_yaml::sprite_atlas::workspace_sprite_atlas_yaml_overlay;
 use super::workspace_yaml::{
-    UnityYamlWorkspaceCollectionLimits, WorkspaceGeneratedLightingDataYamlPointer,
-    WorkspaceGeneratedTransformYamlContext, WorkspaceStreamedYamlResourceContext,
-    workspace_object_to_unity_yaml_document_with_processed_animation_root_and_atlas_overlay,
+    workspace_object_to_unity_yaml_document_with_atlas_overlay,
     workspace_prefab_hierarchy_to_unity_yaml_with_generated_transforms,
     workspace_scene_assignments_to_unity_yaml_with_project_generated_assets,
+    UnityYamlWorkspaceCollectionLimits, WorkspaceGeneratedLightingDataYamlPointer,
+    WorkspaceGeneratedTransformYamlContext, WorkspaceStreamedYamlResourceContext,
 };
 
 const MAX_PROJECT_OBJECTS: usize = 20_000_000;

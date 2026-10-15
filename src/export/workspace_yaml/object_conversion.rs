@@ -4102,7 +4102,7 @@ pub fn workspace_object_to_unity_yaml_document_with_processed_animation_root(
     streamed_resources: &WorkspaceStreamedYamlResourceContext<'_, '_>,
     animation_clip_editor_format: bool,
 ) -> Result<Option<UnityYamlDocument>, UnityYamlWorkspaceExportError> {
-    workspace_object_to_unity_yaml_document_with_processed_animation_root_and_atlas_overlay(
+    workspace_object_to_unity_yaml_document_with_atlas_overlay(
         workspace,
         reference_graph,
         pointer_map,
@@ -4126,7 +4126,7 @@ pub fn workspace_object_to_unity_yaml_document_with_processed_animation_root(
 /// before conversion; the overlay type stays crate-internal so the public
 /// conversion surface does not expose atlas-internals to external callers.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn workspace_object_to_unity_yaml_document_with_processed_animation_root_and_atlas_overlay(
+pub(crate) fn workspace_object_to_unity_yaml_document_with_atlas_overlay(
     workspace: &SerializedFileWorkspace,
     reference_graph: &MultiFileReferenceGraph<'_>,
     pointer_map: &ProjectExportPointerMap,
