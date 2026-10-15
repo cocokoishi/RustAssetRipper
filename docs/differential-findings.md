@@ -1,5 +1,13 @@
 # Source behavior and differential findings
 
+## DIFF-EDGE-BUDGET-001 — per-file reference edge budget raised for large scenes (done)
+
+A 422K-object world stopped reference scanning at the 1M-edge file budget, dropping later objects' edges; scene validation then failed loudly on the first unverifiable relationship. Incomplete scans were already fail-closed globally (the project export gate refuses them), so no silent loss occurred. The per-file default moved to 8M with a calibration comment; the multi-file total still bounds the whole graph. Status: done.
+
+## DIFF-ATLAS-MISS-001 — atlas map misses keep the sprite's own render data (done, pending audit)
+
+A sprite can reference an atlas whose render-data map holds no entry for its key. The frozen processor copies nothing in that case but still clears the atlas reference and tags and recomputes geometry from the sprite's own data. The overlay builder is now equally tolerant (the atlas itself must still resolve); the clearing step is unit-tested and the branching is proven by the reporting world replay. Status: done, pending audit.
+
 ## DIFF-EDITOR-COVERAGE-134-PLUS — PhysicMaterial spelling plus more editor classes (done, audited)
 
 A world showed five `PhysicsMaterial/` files against the reference `PhysicMaterial/` directory: the export fallback uses the factory class name, and the `ClassIDType` enum spelling (`PhysicsMaterial`) differs from the generated/serialization spelling (`PhysicMaterial`, matching the TypeTree root and the reference output). Class 134 joined the original-name table, and 134 plus TextMesh, class 215, and CanvasGroup joined the 2022.3 editor set (BoxCollider was already there); the 215 editor tree also omits the baked texture. A systematic enum-vs-TypeTree-root audit for all covered classes stays open as debt. Status: done.

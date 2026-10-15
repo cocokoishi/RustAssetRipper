@@ -120,37 +120,55 @@ pub(crate) fn workspace_sprite_atlas_yaml_overlay_with_index(
             );
         }
         None => sprite_atlas_render_data_for_key(&atlas_payload.root, &sprite_payload.root)?,
-    }
-    .ok_or_else(|| {
-        "SpriteAtlas.m_RenderDataMap has no entry for Sprite.m_RenderDataKey".to_owned()
-    })?;
-    let atlas_data_path = atlas_render_data.path;
-    let sprite_render_data = sprite_payload
-        .root
-        .unique_field_in_base_chain("m_RD")
-        .map_err(|error| format!("could not inspect Sprite.m_RD: {error}"))?
-        .ok_or_else(|| "Sprite has no m_RD".to_owned())?;
-    let sprite_render_data_path = field_path_in_base_chain(&sprite_payload.root, "m_RD")?
-        .ok_or_else(|| "Sprite.m_RD has no serialized field path".to_owned())?;
-
+    };
+    // A missing map entry is not an error: the frozen processor copies render
+    // data only on a key hit, then always clears the atlas reference and tags
+    // and recomputes geometry from the sprite's own render data.
     let mut pointers = Vec::new();
-    let mut rebuilt_render_data = sprite_render_data.clone();
-    copy_atlas_render_data_fields(
-        atlas_render_data.data,
-        &atlas_data_path,
-        &mut rebuilt_render_data,
-        &sprite_render_data_path,
-        atlas_file_index,
-        atlas_object_index,
-        reference_graph,
-        &mut pointers,
-    )?;
+    let mut rebuilt_render_data = None;
+    if let Some(atlas_render_data) = atlas_render_data {
+        let atlas_data_path = atlas_render_data.path;
+        let sprite_render_data = sprite_payload
+            .root
+            .unique_field_in_base_chain("m_RD")
+            .map_err(|error| format!("could not inspect Sprite.m_RD: {error}"))?
+            .ok_or_else(|| "Sprite has no m_RD".to_owned())?;
+        let sprite_render_data_path = field_path_in_base_chain(&sprite_payload.root, "m_RD")?
+            .ok_or_else(|| "Sprite.m_RD has no serialized field path".to_owned())?;
+        let mut copied = sprite_render_data.clone();
+        copy_atlas_render_data_fields(
+            atlas_render_data.data,
+            &atlas_data_path,
+            &mut copied,
+            &sprite_render_data_path,
+            atlas_file_index,
+            atlas_object_index,
+            reference_graph,
+            &mut pointers,
+        )?;
+        rebuilt_render_data = Some(copied);
+    }
 
     let mut root = sprite_payload.root.clone();
-    *root
-        .unique_field_in_base_chain_mut("m_RD")
-        .map_err(|error| format!("could not update Sprite.m_RD: {error}"))?
-        .ok_or_else(|| "Sprite has no m_RD to update".to_owned())? = rebuilt_render_data;
+    if let Some(rebuilt_render_data) = rebuilt_render_data {
+        *root
+            .unique_field_in_base_chain_mut("m_RD")
+            .map_err(|error| format!("could not update Sprite.m_RD: {error}"))?
+            .ok_or_else(|| "Sprite has no m_RD to update".to_owned())? = rebuilt_render_data;
+    }
+    clear_sprite_atlas_reference(&mut root)?;
+
+    Ok(Some(WorkspaceSpriteAtlasYamlOverlay {
+        source,
+        root,
+        pointers,
+    }))
+}
+
+/// Clear the atlas reference and tags after render-data resolution, whether or
+/// not the atlas map held the sprite key. The frozen processor always clears
+/// both and recomputes geometry from whichever render data survived.
+fn clear_sprite_atlas_reference(root: &mut SerializedValue) -> Result<(), String> {
     let atlas_pointer = root
         .unique_field_in_base_chain_mut("m_SpriteAtlas")
         .map_err(|error| format!("could not clear Sprite.m_SpriteAtlas: {error}"))?
@@ -175,12 +193,7 @@ pub(crate) fn workspace_sprite_atlas_yaml_overlay_with_index(
         };
         tags.clear();
     }
-
-    Ok(Some(WorkspaceSpriteAtlasYamlOverlay {
-        source,
-        root,
-        pointers,
-    }))
+    Ok(())
 }
 
 pub(crate) struct SpriteAtlasRenderData<'a> {
@@ -1181,6 +1194,54 @@ mod tests {
                 path_id: 45
             }
         );
+    }
+
+    #[test]
+    fn clearing_atlas_reference_nulls_pointer_and_empties_tags() {
+        let mut root = SerializedValue::Struct(vec![
+            SerializedFieldValue {
+                name: "m_SpriteAtlas".to_owned(),
+                value: SerializedValue::PPtr {
+                    file_id: 0,
+                    path_id: 793,
+                },
+            },
+            SerializedFieldValue {
+                name: "m_AtlasTags".to_owned(),
+                value: SerializedValue::Array(vec![SerializedValue::StringBytes(
+                    b"atlas".to_vec(),
+                )]),
+            },
+            SerializedFieldValue {
+                name: "m_RD".to_owned(),
+                value: SerializedValue::Struct(vec![SerializedFieldValue {
+                    name: "textureRect".to_owned(),
+                    value: SerializedValue::Struct(vec![]),
+                }]),
+            },
+        ]);
+        clear_sprite_atlas_reference(&mut root).unwrap();
+        let SerializedValue::Struct(fields) = &root else {
+            panic!("sprite test root is not a struct");
+        };
+        let atlas = fields
+            .iter()
+            .find(|field| field.name == "m_SpriteAtlas")
+            .unwrap();
+        assert_eq!(
+            atlas.value,
+            SerializedValue::PPtr {
+                file_id: 0,
+                path_id: 0
+            }
+        );
+        let tags = fields
+            .iter()
+            .find(|field| field.name == "m_AtlasTags")
+            .unwrap();
+        assert_eq!(tags.value, SerializedValue::Array(Vec::new()));
+        // The render data survives untouched for map-miss sprites.
+        assert!(fields.iter().any(|field| field.name == "m_RD"));
     }
 
     #[test]

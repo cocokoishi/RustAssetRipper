@@ -32,7 +32,12 @@ impl Default for ReferenceGraphLimits {
             object_decode: ObjectDecodeLimits::default(),
             max_objects: 4_000_000,
             max_managed_registry_scopes: 1_000_000,
-            max_edges: 1_000_000,
+            // Large real scene files carry multi-million PPtr edges (a 422K-object
+            // 2022.3 world needs ~2M); the per-file budget must clear them while
+            // staying an absolute memory backstop. Incomplete scans stay loud:
+            // the project export gate refuses them globally, and scene
+            // validation cross-checks every relationship.
+            max_edges: 8_000_000,
             max_issues: 100_000,
             max_field_path_bytes: 1024 * 1024,
         }
