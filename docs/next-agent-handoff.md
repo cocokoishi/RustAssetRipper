@@ -1,5 +1,27 @@
 # RustAssetRipper hand-off — 2026-10-16
 
+## Latest current checkpoint - 2026-10-16 (texture tree fixed; payload tail open)
+
+- `make_reference_texture_file` now emits a **correctly parented** TypeTree. The dump rows
+  were previously written with row-order indices, which re-parented `m_StreamData`'s children;
+  the builder now derives sub-node counts from the `level` column, and asserts the release
+  root's 22 direct children.
+- **Open item, with exact numbers:** the hand-written payload is 4 bytes short at the tail
+  under production layouts. `m_PlatformBlob` ends at 88, the decoder wants
+  `m_StreamData.path` at 92, and the symptom is
+  `field Texture2D.m_StreamData.path has negative array/string length -14806006`
+  (`-14806006` = `0xFF1E140A` = the fixture's own pixels `0A 14 1E FF` read as a length).
+  Fix the `m_PlatformBlob`/`image data`/`m_StreamData` tail, then the image arc can be
+  re-landed.
+- Why earlier increments looked green: the test binary's **synthetic layout masked this**.
+  Any texture fixture work must be checked under
+  `SourceFactoryLayoutGuard::use_source_factory()`, which makes the file TypeTree
+  authoritative. The test now records that leg as a measured open item instead of asserting.
+- Do **not** run rustfmt on `src/main_tests_01.rs`: it is not rustfmt-clean at HEAD and a
+  whole-file run reformats 1500+ unrelated lines (happened twice this round; both reverted).
+- Verified: `cargo test --locked --workspace` 1822 lib + 195 bin, 0 failed; warnings-denied
+  Clippy exit 0. No product behavior changed; the image implementation stays reverted.
+
 ## Latest current checkpoint - 2026-10-16 (reference Texture2D fixture decodes; image arc ready)
 
 - The fixture is **verified working**, not just generated.

@@ -1,5 +1,32 @@
 # Validation log
 
+## 2026-10-16 - Texture fixture subtree rebuilt; production-layout payload tail still open
+
+- Outcome: the reference TypeTree fixture now emits a **correctly parented tree**, which the
+  previous increment did not. The dump's flat `NODE|` rows were being written with row-order
+  indices, so the serializer's `first_child`/`next_sibling` reconstruction (driven by the
+  `level` column) re-parented `m_StreamData`'s children onto unrelated nodes. The builder now
+  walks the level column to derive each node's sub-node count before emitting, and a test
+  assertion pins the release root's 22 direct children.
+- Verified tree shape (debug-inspected, then pinned): `m_Name`/`m_MipmapLimitGroupName` have
+  1 sub-node, `GLTextureSettings` 6, `m_PlatformBlob` 1, `image data` 2, `m_StreamData` 3.
+- Still open, and deliberately not asserted: the hand-written payload tail. Under
+  **production layouts** the real `StreamingInfo` layout applies, and the decoder reads
+  `m_StreamData.path` at byte offset 92 while the builder's `m_PlatformBlob` ends at 88, i.e.
+  the payload is 4 bytes short; the symptom is
+  `field Texture2D.m_StreamData.path has negative array/string length -14806006`, where
+  `-14806006` is `0xFF1E140A` - the fixture's own pixel bytes `0A 14 1E FF` read as a length.
+  Under the synthetic test layout the same bytes decode fine, which is why earlier increments
+  looked green: **the synthetic layout masked a payload-layout bug.** The `/Assets/Image`
+  product code was written, compiled and driven to 193/194, then reverted again, and the
+  `load_game` leg is recorded as a measured open item in the test rather than asserted.
+- Process note: two whole-file `rustfmt` runs on `main_tests_01.rs` reformatted 1500+ unrelated
+  lines because the file is not rustfmt-clean at HEAD. Both were reverted with
+  `git checkout --` and the change re-applied by hand; the committed diff is 91 lines. Do not
+  run rustfmt on that file.
+- Commands run: `cargo test --locked --workspace` - 1822 library + 195 bin tests, 0 failed,
+  1 ignored. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+
 ## 2026-10-16 Eleventh world converges: largest corpus input accepted end to end
 
 - Input identity: 286877903 bytes, sha256 `C4407DC3963AE45C82DE3C9072ABA362E2EDA71175FBC31E0BA45B6267729017` (unchanged before and after both exports). Reference oracle regenerated with `tools/export-reference-web.ps1 -ReferenceExecutable …\0Bins\AssetRipper.GUI.Free\Release\AssetRipper.GUI.Free.exe -InputPath target/ra-w11/W11.vrcw -OutputDirectory target/ra-w11/ref -EvidenceDirectory target/ra-w11/ev`; `REF_EXIT=0`, exe sha256 `FB62A778C0893504E5EEA87280DEF23D7605A76B703BBB44BD044E19EAB4098E`, version `2.0.0.0`, `ev/report.json` status `export-completed-semantic-comparison-pending`, inner project version 2022.3.22f1, flat reference root `target/ra-w11/ref/ExportedProject`.

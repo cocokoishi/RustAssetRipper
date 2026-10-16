@@ -1075,8 +1075,45 @@
         assert_eq!((view.width, view.height), (2, 1));
         assert_eq!(view.texture_format, 4);
         assert_eq!(view.image_data, [10, 20, 30, 255, 40, 50, 60, 255]);
-    }
+        // The whole payload must be consumed, `m_StreamData` included, so a file that
+        // only decodes up to `image data` cannot pass silently.
+        assert!(
+            payload.trailing_bytes.is_empty(),
+            "the payload has trailing bytes: {:?}",
+            payload.trailing_bytes
+        );
 
+        // The same bytes must also load through the full `load_game` pipeline the web
+        // surface uses, under production layouts, which is what makes the file TypeTree
+        // authoritative rather than the synthetic test substitution.
+        //
+        // The TypeTree side of the fixture is verified above (46 nodes, the dumped
+        // subtree shape, and the decode that reaches the texture fields under the
+        // fallback layout). Under production layouts the reference `m_StreamData` layout
+        // is applied and the hand-written payload is still 4 bytes short at that field,
+        // so the `load_game` leg is recorded as the open item rather than asserted here.
+        // The exact symptom and the measured offsets are in `docs/validation-log.md`.
+        let _production = super::SourceFactoryLayoutGuard::use_source_factory();
+        let directory = TestInputDirectory::new_root();
+        let disk_path = directory.join("z-texture.assets");
+        fs::write(&disk_path, &bytes).unwrap();
+        let full = assetripper::export::settings_file::SerializedSettingsFile::from_defaults(
+            assetripper::export::settings::ImportDefaults::default(),
+            assetripper::export::settings::ProcessingDefaults::default(),
+            ExportDefaults::default(),
+        );
+        let mut status: Vec<u8> = Vec::new();
+        let game = super::load_game(std::slice::from_ref(&disk_path), &full, &mut status)
+            .expect("load_game mounts the texture");
+        let object = game.objects.get(0, 0).expect("the texture object exists");
+        if std::env::var("TEXFIX_DEBUG").is_ok() {
+            eprintln!(
+                "PRODUCTION|ok={}|err={:?}",
+                object.payload.is_ok(),
+                object.payload.as_ref().err().map(|e| e.to_string())
+            );
+        }
+    }
     /// Build a synthetic Texture2D SerializedFile whose TypeTree is the real release tree.
     ///
     /// The hand-authored sketch used by the export tests suffices for the class-fallback
@@ -1114,6 +1151,31 @@
         assert_eq!(nodes[0].type_text, "Texture2D");
         assert_eq!(nodes[0].level, 0);
 
+        // The serializer walks a flat node list and recovers the tree from the `level`
+        // column, so the node indices must follow *preorder*: each node's sub-node run is
+        // exactly the following rows deeper than it. Emitting the dump rows verbatim with
+        // row-order indices would re-parent `m_StreamData`'s children onto unrelated
+        // nodes, which decodes correctly under a fallback layout but not under this one.
+        let mut sub_node_counts = vec![0usize; nodes.len()];
+        let mut stack: Vec<(u8, usize)> = Vec::new();
+        for (index, node) in nodes.iter().enumerate() {
+            while let Some(&(level, _)) = stack.last() {
+                if level >= node.level {
+                    stack.pop();
+                } else {
+                    break;
+                }
+            }
+            if let Some(&(_, parent)) = stack.last() {
+                sub_node_counts[parent] += 1;
+            }
+            stack.push((node.level, index));
+        }
+        assert_eq!(
+            sub_node_counts[0], 22,
+            "the release root has the dumped 22 direct children"
+        );
+
         let mut string_buffer = Vec::new();
         let mut offsets = std::collections::HashMap::new();
         let mut intern = |text: &str, buffer: &mut Vec<u8>| -> u32 {
@@ -1137,6 +1199,12 @@
                 i32::try_from(index).unwrap(),
             ));
         }
+        // The preorder walk above must partition the level column into one tree.
+        assert_eq!(
+            sub_node_counts.iter().sum::<usize>(),
+            nodes.len() - 1,
+            "every non-root node has exactly one parent"
+        );
 
         let mut metadata = Vec::new();
         metadata.extend_from_slice(b"2019.4.40f1\0");
@@ -1164,8 +1232,13 @@
         // Payload in node order, matching the reader's own alignment rules: strings are an
         // `i32` length then bytes then align-to-4, and `vector`/`TypelessData` arrays are an
         // aligned `i32` length then the element bytes, aligned again.
+        //
+        // Open item: under production layouts the reference `m_StreamData` layout applies
+        // and this hand-written tail is still 4 bytes short at `m_StreamData.path` (the
+        // decoder reads the pixel bytes as the path length). The TypeTree emitted above is
+        // verified correct; only this payload tail is unfinished. See the validation log.
         let mut payload = Vec::new();
-        put_i32_le(&mut payload, 0); // m_Name (string: length 0)
+        put_i32_le(&mut payload, 0); // m_Name (string: length 0, already aligned)
         payload.push(0); // m_IsAlphaChannelOptional
         put_i32_le(&mut payload, width); // m_Width
         put_i32_le(&mut payload, height); // m_Height
@@ -1176,7 +1249,14 @@
         payload.push(1); // m_IsReadable
         payload.push(0); // m_IsPreProcessed
         payload.push(0); // m_IgnoreMipmapLimit
-        put_i32_le(&mut payload, 0); // m_MipmapLimitGroupName (string: length 0)
+        // The reader aligns a string field's length word to 4, so three preceding bools
+        // are padded out to the next word before `m_MipmapLimitGroupName` begins.
+        while payload.len() % 4 != 0 {
+            payload.push(0);
+        }
+        // `m_MipmapLimitGroupName` is a string: `i32` length, bytes, then align-to-4. An
+        // empty string is 4 bytes total, so nothing extra is written here.
+        put_i32_le(&mut payload, 0);
         payload.push(0); // m_StreamingMipmaps
         put_i32_le(&mut payload, 0); // m_StreamingMipmapsPriority
         put_i32_le(&mut payload, 1); // m_ImageCount
@@ -1189,19 +1269,23 @@
         put_i32_le(&mut payload, 1); // m_TextureSettings.m_WrapW
         put_i32_le(&mut payload, 1); // m_LightmapFormat
         put_i32_le(&mut payload, 1); // m_ColorSpace
-        put_i32_le(&mut payload, 0); // m_PlatformBlob (empty vector)
         while payload.len() % 4 != 0 {
             payload.push(0);
         }
+        // `m_PlatformBlob` is a `vector` (Array of UInt8): an aligned element count, then
+        // the element bytes. An empty vector writes only the count word.
+        put_i32_le(&mut payload, 0);
         put_i32_le(&mut payload, i32::try_from(data.len()).unwrap()); // image data length
         payload.extend_from_slice(data);
         while payload.len() % 4 != 0 {
             payload.push(0);
         }
-        put_u32_le(&mut payload, 0); // m_StreamData.offset low
-        put_u32_le(&mut payload, 0); // m_StreamData.offset high
+        // m_StreamData is `StreamingInfo`: a `UInt64 offset` (byte size 8), a `u32 size`,
+        // then a `string path` whose `Array[char]` body still needs its aligned length.
+        put_u32_le(&mut payload, 0); // m_StreamData.offset (UInt64: low then high)
+        put_u32_le(&mut payload, 0);
         put_u32_le(&mut payload, 0); // m_StreamData.size
-        put_i32_le(&mut payload, 0); // m_StreamData.path (string: length 0)
+        put_i32_le(&mut payload, 0); // m_StreamData.path length
         while payload.len() % 4 != 0 {
             payload.push(0);
         }
