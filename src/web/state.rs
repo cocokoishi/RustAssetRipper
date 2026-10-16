@@ -32,6 +32,10 @@ use crate::export_commands::{
 use super::localization::{Messages, FALLBACK_LANGUAGE};
 use super::tree::BundleTree;
 
+/// The largest virtual-filesystem read one resource data response serves, matching the
+/// export's per-file payload bound.
+const MAX_SOURCE_RESPONSE_BYTES: usize = 4 * 1024 * 1024 * 1024;
+
 /// What the export routes should do for one submitted path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExportDecision {
@@ -152,6 +156,18 @@ impl WebState {
     /// The bundle-tree snapshot, present exactly when a game is loaded.
     pub fn tree(&self) -> Option<&BundleTree> {
         self.tree.as_ref()
+    }
+
+    /// Read one virtual-filesystem file, bounding the response like the export's
+    /// per-file payload bound does. The resource data routes serve these bytes.
+    pub fn read_resource_bytes(&self, virtual_path: &str) -> Result<Vec<u8>, String> {
+        let game = self
+            .loaded
+            .as_ref()
+            .ok_or_else(|| "no game is loaded".to_owned())?;
+        game.filesystem
+            .read_all_bytes(virtual_path, MAX_SOURCE_RESPONSE_BYTES)
+            .map_err(|error| error.to_string())
     }
 
     /// The loaded game, when one is present.

@@ -1,5 +1,22 @@
 # RustAssetRipper hand-off — 2026-10-16
 
+## Latest current checkpoint - 2026-10-16 (resource pages serve names, sizes, bytes)
+
+- Worktree: `main-work` detached; HEAD == origin/main before this slice. The snapshot
+  carries resource virtual paths; `GET /Resources/View` renders the fixed name, bundle
+  link, byte size and download button, and `GET /Resources/Data` serves the exact
+  filesystem bytes as octet-stream. Raw/fixed naming split pinned by end-to-end (bundle
+  link raw, title/download fixed).
+- Verification evidence: fixture end-to-end loads a synthetic 29-byte `.resS` (root
+  listing, view page, byte-identical download, 404); full `cargo test --locked
+  --workspace` **1822 lib + 193 bin, 0 failed**, 1 ignored; Clippy `-D warnings` exit 0;
+  per-file rustfmt and `git diff --check` clean. Full evidence in `docs/validation-log.md`.
+- Privacy: no sample content/paths/names in code, tests, docs or commit text. Mapping table
+  stays outside the repo; history untouched.
+- Next move: `/Assets/*` routes and page, `/FailedFiles/View` + `/StackTrace`,
+  `/Scenes/View`, `/Export/PrimaryContent`. Failed-entry test data still needs crafted
+  inputs. Then re-run the Phase-1 gap rules (9 `实现中` + 1 blocked + 16 `已实现但未验证`).
+
 ## Latest current checkpoint - 2026-10-16 (search pages query every asset)
 
 - Worktree: `main-work` detached; HEAD == origin/main before this slice.

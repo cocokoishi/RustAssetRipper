@@ -73,18 +73,8 @@ fn get(state: &mut WebState, request: &Request) -> Response {
             |tree, path| tree.asset_exists(path),
             |path| format!("Asset could not be resolved: {}", path.to_diagnostic()),
         ),
-        "/Resources/View" => pending_tree_view::<ResourcePath>(
-            state,
-            request,
-            "/Resources/View",
-            |tree, path| tree.resolve_resource(path).is_some(),
-            |path| {
-                format!(
-                    "Resource file could not be resolved: {}",
-                    path.to_diagnostic()
-                )
-            },
-        ),
+        "/Resources/View" => resources_view(state, request),
+        "/Resources/Data" => resources_data(state, request),
         "/FailedFiles/View" => pending_tree_view::<FailedFilePath>(
             state,
             request,
@@ -323,6 +313,78 @@ fn search_view(state: &mut WebState, request: &Request) -> Response {
     };
     let query = request.query_value("q").unwrap_or("").trim().to_owned();
     Response::html(pages::search_page(state, &query, &tree.search(&query)))
+}
+
+/// `GET /Resources/View`: render the resolved resource from the snapshot.
+fn resources_view(state: &mut WebState, request: &Request) -> Response {
+    let path = match tree_gates::<ResourcePath>(state, request) {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
+    let Some(tree) = loaded_tree(state) else {
+        return Response::internal_error("A game is loaded but its bundle tree is missing.");
+    };
+    let Some((bundle_index, position)) = tree.resolve_resource(&path) else {
+        return Response::text(format!(
+            "Resource file could not be resolved: {}",
+            path.to_diagnostic()
+        ))
+        .with_status(404);
+    };
+    let bytes = match resource_bytes(state, bundle_index, position) {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
+    };
+    match pages::resource_page(state, tree, bundle_index, position, &path, bytes.len()) {
+        Some(page) => Response::html(page),
+        None => Response::internal_error(format!(
+            "The bundle tree disagrees with the resolved path {}.",
+            path.to_diagnostic()
+        )),
+    }
+}
+
+/// `GET /Resources/Data`: serve the resolved resource bytes as an octet stream.
+fn resources_data(state: &mut WebState, request: &Request) -> Response {
+    let path = match tree_gates::<ResourcePath>(state, request) {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
+    let Some(tree) = loaded_tree(state) else {
+        return Response::internal_error("A game is loaded but its bundle tree is missing.");
+    };
+    let Some((bundle_index, position)) = tree.resolve_resource(&path) else {
+        return Response::text(format!(
+            "Resource file could not be resolved: {}",
+            path.to_diagnostic()
+        ))
+        .with_status(404);
+    };
+    match resource_bytes(state, bundle_index, position) {
+        Ok(bytes) => Response::bytes("application/octet-stream", bytes),
+        Err(response) => response,
+    }
+}
+
+/// Read one snapshot resource's bytes through the loaded game.
+fn resource_bytes(
+    state: &WebState,
+    bundle_index: usize,
+    position: usize,
+) -> Result<Vec<u8>, Response> {
+    let virtual_path = state
+        .tree()
+        .and_then(|tree| tree.bundle(bundle_index))
+        .and_then(|bundle| bundle.resources.get(position))
+        .map(|resource| resource.virtual_path.clone());
+    let Some(virtual_path) = virtual_path else {
+        return Err(Response::internal_error(
+            "The bundle tree disagrees with the resolved path.",
+        ));
+    };
+    state
+        .read_resource_bytes(&virtual_path)
+        .map_err(Response::internal_error)
 }
 
 /// One `GET /X/View` page whose asset model is still open: resolve the path, report an
@@ -573,6 +635,9 @@ mod tests {
     fn a_loaded_bundle_renders_its_tree_pages() {
         use assetripper::web_paths::url_encode;
 
+        /// The synthetic streamed-resource input served by the resource routes.
+        const PROBE_RESOURCE_BYTES: &[u8] = b"probe streamed-resource bytes";
+
         // The probe input lives under the ignored `target/` scratch tree, like the
         // other repository tests' temporary inputs.
         let directory =
@@ -592,14 +657,19 @@ mod tests {
             include_bytes!("../export/managed_reference_project_fixture/nested_reference.bundle"),
         )
         .expect("the probe bundle is copied");
+        // An explicit streamed-resource input lists on the root and serves bytes.
+        let probe_resource = directory.join("probe.resS");
+        std::fs::write(&probe_resource, PROBE_RESOURCE_BYTES)
+            .expect("the probe resource is written");
         let load_and_browse = || {
             let mut state = state();
             state
                 .load(&[
                     input.to_string_lossy().into_owned(),
                     early_input.to_string_lossy().into_owned(),
+                    probe_resource.to_string_lossy().into_owned(),
                 ])
-                .expect("the probe bundles load");
+                .expect("the probe inputs load");
             assert!(state.is_loaded());
 
             let get = |state: &mut WebState, target: &str| dispatch(state, &request("GET", target));
@@ -654,6 +724,45 @@ mod tests {
                 total += body.parse::<usize>().expect("counts are JSON numbers");
             }
             assert_eq!(total, 2);
+
+            // The explicit resource input lists on the root with its byte size
+            // and serves the exact bytes back.
+            let resources = anchor_texts(&root, "/Resources/View?Path=");
+            assert_eq!(resources, ["probe.resS"]);
+            let view = format!(
+                "/Resources/View?Path={}",
+                url_encode("{\"B\":{\"P\":[]},\"I\":0}")
+            );
+            let response = get(&mut state, &view);
+            assert_eq!(response.status(), 200);
+            let resource = String::from_utf8(response.body().to_vec()).expect("pages are UTF-8");
+            // The bundle link keeps the raw entry name; the view title and the
+            // download name use the identifier-fixed form like the frozen page.
+            assert!(resource.contains("<h1>probe.ress</h1>"), "{resource}");
+            assert!(resource.contains("download=\"probe.ress\""), "{resource}");
+            assert!(resource.contains(">Size<"), "{resource}");
+            assert!(
+                resource.contains(&format!("<p>{}</p>", PROBE_RESOURCE_BYTES.len())),
+                "{resource}"
+            );
+            let data = format!(
+                "/Resources/Data?Path={}",
+                url_encode("{\"B\":{\"P\":[]},\"I\":0}")
+            );
+            let response = get(&mut state, &data);
+            assert_eq!(response.status(), 200);
+            assert_eq!(response.content_type(), "application/octet-stream");
+            assert_eq!(response.body(), PROBE_RESOURCE_BYTES);
+            let missing = format!(
+                "/Resources/Data?Path={}",
+                url_encode("{\"B\":{\"P\":[]},\"I\":9}")
+            );
+            let response = get(&mut state, &missing);
+            assert_eq!(response.status(), 404);
+            assert_eq!(
+                response.body(),
+                b"Resource file could not be resolved: ResourcePath { BundlePath = {\"P\":[]}, Index = 9 }"
+            );
 
             // A resolved collection renders its asset table with links.
             let view = format!(

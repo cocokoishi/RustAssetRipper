@@ -101,10 +101,22 @@ pub struct TreeBundle {
     pub children: Vec<usize>,
     /// Direct collections in workspace order.
     pub collections: Vec<TreeCollection>,
-    /// Direct mounted resource names in workspace order.
-    pub resources: Vec<String>,
+    /// Direct resources in workspace order.
+    pub resources: Vec<TreeResource>,
     /// Direct failed-entry names in workspace order.
     pub failed: Vec<String>,
+}
+
+/// One resource in the snapshot: a mounted bundle resource or an explicit root input.
+///
+/// The name mirrors `ResourceFile.Name` for display; the virtual path locates the bytes
+/// in the source virtual filesystem, mirroring `ResourceFile.Stream`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TreeResource {
+    /// The source entry name.
+    pub name: String,
+    /// The virtual path of the bytes in the source filesystem.
+    pub virtual_path: String,
 }
 
 /// The whole projected tree. Index 0 is always the root bundle.
@@ -136,7 +148,10 @@ impl BundleTree {
             collections: Vec::new(),
             resources: root_resources
                 .iter()
-                .map(|resource| resource.name.clone())
+                .map(|resource| TreeResource {
+                    name: resource.name.clone(),
+                    virtual_path: resource.virtual_path.clone(),
+                })
                 .collect(),
             failed: Vec::new(),
         });
@@ -253,9 +268,10 @@ impl BundleTree {
                     )));
                 }
                 resource_claimed[resource_index] = true;
-                tree_bundles[snapshot_index]
-                    .resources
-                    .push(resource.name.clone());
+                tree_bundles[snapshot_index].resources.push(TreeResource {
+                    name: resource.name.clone(),
+                    virtual_path: resource.virtual_path.clone(),
+                });
             }
         }
         for (resource_index, resource) in resources.iter().enumerate() {

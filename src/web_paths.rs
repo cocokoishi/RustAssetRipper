@@ -460,6 +460,11 @@ pub fn resource_view_url(path: &ResourcePath) -> String {
     format!("/Resources/View?Path={}", url_encode(&path.to_json()))
 }
 
+/// The data URL the frozen `ResourceAPI.GetDataUrl` builds for `path`.
+pub fn resource_data_url(path: &ResourcePath) -> String {
+    format!("/Resources/Data?Path={}", url_encode(&path.to_json()))
+}
+
 /// The view URL the frozen `FailedFileAPI.GetViewUrl` builds for `path`.
 pub fn failed_file_view_url(path: &FailedFilePath) -> String {
     format!("/FailedFiles/View?Path={}", url_encode(&path.to_json()))
@@ -809,6 +814,13 @@ mod tests {
                 index: 1,
             }),
             "/Resources/View?Path=%7B%22B%22%3A%7B%22P%22%3A%5B%5D%7D%2C%22I%22%3A1%7D"
+        );
+        assert_eq!(
+            resource_data_url(&ResourcePath {
+                bundle: BundlePath::root(),
+                index: 1,
+            }),
+            "/Resources/Data?Path=%7B%22B%22%3A%7B%22P%22%3A%5B%5D%7D%2C%22I%22%3A1%7D"
         );
         assert_eq!(
             failed_file_view_url(&FailedFilePath {

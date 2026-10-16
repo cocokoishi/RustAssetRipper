@@ -585,15 +585,16 @@ pub fn bundle_page(
 
     if !bundle.resources.is_empty() {
         inner.element("h2", &[], &t(state, "resources"));
-        let mut resources: Vec<(usize, &String)> = bundle.resources.iter().enumerate().collect();
-        resources.sort_by(|left, right| left.1.cmp(right.1));
+        let mut resources: Vec<(usize, &super::tree::TreeResource)> =
+            bundle.resources.iter().enumerate().collect();
+        resources.sort_by(|left, right| left.1.name.cmp(&right.1.name));
         inner.open("ul", &[]);
-        for (position, name) in resources {
+        for (position, resource) in resources {
             inner.open("li", &[]);
             tree_link(
                 &mut inner,
                 &resource_view_url(&path.resource(position as i32)),
-                name,
+                &resource.name,
             );
             inner.close("li");
         }
@@ -681,6 +682,55 @@ pub fn collection_page(
     }
 
     Some(layout(state, &collection.name, inner.as_str()))
+}
+
+/// The resource page: the fixed file name, its bundle, the byte size and a download.
+///
+/// `position` addresses the resource in the bundle at `bundle_index`, `path` is its
+/// `ResourcePath`, and `size` is the content length the frozen page reads off the stream.
+/// A `None` return means the tree disagrees with the resolved position.
+pub fn resource_page(
+    state: &WebState,
+    tree: &super::tree::BundleTree,
+    bundle_index: usize,
+    position: usize,
+    path: &assetripper::web_paths::ResourcePath,
+    size: usize,
+) -> Option<String> {
+    use assetripper::io::special_names::fix_file_identifier;
+    use assetripper::web_paths::{bundle_view_url, resource_data_url};
+
+    let bundle = tree.bundle(bundle_index)?;
+    let resource = bundle.resources.get(position)?;
+    let name = fix_file_identifier(&resource.name);
+    let mut inner = Html::new();
+    inner.element("h1", &[], &name);
+
+    inner.element("h2", &[], &t(state, "bundle"));
+    tree_link(&mut inner, &bundle_view_url(&path.bundle), &bundle.name);
+
+    inner.element("h2", &[], &t(state, "size"));
+    inner.element("p", &[], &size.to_string());
+
+    inner.raw("<div class=\"text-center\">");
+    save_button(&mut inner, state, &resource_data_url(path), &name);
+    inner.raw("</div>");
+
+    Some(layout(state, &name, inner.as_str()))
+}
+
+/// A download link, matching the frozen `SaveButton` button style.
+fn save_button(html: &mut Html, state: &WebState, href: &str, file_name: &str) {
+    html.open(
+        "a",
+        &[
+            ("href", href),
+            ("download", file_name),
+            ("class", "btn btn-primary"),
+        ],
+    );
+    html.text(&t(state, "save"));
+    html.close("a");
 }
 
 /// The search page: the query form plus every matching asset in collection order.

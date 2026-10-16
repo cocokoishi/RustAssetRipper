@@ -6213,3 +6213,26 @@ These results do not pass the first-phase gate. The reference .NET solution buil
   `/FailedFiles/View` + `/StackTrace`, `/Scenes/View`, `/Export/PrimaryContent`.
   Resource/failed test data still needs crafted inputs. Unity Editor import/runtime and
   UABEA remain blocked (license/tooling), unchanged by this increment.
+## 2026-10-16 - Resource pages serve names, sizes and bytes (`/Resources/View` + `/Data`)
+
+- Scope: the snapshot carries resource virtual paths; `GET /Resources/View` renders the
+  fixed file name, the bundle link, the byte size and a download button, and `GET
+  /Resources/Data` serves the exact virtual-filesystem bytes as `application/octet-stream`
+  (bounded by the export's per-file payload cap). Names follow the frozen raw/fixed split
+  the end-to-end pins down: the bundle link keeps the raw entry name while the view title
+  and download name use the identifier-fixed form. Unresolvable paths keep the baseline
+  404. No export-path behavior changes; no sample, oracle or third-party code touched.
+- Frozen reference: `Pages/Resources/` (`ResourceAPI` with `GetView`/`GetData`, `ViewPage`
+  with title/bundle/size/save-button), `FileBase.Name` vs `NameFixed`, `SaveButton` markup.
+- Commands run (worktree `main-work`, detached, HEAD == origin/main before this change):
+  1. The fixture end-to-end loads a synthetic 29-byte `.resS` next to the bundles and
+     asserts the root listing, the view page, the byte-identical download with its
+     content type, and the per-kind 404.
+  2. `cargo test --locked --workspace` - 1822 library + 193 bin tests, 0 failed, 1 ignored.
+  3. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+  4. `rustfmt --edition 2021 --check` on each touched file - clean; `git diff --check` -
+     exit 0.
+- Open after this increment: `/Assets/*` routes and page, `/FailedFiles/View` +
+  `/StackTrace`, `/Scenes/View`, `/Export/PrimaryContent`. Failed-entry test data still
+  needs crafted inputs (loads fail closed on container errors). Unity Editor
+  import/runtime and UABEA remain blocked (license/tooling), unchanged by this increment.
