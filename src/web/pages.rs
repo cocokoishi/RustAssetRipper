@@ -810,8 +810,9 @@ pub fn asset_page(
     }
 
     if asset.has_binary {
-        // The frozen hex tab is only a download button; the port keeps that shape
-        // with no inline content.
+        // The frozen hex tab is only a download button (its `Url` is empty when the
+        // asset has no binary data, which the flag above already mirrors), so the port
+        // keeps that shape with no inline content.
         use assetripper::web_paths::asset_binary_url;
 
         inner.element("h2", &[], &t(state, "asset_tab_hex"));

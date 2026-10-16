@@ -1,5 +1,27 @@
 # RustAssetRipper hand-off — 2026-10-16
 
+## Latest current checkpoint - 2026-10-16 (Texture2D TypeTree fixture generated; image arc unblocked)
+
+- The blocker recorded in the entry below is **solved at the source**. New committed probe
+  `tools/probes/tpk-trees/` dumps any class's release TypeTree from the reference TPK
+  database; its class-28 dump is committed as
+  `src/resources/texture_typetree_fixture.txt` (46 nodes, `releaseRoot=23374`,
+  2019.4.40f1).
+- The real tree puts `m_IsReadable` at node 213, byte size 1, between `m_MipCount` and
+  `m_IsPreProcessed` — the hand-written sketch that failed was wrong about placement, which
+  is why it kept dying at "byte offset 36 while parsing Texture2D.m_IsReadable".
+- Probe API notes (reflection-only, recorded so the next dump is quick): `SourceTpk` lives
+  in `AssetRipper.SourceGenerated`; `SourceTpk.GetStream()` → `TpkFile.FromStream(...)
+  .GetDataBlob()` → `TpkTypeTreeBlob`; `ClassInformation[].ID` + `.Classes` (version map)
+  → `TpkUnityClass.ReleaseRootNode`; nodes via `NodeBuffer[index]` with `TypeName`/`Name`
+  as `StringBuffer` indices and `SubNodes` as `ushort[]`. Texture2D's record `Name` is
+  `190`.
+- The `/Assets/Image` product code is still reverted, so no behavior changed this round.
+  Rebuild it against the new fixture (turn the 46 nodes into the synthetic file's TypeTree
+  with the exact byte sizes from the fixture).
+- Verified: probe exit 0 with 46 NODE rows; `cargo test --locked --bin assetripper-rs`
+  194/194 bin tests pass.
+
 ## Latest current checkpoint - 2026-10-16 (image tab blocked on fixture, not product)
 
 - **No code change this round.** The `/Assets/Image` arc (image facts on rows, route,

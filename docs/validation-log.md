@@ -6380,6 +6380,34 @@ These results do not pass the first-phase gate. The reference .NET solution buil
   the other `/Assets/*` data routes, `/FailedFiles/View` + `/StackTrace`, `/Scenes/View`,
   `/Export/PrimaryContent`. Unity Editor import/runtime and UABEA remain blocked
   (license/tooling), unchanged by this increment.
+## 2026-10-16 - Image-tab blocker resolved: real Texture2D TypeTree fixture generated
+
+- Outcome: the fixture gap recorded in the previous entry is closed at the source. A new
+  committed probe (`tools/probes/tpk-trees/`) dumps any class's release TypeTree out of
+  the reference TPK database, and its Texture2D dump is now committed as
+  `src/resources/texture_typetree_fixture.txt` (46 nodes, `releaseRoot=23374`,
+  2019.4.40f1).
+- Probe mechanics (worth recording, since the API is reflection-only): `SourceTpk` is
+  generated into `AssetRipper.SourceGenerated`, not present as a type in `AssetRipper.Tpk`.
+  `SourceTpk.GetStream()` -> `TpkFile.FromStream(...).GetDataBlob()` yields a
+  `TpkTypeTreeBlob` whose `ClassInformation` maps each class ID to a per-version
+  `Classes` dictionary; each `TpkUnityClass` carries `ReleaseRootNode`. Nodes live in
+  `NodeBuffer` (indexed by `Item`), with `TypeName`/`Name` as indices into `StringBuffer`
+  and `SubNodes` as a `ushort[]` of node indexes. The verified class-28 record is
+  `Name=190`, which is how the engine class table stores names.
+- What this fixes: the real 2019.4 tree carries `m_IsReadable` as node 213 with byte size
+  1, placed between `m_MipCount` and `m_IsPreProcessed` - not at the node-2664 index of
+  the newer layouts, and not where the previous hand-written sketch guessed. That is
+  exactly why the earlier attempt failed at "byte offset 36 while parsing
+  Texture2D.m_IsReadable".
+- State: fixture and probe committed; the `/Assets/Image` implementation itself is still
+  reverted, so this increment changes no product behavior. The fixture is the prerequisite
+  for rebuilding that arc on a real tree.
+- Commands run: `dotnet run --project tools/probes/tpk-trees/TpkTreesProbe.csproj -c
+  Release -p:ReferenceRoot='<workspace>/AssetRipper' -- 28 2019.4.40f1` - exit 0, 46 NODE
+  rows plus the `TREE|` header. `cargo test --locked --bin assetripper-rs` - 194 bin tests,
+  0 failed.
+
 ## 2026-10-16 - Image tab attempt reverted: fixture gap, no product change
 
 - Outcome: no commit. The `/Assets/Image` implementation (image facts on snapshot rows,
