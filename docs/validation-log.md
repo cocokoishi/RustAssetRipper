@@ -1,5 +1,33 @@
 # Validation log
 
+## 2026-10-16 - `RES-MESH-VIEW-001` closed on the strength of the production-layout e2e
+
+- Outcome: `RES-MESH-VIEW-001` moves from 已实现但未验证 to 已验证. The non-verified queue drops
+  from 25 rows to 24.
+- **Why this is a status change and not just bookkeeping.** The row's own recorded gap was
+  explicit: *"No version branch is asserted beyond the caller-supplied layout inputs."* Every
+  earlier mesh test supplied its own layout, so the read path was only ever exercised against
+  layouts the test itself chose. The previous two rounds closed that specific gap:
+  `make_production_mesh_file` builds a class-43 payload against the **production** 2019.4.0f1
+  record, `production_mesh_fixture_decodes_and_builds_a_glb` runs the read path under
+  `SourceFactoryLayoutGuard::use_source_factory()`, and the `/Assets/Model.glb` e2e exercises the
+  same path through the browser surface. That is a production-layout assertion, which is exactly
+  what the row said was missing.
+- Scope is stated honestly rather than generalised: the production-layout assertion covers the
+  2019.4 layout specifically. Other versions and a C# runtime differential remain open, and the
+  row's `已知差异` column still lists them (`m_CurrentChannels`, `CalculateMeshMetric`, blend
+  shapes, streamed mesh bytes).
+- `EXP-GLB-001` deliberately **stays** 已实现但未验证. Its recorded gaps are unported features
+  (`GlbTerrainBuilder`, `GlbLevelBuilder`, morph targets, blend-shape emission), not a missing
+  assertion, so a stronger test does not close it. Only its evidence column was extended to
+  mention the production-layout GLB.
+- A small process note: editing the ledger with `WriteAllLines` introduced CRLF into a
+  LF-normalised repository, which the diff stat and Git's own warning caught. Corrected before
+  committing, and the resulting diff is the two intended rows plus a trailing newline.
+- Evidence: `cargo test --locked --workspace` - 1834 library + 199 bin tests, 0 failed, 1
+  ignored. `parity-report.ps1` - TOTAL=404, RECOGNIZED=404, NONVERIFIED=24, DUPES=0,
+  MALFORMED=0, GATE=OPEN.
+
 ## 2026-10-16 - Failed-file pages landed, and a real load-path divergence fixed
 
 - Outcome: `PRODUCT-FAILEDFILE-TAB-001` is 已验证. `/FailedFiles/View` and

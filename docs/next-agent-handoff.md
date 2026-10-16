@@ -1,5 +1,35 @@
 # RustAssetRipper hand-off — 2026-10-16
 
+## Latest current checkpoint - 2026-10-16 (mesh view closed; non-verified queue at 24)
+
+- `RES-MESH-VIEW-001` is 已验证: its recorded gap was "no version branch is asserted beyond the
+  caller-supplied layout inputs", and the production-layout mesh fixture plus the
+  `/Assets/Model.glb` e2e now supply exactly that assertion for 2019.4. Other versions stay open
+  and are still listed in the row.
+- `EXP-GLB-001` deliberately **stays** 已实现但未验证: its gaps are unported features
+  (`GlbTerrainBuilder`, `GlbLevelBuilder`, morph targets, blend-shape emission), not a missing
+  test, so a stronger test does not close it.
+- Parity ledger: 404 rows, **380 verified, 24 non-verified**, DUPES=0, MALFORMED=0, gate OPEN.
+- **When closing a 已实现但未验证 row, read its own 已知差异 and verification columns first.** The
+  gate is usually a specific named assertion; closing anything else does not count, and closing
+  the wrong thing is worse than leaving it open.
+- **Next, in priority order:**
+  1. `EXP-GLB-001`'s named gaps: `GlbTerrainBuilder`, `GlbLevelBuilder` (scene-level GLB), morph
+     targets, blend-shape emission. These are real implementation work.
+  2. `PROC-ANIM-*` and `RES-ANIM-001`, then `RES-TEXTURE-001`, `RES-MODEL-001`,
+     `EXPORT-UNITY-001` - all `实现中` or 已实现但未验证 and needing implementation.
+  3. `/Scenes/View` still returns 501. The frozen view needs a scene's name, path, GUID and
+     collection links; `SceneDefinitionPlan` (`src/processing/scene_collections.rs`) already
+     carries name/path/guid and `WorkspaceSceneDefinition::collection_file_indices()` carries the
+     membership. The work is that `load_game` does not run `process_workspace_scenes_and_prefabs`
+     (only the export workflow does), so the scene view needs that processing added to the load
+     path - a larger change than a single route.
+- **Process reminders:** commit a passing unit before any cleanup; and editing a LF-normalised
+  file with a PowerShell writer introduces CRLF, which Git's warning catches - normalize before
+  committing.
+- Do not run rustfmt on `src/main_tests_01.rs` or `src/main_tests_03.rs`.
+- Verified: 1834 library + 199 bin tests, 0 failed; warnings-denied Clippy exit 0.
+
 ## Latest current checkpoint - 2026-10-16 (failed-file pages, and a load-path divergence fixed)
 
 - `PRODUCT-FAILEDFILE-TAB-001` is 已验证. `/FailedFiles/View` and `/FailedFiles/StackTrace` are
