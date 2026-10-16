@@ -1,5 +1,37 @@
 # Validation log
 
+## 2026-10-16 - Texture payload tail: measurements narrowed, still open (no code change)
+
+- Outcome: another round spent on the hand-written Texture2D payload tail; **no commit of
+  product or test code** (the tree is left at `306e81e`). Recorded here because the
+  measurements rule out several hypotheses and should save the next attempt real time.
+- Established by direct instrumentation this round:
+  1. The **TypeTree side is correct**. Printing the reader's own parsed view shows the exact
+     dumped order with correct parenting: `m_Name`(1) `Array/size/data`(2-4) ... `m_GLTextureSettings`(23)
+     `m_LightmapFormat`(30) `m_ColorSpace`(31) `m_PlatformBlob`(32) `image data`(36)
+     `m_StreamData`(39). So the fixture tree is not the problem.
+  2. The writer's payload offsets are self-consistent and match the tree order: `m_Name` ends
+     at 4, `m_ColorSpace` at 81..84, `m_PlatformBlob` count at 84..88, `image data` length at
+     88, pixels 92..100, then `m_StreamData`.
+  3. The decoder nevertheless reports `m_StreamData.path` at **byte offset 92** (reading the
+     fixture's own pixels `0A 14 1E FF` as `-14806006`), i.e. it arrives ~8 bytes before the
+     writer's `m_StreamData`.
+  4. That offset stayed **exactly 92 across four different payload layouts** (empty
+     `m_PlatformBlob` at 4 bytes and at 8 bytes; `m_StreamData` before and after the pixels;
+     with and without extra alignment words). An offset that does not move when the bytes
+     before it change is strong evidence the divergence is *not* where it appears, which is
+     why the attempts in this round were reverted rather than forced.
+- Ruled out: wrong tree parenting (fixed in `306e81e` and verified), wrong node column
+  parsing, node order in the payload, and `m_PlatformBlob` sizing. Next thing to check is the
+  `m_CompleteImageSize`/`m_ImageCount`/`m_TextureDimension` gate - if the decoder derives an
+  image byte count from those fields it may skip or over-read the `image data` block before
+  reaching `m_StreamData` at all.
+- Method note for the next attempt: `TEXFIX_DEBUG=1` plus the `PRODUCTION|` line added in
+  `306e81e`'s test gives the decode error and offset in one run; that is cheaper than
+  re-deriving offsets by hand.
+- Verified after the revert: `cargo test --locked --bin assetripper-rs` - 195 bin tests,
+  0 failed. Working tree clean; HEAD == origin/main == `306e81e`.
+
 ## 2026-10-16 - Texture fixture subtree rebuilt; production-layout payload tail still open
 
 - Outcome: the reference TypeTree fixture now emits a **correctly parented tree**, which the

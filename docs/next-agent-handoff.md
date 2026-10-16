@@ -1,5 +1,23 @@
 # RustAssetRipper hand-off — 2026-10-16
 
+## Latest current checkpoint - 2026-10-16 (texture payload: hypotheses ruled out, next lead given)
+
+- No code change this round; the tree is at `306e81e` and green. The value is the narrowed
+  search, recorded in full in `docs/validation-log.md`:
+  - The **fixture TypeTree is verified correct** — the reader's own parsed view matches the
+    dump exactly (`m_PlatformBlob`→`image data`→`m_StreamData` with right parenting).
+  - The writer's payload offsets are self-consistent with that order.
+  - The decoder still lands on `m_StreamData.path` at **byte offset 92**, and that number did
+    **not move across four different payload layouts**. Do not keep re-arranging the tail:
+    an offset that is invariant to the preceding bytes means the divergence is elsewhere.
+  - **Next lead to check:** the `m_CompleteImageSize` / `m_ImageCount` /
+    `m_TextureDimension` gate - the decoder may derive an image byte count from those and
+    skip/over-read `image data` before ever reaching `m_StreamData`.
+- Debug recipe: run the fixture test with `TEXFIX_DEBUG=1`; the `PRODUCTION|` line prints the
+  decode error and offset in one run.
+- Do not run rustfmt on `src/main_tests_01.rs` (not clean at HEAD; a whole-file run reformats
+  1500+ unrelated lines).
+
 ## Latest current checkpoint - 2026-10-16 (texture tree fixed; payload tail open)
 
 - `make_reference_texture_file` now emits a **correctly parented** TypeTree. The dump rows
