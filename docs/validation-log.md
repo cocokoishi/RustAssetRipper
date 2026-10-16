@@ -6236,3 +6236,25 @@ These results do not pass the first-phase gate. The reference .NET solution buil
   `/StackTrace`, `/Scenes/View`, `/Export/PrimaryContent`. Failed-entry test data still
   needs crafted inputs (loads fail closed on container errors). Unity Editor
   import/runtime and UABEA remain blocked (license/tooling), unchanged by this increment.
+## 2026-10-16 - Asset pages open with the information section (`/Assets/View`)
+
+- Scope: the snapshot carries the numeric class ID per asset row; `GET /Assets/View`
+  renders the display name with the collection link and the path, class-number and
+  class-name rows (the frozen Information tab's portable core). The scene link, the
+  original/override/bundle path rows and the per-type custom rows need the live asset
+  graph, and the remaining eleven tabs need their own data ports; all are recorded open
+  rather than partially rendered. Unresolvable assets keep the baseline 404. No
+  export-path behavior changes; no sample, oracle or third-party code touched.
+- Frozen reference: `Pages/Assets/` (`ViewPage` with its twelve tabs, `InformationTab`,
+  `AssetAPI.TryGetAssetFromQuery`), `IUnityObjectBase` identity members.
+- Commands run (worktree `main-work`, detached, HEAD == origin/main before this change):
+  1. The fixture end-to-end follows a real asset link and asserts the information page
+     (numeric class 114, class name, collection link) plus the per-kind asset 404.
+  2. `cargo test --locked --workspace` - 1822 library + 193 bin tests, 0 failed, 1 ignored.
+  3. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+  4. `rustfmt --edition 2021 --check` on each touched file - clean; `git diff --check` -
+     exit 0.
+- Open after this increment: the eleven remaining asset tabs plus the `/Assets/*` data
+  routes, `/FailedFiles/View` + `/StackTrace`, `/Scenes/View`, `/Export/PrimaryContent`.
+  Unity Editor import/runtime and UABEA remain blocked (license/tooling), unchanged by
+  this increment.

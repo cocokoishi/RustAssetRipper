@@ -66,13 +66,7 @@ fn get(state: &mut WebState, request: &Request) -> Response {
         "/Bundles/View" => bundles_view(state, request),
         "/Collections/View" => collections_view(state, request),
         "/Collections/Count" => collections_count(state, request),
-        "/Assets/View" => pending_tree_view::<AssetPath>(
-            state,
-            request,
-            "/Assets/View",
-            |tree, path| tree.asset_exists(path),
-            |path| format!("Asset could not be resolved: {}", path.to_diagnostic()),
-        ),
+        "/Assets/View" => assets_view(state, request),
         "/Resources/View" => resources_view(state, request),
         "/Resources/Data" => resources_data(state, request),
         "/FailedFiles/View" => pending_tree_view::<FailedFilePath>(
@@ -265,6 +259,34 @@ fn collections_view(state: &mut WebState, request: &Request) -> Response {
         .with_status(404);
     };
     match pages::collection_page(state, tree, bundle_index, position, &path) {
+        Some(page) => Response::html(page),
+        None => Response::internal_error(format!(
+            "The bundle tree disagrees with the resolved path {}.",
+            path.to_diagnostic()
+        )),
+    }
+}
+
+/// `GET /Assets/View`: render the resolved asset's information section.
+///
+/// Only the identity section is wired so far; the remaining asset tabs wait for their
+/// own data ports.
+fn assets_view(state: &mut WebState, request: &Request) -> Response {
+    let path = match tree_gates::<AssetPath>(state, request) {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
+    let Some(tree) = loaded_tree(state) else {
+        return Response::internal_error("A game is loaded but its bundle tree is missing.");
+    };
+    let Some((bundle_index, position, row)) = tree.resolve_asset(&path) else {
+        return Response::text(format!(
+            "Asset could not be resolved: {}",
+            path.to_diagnostic()
+        ))
+        .with_status(404);
+    };
+    match pages::asset_page(state, tree, bundle_index, position, row, &path) {
         Some(page) => Response::html(page),
         None => Response::internal_error(format!(
             "The bundle tree disagrees with the resolved path {}.",
@@ -776,6 +798,28 @@ mod tests {
             assert!(collection.contains("/Assets/View?Path="), "{collection}");
             assert!(collection.contains("MonoBehaviour"), "{collection}");
 
+            // A resolved asset renders its information section with the numeric
+            // class ID, the class name and the collection link.
+            let asset_hrefs = anchor_hrefs(&collection, "/Assets/View?Path=");
+            assert!(!asset_hrefs.is_empty());
+            let response = get(&mut state, &asset_hrefs[0]);
+            assert_eq!(response.status(), 200);
+            let asset = String::from_utf8(response.body().to_vec()).expect("pages are UTF-8");
+            assert!(asset.contains("<h1>"), "{asset}");
+            assert!(asset.contains(">114<"), "{asset}");
+            assert!(asset.contains("MonoBehaviour"), "{asset}");
+            assert!(asset.contains("/Collections/View?Path="), "{asset}");
+            let missing_asset = format!(
+                "/Assets/View?Path={}",
+                url_encode("{\"C\":{\"B\":{\"P\":[0]},\"I\":0},\"D\":999999}")
+            );
+            let response = get(&mut state, &missing_asset);
+            assert_eq!(response.status(), 404);
+            assert_eq!(
+                response.body(),
+                b"Asset could not be resolved: AssetPath { CollectionPath = CollectionPath { BundlePath = {\"P\":[0]}, Index = 0 }, PathID = 999999 }"
+            );
+
             // Searching the class finds every fixture asset (both loaded copies),
             // case-insensitively.
             for query in ["MonoBehaviour", "MONOBEHAVIOUR", "mono"] {
@@ -847,6 +891,25 @@ mod tests {
             rest = tail.strip_prefix("</a>").unwrap_or(tail);
         }
         texts
+    }
+
+    /// Every `href="PREFIX..."` link target starting with `href_prefix`, in order.
+    fn anchor_hrefs(page: &str, href_prefix: &str) -> Vec<String> {
+        let mut hrefs = Vec::new();
+        let mut rest = page;
+        let marker = format!("href=\"{href_prefix}");
+        while let Some(start) = rest.find(marker.as_str()) {
+            let after_marker = rest.get(start + marker.len()..).unwrap_or("");
+            let Some(end) = after_marker.find('"') else {
+                break;
+            };
+            hrefs.push(format!(
+                "{href_prefix}{}",
+                after_marker.get(..end).unwrap_or("")
+            ));
+            rest = after_marker.get(end..).unwrap_or("");
+        }
+        hrefs
     }
 
     fn request_with_body(target: &str, body: &str) -> Request {

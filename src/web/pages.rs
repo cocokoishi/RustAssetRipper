@@ -684,6 +684,64 @@ pub fn collection_page(
     Some(layout(state, &collection.name, inner.as_str()))
 }
 
+/// The asset page's information section: the display name with the collection link and
+/// the path, class-number and class-name rows.
+///
+/// `bundle_index`, `position` and `row` address the resolved asset and `path` is its
+/// `AssetPath`. The remaining asset tabs (audio, image, model, text, font, video, YAML,
+/// JSON, hex, dependencies, development) wait for their own data ports; the page renders
+/// the identity section rather than leaving the route pending. A `None` return means the
+/// tree disagrees with the resolved address.
+pub fn asset_page(
+    state: &WebState,
+    tree: &super::tree::BundleTree,
+    bundle_index: usize,
+    position: usize,
+    row: usize,
+    path: &assetripper::web_paths::AssetPath,
+) -> Option<String> {
+    use assetripper::web_paths::collection_view_url;
+
+    let bundle = tree.bundle(bundle_index)?;
+    let collection = bundle.collections.get(position)?;
+    let asset = collection.assets.get(row)?;
+    if asset.path_id != path.path_id {
+        return None;
+    }
+    let mut inner = Html::new();
+    inner.element("h1", &[], &asset.best_name);
+
+    inner.element("h2", &[], &t(state, "asset_tab_information"));
+    inner.open("table", &[("class", "table")]);
+    inner.open("tbody", &[]);
+    inner.open("tr", &[]);
+    inner.element("th", &[], &t(state, "collection"));
+    inner.open("td", &[]);
+    tree_link(
+        &mut inner,
+        &collection_view_url(&path.collection),
+        &collection.name,
+    );
+    inner.close("td");
+    inner.close("tr");
+    inner.open("tr", &[]);
+    inner.element("th", &[], &t(state, "path_id"));
+    inner.element("td", &[], &asset.path_id.to_string());
+    inner.close("tr");
+    inner.open("tr", &[]);
+    inner.element("th", &[], &t(state, "class_id_type_number"));
+    inner.element("td", &[], &asset.class_id.to_string());
+    inner.close("tr");
+    inner.open("tr", &[]);
+    inner.element("th", &[], &t(state, "class_id_type_name"));
+    inner.element("td", &[], &asset.class_name);
+    inner.close("tr");
+    inner.close("tbody");
+    inner.close("table");
+
+    Some(layout(state, &asset.best_name, inner.as_str()))
+}
+
 /// The resource page: the fixed file name, its bundle, the byte size and a download.
 ///
 /// `position` addresses the resource in the bundle at `bundle_index`, `path` is its
@@ -1282,6 +1340,7 @@ mod tests {
                         collection_name: "managed.assets".to_owned(),
                         asset: TreeAsset {
                             path_id: 7,
+                            class_id: 114,
                             class_name: "MonoBehaviour".to_owned(),
                             best_name: "ManagedRoot".to_owned(),
                         },

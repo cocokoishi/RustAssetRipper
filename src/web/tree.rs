@@ -84,6 +84,8 @@ pub struct TreeCollection {
 pub struct TreeAsset {
     /// The object path ID, mirroring `IUnityObjectBase.PathID`.
     pub path_id: i64,
+    /// The numeric class ID, mirroring `IUnityObjectBase.ClassID`.
+    pub class_id: i32,
     /// The source `ClassName` for the object.
     pub class_name: String,
     /// The display name, mirroring `IUnityObjectBase.GetBestName`.
@@ -358,20 +360,18 @@ impl BundleTree {
             .map(|_| (bundle, position))
     }
 
-    /// Whether the asset path names an existing object, mirroring `TryGetAsset`.
-    pub fn asset_exists(&self, path: &AssetPath) -> bool {
-        let Some((bundle, position)) = self.resolve_collection(&path.collection) else {
-            return false;
-        };
-        self.bundles
-            .get(bundle)
-            .and_then(|bundle| bundle.collections.get(position))
-            .is_some_and(|collection| {
-                collection
-                    .assets
-                    .iter()
-                    .any(|asset| asset.path_id == path.path_id)
-            })
+    /// Resolve an asset to its bundle, collection and row, mirroring `TryGetAsset`.
+    pub fn resolve_asset(&self, path: &AssetPath) -> Option<(usize, usize, usize)> {
+        let (bundle, position) = self.resolve_collection(&path.collection)?;
+        let row = self
+            .bundles
+            .get(bundle)?
+            .collections
+            .get(position)?
+            .assets
+            .iter()
+            .position(|asset| asset.path_id == path.path_id)?;
+        Some((bundle, position, row))
     }
 
     /// The `BundlePath` of the bundle at `index`, or `None` when out of range.
@@ -486,12 +486,11 @@ fn asset_row(
 ) -> TreeAsset {
     let path_id = info.path_id;
     let Some(object) = objects.get(file_index, object_index) else {
-        let class_name = info.class_id.map_or_else(
-            || object_class_name(info.raw_type_id, None),
-            |class_id| object_class_name(i32::from(class_id), None),
-        );
+        let class_id = info.class_id.map(i32::from).unwrap_or(info.raw_type_id);
+        let class_name = object_class_name(class_id, None);
         return TreeAsset {
             path_id,
+            class_id,
             class_name: class_name.clone(),
             best_name: class_name,
         };
@@ -508,6 +507,7 @@ fn asset_row(
     });
     TreeAsset {
         path_id,
+        class_id,
         class_name,
         best_name,
     }

@@ -1,5 +1,21 @@
 # RustAssetRipper hand-off — 2026-10-16
 
+## Latest current checkpoint - 2026-10-16 (asset pages open with information)
+
+- Worktree: `main-work` detached; HEAD == origin/main before this slice. Snapshot rows
+  carry the numeric class ID; `GET /Assets/View` renders the display name with the
+  collection link and the path/class-number/class-name rows. The scene link, path rows,
+  per-type custom rows and the other eleven tabs are recorded open.
+- Verification evidence: fixture end-to-end follows a real asset link (class 114 page,
+  per-kind 404); full `cargo test --locked --workspace` **1822 lib + 193 bin, 0 failed**,
+  1 ignored; Clippy `-D warnings` exit 0; per-file rustfmt and `git diff --check` clean.
+  Full evidence in `docs/validation-log.md`.
+- Privacy: no sample content/paths/names in code, tests, docs or commit text. Mapping table
+  stays outside the repo; history untouched.
+- Next move: the eleven remaining asset tabs plus `/Assets/*` data routes,
+  `/FailedFiles/View` + `/StackTrace`, `/Scenes/View`, `/Export/PrimaryContent`. Then
+  re-run the Phase-1 gap rules (9 `实现中` + 1 blocked + 16 `已实现但未验证`).
+
 ## Latest current checkpoint - 2026-10-16 (resource pages serve names, sizes, bytes)
 
 - Worktree: `main-work` detached; HEAD == origin/main before this slice. The snapshot
