@@ -17,9 +17,23 @@ try {
         $rgArguments += @('-g', $glob)
     }
 
-    $sourceFiles = @(& rg @rgArguments)
-    if ($LASTEXITCODE -gt 1) {
-        throw "rg failed while listing source files (exit $LASTEXITCODE)."
+    if (Get-Command rg -ErrorAction SilentlyContinue) {
+        # ripgrep respects .gitignore, so build outputs such as target/ stay out of the list.
+        $sourceFiles = @(& rg @rgArguments)
+        if ($LASTEXITCODE -gt 1) {
+            throw "rg failed while listing source files (exit $LASTEXITCODE)."
+        }
+    } else {
+        # The GitHub-hosted runner images do not ship ripgrep. Fall back to the
+        # tracked-file list so this check still runs instead of erroring out.
+        $extensions = @($sourceGlobs | ForEach-Object { $_.Substring(1) })
+        $sourceFiles = @(
+            & git ls-files |
+                Where-Object { $extensions -contains [System.IO.Path]::GetExtension($_).ToLowerInvariant() }
+        )
+        if ($LASTEXITCODE -ne 0) {
+            throw "git ls-files failed while listing source files (exit $LASTEXITCODE)."
+        }
     }
 
     $oversizedFiles = foreach ($sourceFile in $sourceFiles) {

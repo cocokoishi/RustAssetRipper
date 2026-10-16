@@ -1,5 +1,12 @@
 # Validation log
 
+## 2026-10-15 CI oversized-source check no longer depends on ripgrep
+
+- Problem: the `ledger` job's "Report oversized source files" step ran `tools/check-source-file-lengths.ps1`, which listed files with `rg --files`. The GitHub-hosted runner images do not ship ripgrep, so on every run the script threw `The term 'rg' is not recognized` and exited 2. The step carries `continue-on-error: true`, so the run stayed green while the check silently never ran.
+- Change: the script now uses ripgrep when it is on `PATH` and otherwise falls back to `git ls-files` filtered to the same source extensions. The tracked-file list already excludes build output, matching ripgrep's `.gitignore` behavior.
+- Local result: `pwsh -NoProfile -File ./tools/check-source-file-lengths.ps1` (with no ripgrep on `PATH`, exercising the fallback) now prints the real first-party list — eleven files over 2000 lines, including `src/export/project_workflow/animator_controller.rs` (4013) and `src/export/project_workflow/object_routing.rs` (2911) — plus one vendored `vendor/dotnetdll-0.3.0/src/resolution/read.rs` (3253), and exits 1 to signal the report. The step remains report-only in CI.
+- Not run: the hosted workflow for this change is pending the next push.
+
 ## 2026-10-15 Predefined Mesh redirect implemented and unit-tested
 
 - Source trace: the frozen `PredefinedAssetCache` keys a Mesh by `MeshKey(Name, VertexCount, SubMeshCount, LocalAABB)` (`PredefinedAssetCache.cs` 64 and 532-539) and `EngineAssetsExporter.TryCreateCollection` redirects any non-sprite asset whose key is present (`EngineAssetsExporter.cs` 122-126). The audited world writes two extra mesh assets because the port had no mesh table, shifting every later shared-name suffix by two.
