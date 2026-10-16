@@ -71,6 +71,7 @@ fn get(state: &mut WebState, request: &Request) -> Response {
         "/Assets/Text" => assets_text(state, request),
         "/Assets/Binary" => assets_binary(state, request),
         "/Assets/Image" => assets_image(state, request),
+        "/Assets/Json" => assets_json(state, request),
         "/Resources/View" => resources_view(state, request),
         "/Resources/Data" => resources_data(state, request),
         "/FailedFiles/View" => pending_tree_view::<FailedFilePath>(
@@ -421,6 +422,41 @@ fn assets_image(state: &mut WebState, request: &Request) -> Response {
     }
     match state.render_texture_image(asset.file_index, asset.object_index, format) {
         Ok(bytes) => Response::bytes("image/png", bytes),
+        Err(diagnostic) => Response::internal_error(diagnostic),
+    }
+}
+
+/// `GET /Assets/Json`: serve the resolved asset as JSON.
+///
+/// The frozen route walks the asset and answers `application/json`; an asset with no decoded
+/// payload answers an empty body, matching the frozen route's empty reply.
+fn assets_json(state: &mut WebState, request: &Request) -> Response {
+    let path = match tree_gates::<AssetPath>(state, request) {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
+    let Some(tree) = loaded_tree(state) else {
+        return Response::internal_error("A game is loaded but its bundle tree is missing.");
+    };
+    let Some((bundle_index, position, row)) = tree.resolve_asset(&path) else {
+        return Response::text(format!(
+            "Asset could not be resolved: {}",
+            path.to_diagnostic()
+        ))
+        .with_status(404);
+    };
+    let Some(asset) = tree
+        .bundle(bundle_index)
+        .and_then(|bundle| bundle.collections.get(position))
+        .and_then(|collection| collection.assets.get(row))
+    else {
+        return Response::internal_error(format!(
+            "The bundle tree disagrees with the resolved path {}.",
+            path.to_diagnostic()
+        ));
+    };
+    match state.render_asset_json(asset.file_index, asset.object_index) {
+        Ok(text) => Response::json(text),
         Err(diagnostic) => Response::internal_error(diagnostic),
     }
 }
@@ -1144,6 +1180,28 @@ mod tests {
             // payload rather than only trusting the container header: a wrong format or a
             // truncated payload still starts with a valid signature.
             assert_png_pixels(&png, 2, 1, &[10, 20, 30, 255, 40, 50, 60, 255]);
+
+            // Every asset also carries a JSON tab, so the texture asset's JSON is the
+            // decoded payload as an object. The route and the inlined tab must agree.
+            assert!(
+                texture_asset.contains("/Assets/Json?Path="),
+                "{texture_asset}"
+            );
+            let texture_json =
+                texture_hrefs[0].replacen("/Assets/View?Path=", "/Assets/Json?Path=", 1);
+            let response = get(&mut state, &texture_json);
+            assert_eq!(response.status(), 200);
+            assert_eq!(response.content_type(), "application/json; charset=utf-8");
+            let json = String::from_utf8(response.body().to_vec()).expect("JSON is UTF-8");
+            assert!(json.starts_with('{'), "{json}");
+            assert!(json.contains("\"m_Width\": 2"), "{json}");
+            assert!(json.contains("\"m_Height\": 1"), "{json}");
+            // The inlined tab escapes the JSON for HTML, so the page carries the escaped
+            // quotes while the route serves the raw ones.
+            assert!(
+                texture_asset.contains("&quot;m_Width&quot;: 2"),
+                "{texture_asset}"
+            );
 
             // Searching the class finds every fixture asset (both loaded copies),
             // case-insensitively.

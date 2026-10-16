@@ -465,6 +465,11 @@ pub fn asset_binary_url(path: &AssetPath) -> String {
     format!("/Assets/Binary?Path={}", url_encode(&path.to_json()))
 }
 
+/// The JSON URL the frozen `AssetAPI.GetJsonUrl` builds for `path`.
+pub fn asset_json_url(path: &AssetPath) -> String {
+    format!("/Assets/Json?Path={}", url_encode(&path.to_json()))
+}
+
 /// The image URL the frozen `AssetAPI.GetImageUrl` builds for `path`.
 ///
 /// The frozen builder appends an `Extension` parameter when the caller supplies one, and

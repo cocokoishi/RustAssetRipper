@@ -1,5 +1,26 @@
 # RustAssetRipper hand-off — 2026-10-16
 
+## Latest current checkpoint - 2026-10-16 (JSON tab + DefaultJsonWalker port)
+
+- `PRODUCT-ASSET-JSON-TAB-001` is 已验证. New `src/export/json_walker.rs` ports
+  `AssetRipper.Export.PrimaryContent.DefaultJsonWalker`, and `GET /Assets/Json` plus the asset
+  page's JSON tab are wired. Eight unit tests pin the reference's shape rules; the routes e2e
+  checks both the inlined tab and the route body.
+- Watch out for the two easy-to-miss rules if you extend the walker:
+  - `SerializedValue::Char(u16)` is a UTF-16 code unit and renders as a character, not a number.
+  - A value following an explicit prefix uses `visit_value_inline`, not `visit_value`; the latter
+    re-positions and corrupts the output. `visit_value`/`visit_string`/`visit_bool` position,
+    `visit_value_inline` does not.
+- Parity ledger is 398 rows, 373 verified, 25 non-verified, gate OPEN.
+- **Next, in the same style:** the `/Assets/Yaml` route and YAML tab (the frozen `YamlTab` is
+  also `Enabled => true`, and the port already has Unity YAML machinery in
+  `src/export/value_yaml`), then the remaining conditional tabs — audio, model, font, video,
+  development — which need `HasAudioData`/`HasModelData`/`HasFontData`/`HasVideoData`
+  equivalents, and the frozen URL constants are `Base + "/Audio"`, `"/Model.glb"`, `"/Font"`,
+  `"/Video"`, `"/Yaml"`.
+- Do not run rustfmt on `src/main_tests_01.rs` (not clean at HEAD).
+- Verified: 1830 library + 195 bin tests, 0 failed; warnings-denied Clippy exit 0.
+
 ## Latest current checkpoint - 2026-10-16 (image route landed and pixel-verified)
 
 - `PRODUCT-ASSET-IMAGE-ROUTE-001` is 已验证. `GET /Assets/Image` serves a decoded class-28

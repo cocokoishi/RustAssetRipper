@@ -20,6 +20,7 @@ pub mod ids;
 pub mod importer_fields;
 pub mod importer_reads;
 pub mod io_wiring;
+pub mod json_walker;
 pub mod manager_flows;
 pub mod meta;
 pub mod meta_emission;

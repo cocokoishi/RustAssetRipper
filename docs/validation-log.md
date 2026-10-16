@@ -1,5 +1,38 @@
 # Validation log
 
+## 2026-10-16 - JSON tab and route: the DefaultJsonWalker port (PRODUCT-ASSET-JSON-TAB-001)
+
+- Outcome: the JSON tab is landed and verified. It is the second of the asset tabs the frozen
+  `AssetsPage` always shows (the frozen `JsonTab` is `Enabled => true`), so it applies to every
+  asset rather than one class.
+- New module `src/export/json_walker.rs` ports
+  `AssetRipper.Export.PrimaryContent.DefaultJsonWalker`. The reference writes JSON while walking;
+  this port exposes the same enter/divide/exit/visit surface (`JsonWalker`) *and* a direct
+  `write_json_value` over a decoded `SerializedValue`, because the port already holds decoded
+  values and does not need a second traversal. Both produce the same text for an asset.
+- Reference shape rules pinned by eight focused unit tests: one tab per level; a newline before
+  every closing brace; `[]` and `{}` collapsed for empty containers; an empty container's
+  `enter_*` reports that no exit follows; non-string dictionary keys as
+  `{"Key": .., "Value": ..}`; `byte[]` as Base64 with the standard alphabet and padding; strings
+  and field names JavaScript-string-encoded with non-ASCII left intact; the spaced
+  `{ "m_FileID": n, "m_PathID": m }` PPtr form; and `float`/`double` printed with the invariant
+  shortest form that omits a trailing `.0`.
+- Two details worth recording because they are easy to get wrong:
+  - A `char` leaf is a **UTF-16 code unit** (`SerializedValue::Char(u16)`), not a number, so it
+    renders as a character.
+  - A value that follows an explicit prefix (`"name": `, `"Key": `) must not re-position itself,
+    so the walker exposes `visit_value_inline` alongside `visit_value`. Mixing them was the one
+    real bug found while writing the tests, and the tests caught it immediately.
+- Routes: `GET /Assets/Json` answers `application/json; charset=utf-8`. The asset page inlines
+  the same text into the JSON tab's `pre` (escaped) and links the route from the save button.
+- Evidence: the routes end-to-end test asserts the inlined tab carries
+  `&quot;m_Width&quot;: 2` and that the route body carries `"m_Width": 2` / `"m_Height": 1` for
+  the texture fixture. Full workspace: **1830** library + 195 bin tests, 0 failed, 1 ignored;
+  warnings-denied Clippy exit 0; changed files rustfmt clean.
+- Parity: new row `PRODUCT-ASSET-JSON-TAB-001` marked 已验证. `parity-report.ps1` reports
+  TOTAL=398, RECOGNIZED=398, NONVERIFIED=25, GATE=OPEN, DUPES=0, MALFORMED=0. `PRODUCT-GUI-001`
+  stays 已实现但未验证: the YAML, audio, model, font, video and development tabs are still open.
+
 ## 2026-10-16 - The browser image route works end to end (PRODUCT-ASSET-IMAGE-ROUTE-001)
 
 - Outcome: the `/Assets/Image` tab is landed and **verified at pixel level**, closing the arc

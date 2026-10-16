@@ -845,6 +845,22 @@ pub fn asset_page(
         inner.raw("</div>");
     }
 
+    // The JSON tab is enabled for every asset in the frozen page, which points a `pre` at the
+    // JSON route. Without client code the port inlines the same text the route serves, so the
+    // tab shows the object and a save button rather than requiring a second fetch.
+    if let Ok(text) = state.render_asset_json(asset.file_index, asset.object_index) {
+        use assetripper::web_paths::asset_json_url;
+
+        inner.element("h2", &[], &t(state, "json"));
+        inner.open("pre", &[("class", "bg-dark-subtle rounded-3 p-2")]);
+        inner.text(&text);
+        inner.close("pre");
+        let file_name = format!("{}.json", asset.best_name);
+        inner.raw("<div class=\"text-center\">");
+        save_button(&mut inner, state, &asset_json_url(path), &file_name);
+        inner.raw("</div>");
+    }
+
     Some(layout(state, &asset.best_name, inner.as_str()))
 }
 

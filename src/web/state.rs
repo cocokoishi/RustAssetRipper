@@ -296,6 +296,33 @@ impl WebState {
         })
     }
 
+    /// Render one asset's decoded payload as JSON.
+    ///
+    /// The frozen `DefaultJsonWalker` writes JSON during traversal; this port builds the same
+    /// text from the decoded value, which carries the same ordered fields and PPtr shapes. An
+    /// asset with no decoded payload reads as an empty string, matching the frozen route's
+    /// empty reply for assets it cannot walk.
+    pub fn render_asset_json(
+        &self,
+        file_index: usize,
+        object_index: usize,
+    ) -> Result<String, String> {
+        let game = self
+            .loaded
+            .as_ref()
+            .ok_or_else(|| "no game is loaded".to_owned())?;
+        let object = game
+            .objects
+            .get(file_index, object_index)
+            .ok_or_else(|| "the snapshot row has no workspace object".to_owned())?;
+        let Ok(payload) = object.payload.as_ref() else {
+            return Ok(String::new());
+        };
+        let mut output = String::new();
+        assetripper::export::json_walker::write_json_value(&mut output, &payload.root);
+        Ok(output)
+    }
+
     /// Render one texture asset to an encoded image.
     ///
     /// The requested format comes from the route's `Extension` parameter; an unrecognized
