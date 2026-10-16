@@ -739,6 +739,49 @@ pub fn asset_page(
     inner.close("tbody");
     inner.close("table");
 
+    if !asset.dependencies.is_empty() {
+        inner.element("h2", &[], &t(state, "asset_tab_dependencies"));
+        inner.open("table", &[("class", "table")]);
+        inner.open("tbody", &[]);
+        for dependency in &asset.dependencies {
+            inner.open("tr", &[]);
+            inner.element("th", &[], &dependency.field_path);
+            inner.open("td", &[]);
+            match dependency.target {
+                super::tree::TreeDependencyTarget::Asset {
+                    bundle,
+                    position,
+                    row,
+                } => {
+                    use assetripper::web_paths::{asset_view_url, AssetPath, CollectionPath};
+
+                    let target = tree
+                        .bundle(bundle)?
+                        .collections
+                        .get(position)?
+                        .assets
+                        .get(row)?;
+                    let target_path = AssetPath {
+                        collection: CollectionPath {
+                            bundle: tree.bundle_path(bundle)?,
+                            index: position as i32,
+                        },
+                        path_id: target.path_id,
+                    };
+                    tree_link(&mut inner, &asset_view_url(&target_path), &target.best_name);
+                }
+                super::tree::TreeDependencyTarget::Missing => {
+                    // The frozen page writes this text unlocalized.
+                    inner.text("Missing");
+                }
+            }
+            inner.close("td");
+            inner.close("tr");
+        }
+        inner.close("tbody");
+        inner.close("table");
+    }
+
     Some(layout(state, &asset.best_name, inner.as_str()))
 }
 
@@ -1343,6 +1386,7 @@ mod tests {
                             class_id: 114,
                             class_name: "MonoBehaviour".to_owned(),
                             best_name: "ManagedRoot".to_owned(),
+                            dependencies: Vec::new(),
                         },
                     }],
                 ),

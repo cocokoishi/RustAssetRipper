@@ -809,6 +809,40 @@ mod tests {
             assert!(asset.contains(">114<"), "{asset}");
             assert!(asset.contains("MonoBehaviour"), "{asset}");
             assert!(asset.contains("/Collections/View?Path="), "{asset}");
+            // The reference edges render with field paths and target links: the
+            // managed cross-file edge resolves to the nested ReferencedRoot
+            // through the same source-order lookup the export uses, even though
+            // the duplicate input names would stay ambiguous under a plain
+            // name join.
+            assert!(asset.contains(">Dependencies<"), "{asset}");
+            assert!(
+                asset.contains("references.RefIds[0].data.m_Asset"),
+                "{asset}"
+            );
+            let target = format!(
+                "/Assets/View?Path={}",
+                url_encode("{\"C\":{\"B\":{\"P\":[0,0]},\"I\":0},\"D\":900}")
+            );
+            assert!(asset.contains(&target), "{asset}");
+            assert!(asset.contains(">ReferencedRoot<"), "{asset}");
+            assert!(!asset.contains(">Missing<"), "{asset}");
+
+            // The referenced asset itself has no outgoing references: no section.
+            let nested_view = format!(
+                "/Collections/View?Path={}",
+                url_encode("{\"B\":{\"P\":[0,0]},\"I\":0}")
+            );
+            let response = get(&mut state, &nested_view);
+            assert_eq!(response.status(), 200);
+            let nested_collection =
+                String::from_utf8(response.body().to_vec()).expect("pages are UTF-8");
+            let nested_hrefs = anchor_hrefs(&nested_collection, "/Assets/View?Path=");
+            assert_eq!(nested_hrefs.len(), 1);
+            let response = get(&mut state, &nested_hrefs[0]);
+            assert_eq!(response.status(), 200);
+            let nested_asset =
+                String::from_utf8(response.body().to_vec()).expect("pages are UTF-8");
+            assert!(!nested_asset.contains(">Dependencies<"), "{nested_asset}");
             let missing_asset = format!(
                 "/Assets/View?Path={}",
                 url_encode("{\"C\":{\"B\":{\"P\":[0]},\"I\":0},\"D\":999999}")

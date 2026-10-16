@@ -37,6 +37,9 @@ use assetripper::export::project_exporter::object_class_name;
 use assetripper::export::project_workflow::object_asset_name;
 use assetripper::io::special_names::fix_file_identifier;
 use assetripper::serialized_file::object_workspace::ObjectWorkspace;
+use assetripper::serialized_file::reference_graph::{
+    MultiFilePPtrResolution, MultiFileReferenceGraphLimits,
+};
 use assetripper::serialized_file::workspace::{SerializedFileWorkspace, WorkspaceRootResourceFile};
 use assetripper::web_paths::{AssetPath, BundlePath, CollectionPath, FailedFilePath, ResourcePath};
 
@@ -90,6 +93,32 @@ pub struct TreeAsset {
     pub class_name: String,
     /// The display name, mirroring `IUnityObjectBase.GetBestName`.
     pub best_name: String,
+    /// The non-null reference edges in field traversal order.
+    pub dependencies: Vec<TreeDependency>,
+}
+
+/// One reference edge: the field path with its resolved target.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TreeDependency {
+    /// The field path within the decoded object value.
+    pub field_path: String,
+    /// The linked asset, or `Missing` when the target has no tree address.
+    pub target: TreeDependencyTarget,
+}
+
+/// Where a dependency edge points.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TreeDependencyTarget {
+    /// A snapshot asset address: bundle, collection position, asset row.
+    Asset {
+        bundle: usize,
+        position: usize,
+        row: usize,
+    },
+    /// The target resolves to nothing the tree can link, mirroring the frozen
+    /// `Missing` text (this covers dangling, ambiguous and engine-asset targets,
+    /// none of which the frozen page links either).
+    Missing,
 }
 
 /// One bundle in the snapshot. Lists keep source order; pages sort copies for display.
@@ -205,6 +234,8 @@ impl BundleTree {
         // Collections follow each bundle's direct list, which is the source of order;
         // every container file must be claimed by exactly one of them.
         let mut claimed = vec![false; files.len()];
+        // Every file's collection address, for dependency targets below.
+        let mut file_address: Vec<Option<(usize, usize)>> = vec![None; files.len()];
         for (workspace_index, bundle) in bundles.iter().enumerate() {
             let snapshot_index = workspace_index + 1;
             for &file_index in &bundle.direct_collection_file_indices {
@@ -227,13 +258,20 @@ impl BundleTree {
                 tree_bundles[snapshot_index]
                     .collections
                     .push(collection_from_file(file_index, file, objects));
+                file_address[file_index] = Some((
+                    snapshot_index,
+                    tree_bundles[snapshot_index].collections.len() - 1,
+                ));
             }
         }
         for (file_index, file) in files.iter().enumerate() {
             match file.container_bundle_index {
-                None => tree_bundles[0]
-                    .collections
-                    .push(collection_from_file(file_index, file, objects)),
+                None => {
+                    tree_bundles[0]
+                        .collections
+                        .push(collection_from_file(file_index, file, objects));
+                    file_address[file_index] = Some((0, tree_bundles[0].collections.len() - 1));
+                }
                 Some(bundle_index) => {
                     if bundle_index >= bundles.len() {
                         return Err(TreeError::new(format!(
@@ -248,6 +286,8 @@ impl BundleTree {
                 }
             }
         }
+
+        resolve_dependency_edges(workspace, &file_address, &mut tree_bundles)?;
 
         // Mounted resources follow the same direct-list discipline.
         let mut resource_claimed = vec![false; resources.len()];
@@ -493,6 +533,7 @@ fn asset_row(
             class_id,
             class_name: class_name.clone(),
             best_name: class_name,
+            dependencies: Vec::new(),
         };
     };
     let class_id = object.factory.class_id;
@@ -510,7 +551,80 @@ fn asset_row(
         class_id,
         class_name,
         best_name,
+        dependencies: Vec::new(),
     }
+}
+
+/// Resolve every recorded reference edge through the workspace's own joined
+/// reference graph, so cross-file targets link exactly like the export's own
+/// resolution does (source bundle-collection lookup order, first match wins).
+///
+/// Null edges are skipped: the frozen page lists no row for them and the section shows
+/// only when a non-null edge exists. Every other resolution that names no snapshot
+/// asset (dangling, ambiguous, invalid and predefined-engine targets) becomes `Missing`,
+/// matching the frozen page, which links only targets its own lookup resolves.
+fn resolve_dependency_edges(
+    workspace: &SerializedFileWorkspace,
+    file_address: &[Option<(usize, usize)>],
+    tree_bundles: &mut [TreeBundle],
+) -> Result<(), TreeError> {
+    let joined = workspace
+        .reference_graph(MultiFileReferenceGraphLimits::default())
+        .map_err(|error| TreeError::new(format!("reference join failed: {error}")))?;
+    for reference in joined.references() {
+        if matches!(reference.resolution, MultiFilePPtrResolution::Null) {
+            continue;
+        }
+        let target = match reference.resolution {
+            MultiFilePPtrResolution::Object {
+                target_file_index,
+                target_object_index,
+            } => file_address
+                .get(target_file_index)
+                .copied()
+                .flatten()
+                .and_then(|(bundle, position)| {
+                    tree_bundles
+                        .get(bundle)?
+                        .collections
+                        .get(position)
+                        .filter(|collection| collection.assets.get(target_object_index).is_some())
+                        .map(|_| TreeDependencyTarget::Asset {
+                            bundle,
+                            position,
+                            row: target_object_index,
+                        })
+                })
+                .unwrap_or(TreeDependencyTarget::Missing),
+            _ => TreeDependencyTarget::Missing,
+        };
+        let dependency = TreeDependency {
+            field_path: reference.field_path.to_owned(),
+            target,
+        };
+        let row = file_address
+            .get(reference.source_file_index)
+            .copied()
+            .flatten()
+            .and_then(|(bundle, position)| {
+                tree_bundles
+                    .get_mut(bundle)?
+                    .collections
+                    .get_mut(position)?
+                    .assets
+                    .get_mut(reference.source_object_index)
+            });
+        match row {
+            Some(row) => row.dependencies.push(dependency),
+            None => {
+                return Err(TreeError::new(format!(
+                    "reference source file {} object {} has no snapshot row",
+                    reference.source_file_index, reference.source_object_index
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The display name for a container bundle without a fixed name.

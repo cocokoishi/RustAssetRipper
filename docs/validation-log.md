@@ -6258,3 +6258,41 @@ These results do not pass the first-phase gate. The reference .NET solution buil
   routes, `/FailedFiles/View` + `/StackTrace`, `/Scenes/View`, `/Export/PrimaryContent`.
   Unity Editor import/runtime and UABEA remain blocked (license/tooling), unchanged by
   this increment.
+## 2026-10-16 - Asset pages list reference edges (`Dependencies` section)
+
+- Scope: the snapshot resolves every recorded reference edge through the workspace's own
+  joined reference graph (the same source-order first-match lookup the export uses) and
+  the asset page renders a dependencies section with field paths plus target links; null
+  edges are skipped, and dangling/ambiguous/invalid/engine targets render the frozen
+  literal `Missing` text. No export-path behavior changes; no sample, oracle or
+  third-party code touched.
+- Frozen ground truth (new probe `tools/probes/asset-deps/`, committed; run locally, read
+  only the committed synthetic fixture): on the fixture bundle the frozen tab enumerates
+  five null PPtrs per MonoBehaviour and shows no section (`ENABLED=False` for both
+  objects), because the empty assembly manager decodes no managed structures. The port
+  recovers managed layouts without assemblies, so it additionally surfaces the managed
+  `references.RefIds[0].data.m_Asset` edge; that edge's true target is the nested
+  ReferencedRoot (proven by the export, which emits it with the target GUID), and the
+  page links it. Run with the workspace baseline outputs since the isolated `ar-ref`
+  tree lost its prebuilt GUI assemblies (the established anim-convert probe currently
+  fails to build there too): `dotnet run --project tools/probes/asset-deps/
+  AssetDepsProbe.csproj -c Release -p:ReferenceRoot='<workspace>/AssetRipper' --
+  <fixture bundle>`.
+- First-match finding: a plain name join reports `AmbiguousDependency` for the edge when
+  the same bundle is loaded twice, which would render a `Missing` row the frozen tab
+  never shows (its `Dependencies[fileIndex]` lookup is deterministic). The snapshot
+  therefore reuses `workspace.reference_graph()` with the source-order lookup, and the
+  end-to-end pins the link (exact nested-asset href, `ReferencedRoot` text, no `Missing`
+  text) plus the negative case (the referenced asset has no section).
+- Commands run (worktree `main-work`, detached, HEAD == origin/main before this change):
+  1. The fixture end-to-end asserts the dependency link, field path, link absence on the
+     target, and the per-kind asset 404.
+  2. `cargo test --locked --workspace` - 1822 library + 193 bin tests, 0 failed, 1 ignored.
+  3. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+  4. `rustfmt --edition 2021 --check` on each touched file - clean; `git diff --check` -
+     exit 0.
+- Open after this increment: the ten remaining asset tabs plus the `/Assets/*` data
+  routes, `/FailedFiles/View` + `/StackTrace`, `/Scenes/View`, `/Export/PrimaryContent`.
+  The literal `Missing` row has no fixture coverage (every fixture edge resolves); it
+  mirrors the frozen text for targets the lookup cannot resolve. Unity Editor
+  import/runtime and UABEA remain blocked (license/tooling), unchanged by this increment.

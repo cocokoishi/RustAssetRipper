@@ -1,5 +1,25 @@
 # RustAssetRipper hand-off — 2026-10-16
 
+## Latest current checkpoint - 2026-10-16 (asset pages list reference edges)
+
+- Worktree: `main-work` detached; HEAD == origin/main before this slice. The snapshot
+  resolves edges through the workspace's own joined graph (source-order first-match, same
+  as export); the asset page renders a dependencies section with field paths and target
+  links, `Missing` only for unresolvable targets. New committed probe
+  `tools/probes/asset-deps/` pins the frozen ground truth on the fixture (five nulls per
+  object, no section without assemblies); the port surfaces the managed edge the export
+  proves and links it. Note: the isolated `ar-ref` tree lost its prebuilt GUI assemblies,
+  so probes currently need `-p:ReferenceRoot='<workspace>/AssetRipper'`.
+- Verification evidence: fixture end-to-end pins the exact nested link, the negative
+  case, and the 404; full `cargo test --locked --workspace` **1822 lib + 193 bin,
+  0 failed**, 1 ignored; Clippy `-D warnings` exit 0; per-file rustfmt and
+  `git diff --check` clean. Full evidence in `docs/validation-log.md`.
+- Privacy: no sample content/paths/names in code, tests, docs or commit text. Mapping table
+  stays outside the repo; history untouched.
+- Next move: the ten remaining asset tabs plus `/Assets/*` data routes,
+  `/FailedFiles/View` + `/StackTrace`, `/Scenes/View`, `/Export/PrimaryContent`. Then
+  re-run the Phase-1 gap rules (9 `实现中` + 1 blocked + 16 `已实现但未验证`).
+
 ## Latest current checkpoint - 2026-10-16 (asset pages open with information)
 
 - Worktree: `main-work` detached; HEAD == origin/main before this slice. Snapshot rows
