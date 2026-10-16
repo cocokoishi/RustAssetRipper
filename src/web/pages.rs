@@ -739,6 +739,192 @@ pub fn asset_page(
     inner.close("tbody");
     inner.close("table");
 
+    if asset.has_audio {
+        // The frozen audio tab renders a player plus a save button: the playback source asks for
+        // WAV so any browser can play it, while the save source takes the decoder's own format.
+        use assetripper::web_paths::asset_audio_url;
+
+        inner.element("h2", &[], &t(state, "asset_tab_audio"));
+        let playback_url = asset_audio_url(path, Some("wav"));
+        inner.raw("<div class=\"text-center\">");
+        inner.raw(&format!(
+            "<audio controls=\"\" src=\"{}\" style=\"width:100%\"></audio>",
+            super::html::escape(&playback_url)
+        ));
+        inner.raw("</div>");
+        let save_url = asset_audio_url(path, None);
+        // The save name uses the decoded extension when the clip decodes, else `.ogg` is a
+        // reasonable placeholder that the route itself never confirms.
+        let file_name = match state.read_asset_audio(asset.file_index, asset.object_index, None) {
+            Ok(Some((_bytes, extension))) => format!("{}.{extension}", asset.best_name),
+            _ => format!("{}.ogg", asset.best_name),
+        };
+        inner.raw("<div class=\"text-center\">");
+        save_button(&mut inner, state, &save_url, &file_name);
+        inner.raw("</div>");
+    }
+
+    if asset.has_image {
+        // The frozen image tab shows the texture with a download button. Without client
+        // code the port points the preview straight at the image route, so the browser
+        // fetches the same encoded bytes the download button serves.
+        use super::html::escape;
+        use assetripper::web_paths::asset_image_url;
+
+        inner.element("h2", &[], &t(state, "asset_tab_image"));
+        let file_name = format!("{}.png", asset.best_name);
+        let png_url = asset_image_url(path, Some("png"));
+        inner.raw("<div class=\"text-center\">");
+        inner.raw(&format!(
+            "<a href=\"{}\" download=\"{}\"><img src=\"{}\" style=\"object-fit:contain; width:100%; height:100%\"></a>",
+            escape(&png_url),
+            escape(&file_name),
+            escape(&png_url)
+        ));
+        inner.raw("</div>");
+        inner.raw("<div class=\"text-center\">");
+        save_button(&mut inner, state, &png_url, &file_name);
+        inner.raw("</div>");
+    }
+
+    if asset.has_model {
+        // The frozen model tab is a Babylon canvas whose `glb-data-path` attribute the page
+        // script reads. The port keeps that contract: the attribute names the route, so the
+        // same client script (or any consumer of the attribute) loads the GLB.
+        use super::html::escape;
+        use assetripper::web_paths::asset_model_url;
+
+        inner.element("h2", &[], &t(state, "asset_tab_model"));
+        let model_url = asset_model_url(path);
+        inner.raw("<table width=\"100%\" height=\"100%\"><tbody><tr><td align=\"center\" valign=\"middle\">");
+        inner.raw(&format!(
+            "<canvas id=\"babylonRenderCanvas\" style=\"width: 100%; height: 100vh;\" glb-data-path=\"{}\"></canvas>",
+            escape(&model_url)
+        ));
+        inner.raw("</td></tr></tbody></table>");
+    }
+
+    if asset.has_text {
+        // The frozen text tab shows the asset text with a download button; without
+        // client code the port inlines the text instead of fetching it from the data
+        // route. Shader and MonoScript texts stay open, so only TextAsset rows qualify.
+        use assetripper::export::resource_extensions::text_export_extension;
+        use assetripper::web_paths::asset_text_url;
+
+        inner.element("h2", &[], &t(state, "asset_tab_text"));
+        let bytes = state
+            .read_asset_text(asset.file_index, asset.object_index)
+            .ok()
+            .flatten()
+            .filter(|script| !script.is_empty())?;
+        let text = String::from_utf8_lossy(&bytes);
+        inner.open("pre", &[("class", "bg-dark-subtle rounded-3 p-2")]);
+        inner.text(text.as_ref());
+        inner.close("pre");
+        let file_name = format!(
+            "{}.{}",
+            asset.best_name,
+            text_export_extension(None, state.settings().export.text_export_mode, &text)
+        );
+        inner.raw("<div class=\"text-center\">");
+        save_button(&mut inner, state, &asset_text_url(path), &file_name);
+        inner.raw("</div>");
+    }
+
+    if asset.has_font {
+        // The frozen font tab previews the typeface with a heading styled by the font family
+        // and a save button. The port keeps that shape and adds the linked preview so the
+        // browser can load the served font.
+        use super::html::escape;
+        use assetripper::web_paths::asset_font_url;
+
+        let Ok(Some(font)) = state.read_asset_font(asset.file_index, asset.object_index) else {
+            return Some(layout(state, &asset.best_name, inner.as_str()));
+        };
+        let extension = font.extension;
+        inner.element("h2", &[], &t(state, "asset_tab_font"));
+        let font_url = asset_font_url(path);
+        inner.raw("<div class=\"text-center\">");
+        inner.raw(&format!(
+            "<style>@font-face {{ font-family: 'asset-preview'; src: url('{}'); }}</style>",
+            escape(&font_url)
+        ));
+        inner.raw(&format!(
+            "<h1 style=\"font-family: 'asset-preview', {};\">Preview Font (0, 1, 2, 3, 4, 5, 6, 7, 8, 9)</h1>",
+            escape(&asset.best_name)
+        ));
+        let file_name = format!("{}.{extension}", asset.best_name);
+        save_button(&mut inner, state, &font_url, &file_name);
+        inner.raw("</div>");
+    }
+
+    if asset.has_video {
+        // The frozen video tab renders a `<video>` whose single source points at the route,
+        // then a save button beneath it. The served MIME is `video/<extension>` taken from the
+        // clip's original path, so the source type comes from the same read as the bytes.
+        use super::html::escape;
+        use assetripper::web_paths::asset_video_url;
+
+        let Ok(Some(video)) = state.read_asset_video(asset.file_index, asset.object_index) else {
+            return Some(layout(state, &asset.best_name, inner.as_str()));
+        };
+        inner.element("h2", &[], &t(state, "asset_tab_video"));
+        let video_url = asset_video_url(path);
+        inner.raw("<div class=\"text-center\">");
+        inner.raw(&format!(
+            "<video controls=\"\" style=\"width:100%; height:100%\"><source src=\"{}\" type=\"video/{}\"></video>",
+            escape(&video_url),
+            escape(&video.extension)
+        ));
+        let file_name = format!("{}.{}", asset.best_name, video.extension);
+        save_button(&mut inner, state, &video_url, &file_name);
+        inner.raw("</div>");
+    }
+
+    // The YAML tab is also enabled for every asset in the frozen page, and it names its download
+    // `<best name>.asset`, so the tab and its save button use that extension rather than `.yaml`.
+    if let Ok(text) = state.render_asset_yaml(asset.file_index, asset.object_index) {
+        use assetripper::web_paths::asset_yaml_url;
+
+        inner.element("h2", &[], &t(state, "yaml"));
+        inner.open("pre", &[("class", "bg-dark-subtle rounded-3 p-2")]);
+        inner.text(&text);
+        inner.close("pre");
+        let file_name = format!("{}.asset", asset.best_name);
+        inner.raw("<div class=\"text-center\">");
+        save_button(&mut inner, state, &asset_yaml_url(path), &file_name);
+        inner.raw("</div>");
+    }
+
+    // The JSON tab is enabled for every asset in the frozen page, which points a `pre` at the
+    // JSON route. Without client code the port inlines the same text the route serves, so the
+    // tab shows the object and a save button rather than requiring a second fetch.
+    if let Ok(text) = state.render_asset_json(asset.file_index, asset.object_index) {
+        use assetripper::web_paths::asset_json_url;
+
+        inner.element("h2", &[], &t(state, "json"));
+        inner.open("pre", &[("class", "bg-dark-subtle rounded-3 p-2")]);
+        inner.text(&text);
+        inner.close("pre");
+        let file_name = format!("{}.json", asset.best_name);
+        inner.raw("<div class=\"text-center\">");
+        save_button(&mut inner, state, &asset_json_url(path), &file_name);
+        inner.raw("</div>");
+    }
+
+    if asset.has_binary {
+        // The frozen hex tab is only a download button (its `Url` is empty when the
+        // asset has no binary data, which the flag above already mirrors), so the port
+        // keeps that shape with no inline content.
+        use assetripper::web_paths::asset_binary_url;
+
+        inner.element("h2", &[], &t(state, "asset_tab_hex"));
+        let file_name = format!("{}.dat", asset.best_name);
+        inner.raw("<div class=\"text-center\">");
+        save_button(&mut inner, state, &asset_binary_url(path), &file_name);
+        inner.raw("</div>");
+    }
+
     if !asset.dependencies.is_empty() {
         inner.element("h2", &[], &t(state, "asset_tab_dependencies"));
         inner.open("table", &[("class", "table")]);
@@ -780,192 +966,6 @@ pub fn asset_page(
         }
         inner.close("tbody");
         inner.close("table");
-    }
-
-    if asset.has_text {
-        // The frozen text tab shows the asset text with a download button; without
-        // client code the port inlines the text instead of fetching it from the data
-        // route. Shader and MonoScript texts stay open, so only TextAsset rows qualify.
-        use assetripper::export::resource_extensions::text_export_extension;
-        use assetripper::web_paths::asset_text_url;
-
-        inner.element("h2", &[], &t(state, "asset_tab_text"));
-        let bytes = state
-            .read_asset_text(asset.file_index, asset.object_index)
-            .ok()
-            .flatten()
-            .filter(|script| !script.is_empty())?;
-        let text = String::from_utf8_lossy(&bytes);
-        inner.open("pre", &[("class", "bg-dark-subtle rounded-3 p-2")]);
-        inner.text(text.as_ref());
-        inner.close("pre");
-        let file_name = format!(
-            "{}.{}",
-            asset.best_name,
-            text_export_extension(None, state.settings().export.text_export_mode, &text)
-        );
-        inner.raw("<div class=\"text-center\">");
-        save_button(&mut inner, state, &asset_text_url(path), &file_name);
-        inner.raw("</div>");
-    }
-
-    if asset.has_binary {
-        // The frozen hex tab is only a download button (its `Url` is empty when the
-        // asset has no binary data, which the flag above already mirrors), so the port
-        // keeps that shape with no inline content.
-        use assetripper::web_paths::asset_binary_url;
-
-        inner.element("h2", &[], &t(state, "asset_tab_hex"));
-        let file_name = format!("{}.dat", asset.best_name);
-        inner.raw("<div class=\"text-center\">");
-        save_button(&mut inner, state, &asset_binary_url(path), &file_name);
-        inner.raw("</div>");
-    }
-
-    if asset.has_audio {
-        // The frozen audio tab renders a player plus a save button: the playback source asks for
-        // WAV so any browser can play it, while the save source takes the decoder's own format.
-        use assetripper::web_paths::asset_audio_url;
-
-        inner.element("h2", &[], &t(state, "asset_tab_audio"));
-        let playback_url = asset_audio_url(path, Some("wav"));
-        inner.raw("<div class=\"text-center\">");
-        inner.raw(&format!(
-            "<audio controls=\"\" src=\"{}\" style=\"width:100%\"></audio>",
-            super::html::escape(&playback_url)
-        ));
-        inner.raw("</div>");
-        let save_url = asset_audio_url(path, None);
-        // The save name uses the decoded extension when the clip decodes, else `.ogg` is a
-        // reasonable placeholder that the route itself never confirms.
-        let file_name = match state.read_asset_audio(asset.file_index, asset.object_index, None) {
-            Ok(Some((_bytes, extension))) => format!("{}.{extension}", asset.best_name),
-            _ => format!("{}.ogg", asset.best_name),
-        };
-        inner.raw("<div class=\"text-center\">");
-        save_button(&mut inner, state, &save_url, &file_name);
-        inner.raw("</div>");
-    }
-
-    if asset.has_model {
-        // The frozen model tab is a Babylon canvas whose `glb-data-path` attribute the page
-        // script reads. The port keeps that contract: the attribute names the route, so the
-        // same client script (or any consumer of the attribute) loads the GLB.
-        use super::html::escape;
-        use assetripper::web_paths::asset_model_url;
-
-        inner.element("h2", &[], &t(state, "asset_tab_model"));
-        let model_url = asset_model_url(path);
-        inner.raw("<table width=\"100%\" height=\"100%\"><tbody><tr><td align=\"center\" valign=\"middle\">");
-        inner.raw(&format!(
-            "<canvas id=\"babylonRenderCanvas\" style=\"width: 100%; height: 100vh;\" glb-data-path=\"{}\"></canvas>",
-            escape(&model_url)
-        ));
-        inner.raw("</td></tr></tbody></table>");
-    }
-
-    if asset.has_video {
-        // The frozen video tab renders a `<video>` whose single source points at the route,
-        // then a save button beneath it. The served MIME is `video/<extension>` taken from the
-        // clip's original path, so the source type comes from the same read as the bytes.
-        use super::html::escape;
-        use assetripper::web_paths::asset_video_url;
-
-        let Ok(Some(video)) = state.read_asset_video(asset.file_index, asset.object_index) else {
-            return Some(layout(state, &asset.best_name, inner.as_str()));
-        };
-        inner.element("h2", &[], &t(state, "asset_tab_video"));
-        let video_url = asset_video_url(path);
-        inner.raw("<div class=\"text-center\">");
-        inner.raw(&format!(
-            "<video controls=\"\" style=\"width:100%; height:100%\"><source src=\"{}\" type=\"video/{}\"></video>",
-            escape(&video_url),
-            escape(&video.extension)
-        ));
-        let file_name = format!("{}.{}", asset.best_name, video.extension);
-        save_button(&mut inner, state, &video_url, &file_name);
-        inner.raw("</div>");
-    }
-
-    if asset.has_font {
-        // The frozen font tab previews the typeface with a heading styled by the font family
-        // and a save button. The port keeps that shape and adds the linked preview so the
-        // browser can load the served font.
-        use super::html::escape;
-        use assetripper::web_paths::asset_font_url;
-
-        let Ok(Some(font)) = state.read_asset_font(asset.file_index, asset.object_index) else {
-            return Some(layout(state, &asset.best_name, inner.as_str()));
-        };
-        let extension = font.extension;
-        inner.element("h2", &[], &t(state, "asset_tab_font"));
-        let font_url = asset_font_url(path);
-        inner.raw("<div class=\"text-center\">");
-        inner.raw(&format!(
-            "<style>@font-face {{ font-family: 'asset-preview'; src: url('{}'); }}</style>",
-            escape(&font_url)
-        ));
-        inner.raw(&format!(
-            "<h1 style=\"font-family: 'asset-preview', {};\">Preview Font (0, 1, 2, 3, 4, 5, 6, 7, 8, 9)</h1>",
-            escape(&asset.best_name)
-        ));
-        let file_name = format!("{}.{extension}", asset.best_name);
-        save_button(&mut inner, state, &font_url, &file_name);
-        inner.raw("</div>");
-    }
-
-    if asset.has_image {
-        // The frozen image tab shows the texture with a download button. Without client
-        // code the port points the preview straight at the image route, so the browser
-        // fetches the same encoded bytes the download button serves.
-        use super::html::escape;
-        use assetripper::web_paths::asset_image_url;
-
-        inner.element("h2", &[], &t(state, "asset_tab_image"));
-        let file_name = format!("{}.png", asset.best_name);
-        let png_url = asset_image_url(path, Some("png"));
-        inner.raw("<div class=\"text-center\">");
-        inner.raw(&format!(
-            "<a href=\"{}\" download=\"{}\"><img src=\"{}\" style=\"object-fit:contain; width:100%; height:100%\"></a>",
-            escape(&png_url),
-            escape(&file_name),
-            escape(&png_url)
-        ));
-        inner.raw("</div>");
-        inner.raw("<div class=\"text-center\">");
-        save_button(&mut inner, state, &png_url, &file_name);
-        inner.raw("</div>");
-    }
-
-    // The JSON tab is enabled for every asset in the frozen page, which points a `pre` at the
-    // JSON route. Without client code the port inlines the same text the route serves, so the
-    // tab shows the object and a save button rather than requiring a second fetch.
-    if let Ok(text) = state.render_asset_json(asset.file_index, asset.object_index) {
-        use assetripper::web_paths::asset_json_url;
-
-        inner.element("h2", &[], &t(state, "json"));
-        inner.open("pre", &[("class", "bg-dark-subtle rounded-3 p-2")]);
-        inner.text(&text);
-        inner.close("pre");
-        let file_name = format!("{}.json", asset.best_name);
-        inner.raw("<div class=\"text-center\">");
-        save_button(&mut inner, state, &asset_json_url(path), &file_name);
-        inner.raw("</div>");
-    }
-
-    // The YAML tab is also enabled for every asset in the frozen page, and it names its download
-    // `<best name>.asset`, so the tab and its save button use that extension rather than `.yaml`.
-    if let Ok(text) = state.render_asset_yaml(asset.file_index, asset.object_index) {
-        use assetripper::web_paths::asset_yaml_url;
-
-        inner.element("h2", &[], &t(state, "yaml"));
-        inner.open("pre", &[("class", "bg-dark-subtle rounded-3 p-2")]);
-        inner.text(&text);
-        inner.close("pre");
-        let file_name = format!("{}.asset", asset.best_name);
-        inner.raw("<div class=\"text-center\">");
-        save_button(&mut inner, state, &asset_yaml_url(path), &file_name);
-        inner.raw("</div>");
     }
 
     // The Development tab is the last in the frozen page and needs no route: it is a one-row

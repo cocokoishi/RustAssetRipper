@@ -1408,6 +1408,7 @@ mod tests {
                 texture_asset.contains("/Assets/Image?Path="),
                 "{texture_asset}"
             );
+            assert_frozen_asset_tab_order(&texture_asset);
             let texture_image =
                 texture_hrefs[0].replacen("/Assets/View?Path=", "/Assets/Image?Path=", 1)
                     + "&Extension=png";
@@ -1616,7 +1617,10 @@ mod tests {
             let response = get(&mut state, &mesh_hrefs[0]);
             assert_eq!(response.status(), 200);
             let mesh_asset = String::from_utf8(response.body().to_vec()).expect("pages are UTF-8");
-            assert!(mesh_asset.contains("/Assets/Model.glb?Path="), "{mesh_asset}");
+            assert!(
+                mesh_asset.contains("/Assets/Model.glb?Path="),
+                "{mesh_asset}"
+            );
             assert!(mesh_asset.contains("babylonRenderCanvas"), "{mesh_asset}");
             let mesh_path = mesh_hrefs[0].replacen("/Assets/View?Path=", "", 1);
             let response = get(&mut state, &format!("/Assets/Model.glb?Path={mesh_path}"));
@@ -1711,6 +1715,52 @@ mod tests {
     }
 
     /// Every `href="PREFIX..."` link target starting with `href_prefix`, in order.
+    /// The frozen `ViewPage` builds its tabs in a fixed order, and the port must match it so the
+    /// browser surface presents the same sequence. Each tab is conditional, so a given asset
+    /// renders a *subsequence* of the frozen list; this checks that whatever tabs appear do so in
+    /// the frozen relative order, rather than requiring every tab to be present.
+    fn assert_frozen_asset_tab_order(page: &str) {
+        let headings = [
+            "Information",
+            "Audio",
+            "Image",
+            "Model",
+            "Text",
+            "Font",
+            "Video",
+            // The frozen tabs take their names from `Localization.Yaml` and `Localization.Json`,
+            // which render as `Yaml` and `Json` rather than upper-case acronyms.
+            "Yaml",
+            "Json",
+            "Hex",
+            "Dependencies",
+            "Development",
+        ];
+        let mut cursor = 0;
+        let mut seen = Vec::new();
+        for heading in headings {
+            let marker = format!("<h2>{heading}</h2>");
+            if let Some(found) = page[cursor..].find(marker.as_str()) {
+                cursor += found + marker.len();
+                seen.push(heading);
+            }
+        }
+        // Every `<h2>` the page renders must be one of the frozen headings, and the ones found
+        // must be in the frozen relative order - which the forward scan above already enforces.
+        for (index, _) in page.match_indices("<h2>") {
+            let rest = &page[index + 4..];
+            let Some(end) = rest.find("</h2>") else {
+                panic!("an `<h2>` is unclosed: {page}");
+            };
+            let text = &rest[..end];
+            assert!(
+                headings.contains(&text),
+                "the page renders a tab heading outside the frozen list: {text}"
+            );
+        }
+        assert!(!seen.is_empty(), "the page renders no tabs: {page}");
+    }
+
     fn anchor_hrefs(page: &str, href_prefix: &str) -> Vec<String> {
         let mut hrefs = Vec::new();
         let mut rest = page;

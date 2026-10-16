@@ -1,5 +1,27 @@
 # Validation log
 
+## 2026-10-16 - Asset tab order aligned with the frozen `ViewPage`, and pinned by a test
+
+- Outcome: the port now emits the asset tabs in exactly the frozen order. `ViewPage` builds them
+  as Information, Audio, Image, Model, Text, Font, Video, Yaml, Json, Hex, Dependencies,
+  Development; the port had been emitting Information, Dependencies, Text, Hex, Audio, Model,
+  Video, Font, Image, Json, Yaml, Development.
+- The reorder is mechanical but the sections are long, so it was done by rebuilding the file from
+  named line ranges rather than by hand. A new `assert_frozen_asset_tab_order` helper then pins
+  the result in the e2e, so the order cannot drift again silently.
+- The helper encodes two things worth keeping:
+  - Every tab is conditional, so an asset renders a **subsequence** of the frozen list - a
+    texture has no Audio tab. The check therefore requires the tabs that appear to appear in the
+    frozen relative order, and separately asserts that every `<h2>` the page renders is one of
+    the frozen headings.
+  - The frozen display names come from `Localization.Yaml` and `Localization.Json`, which render
+    as **`Yaml` and `Json`**, not as upper-case acronyms. My first version of the helper expected
+    `YAML`/`JSON` and failed; the port was right and the assertion was wrong. Recorded because the
+    acronym spelling is the intuitive guess and the next reader would make it too.
+- Evidence: `cargo test --locked --workspace` - 1834 library + 199 bin tests, 0 failed, 1
+  ignored. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0. Changed
+  files rustfmt clean.
+
 ## 2026-10-16 - Model tab and `/Assets/Model.glb` verified
 
 - Outcome: `PRODUCT-ASSET-MODEL-TAB-001` is 已验证. The last tab in the frozen `ViewPage` list

@@ -1,5 +1,28 @@
 # RustAssetRipper hand-off — 2026-10-16
 
+## Latest current checkpoint - 2026-10-16 (tab order aligned and pinned)
+
+- The asset tab order now matches the frozen `ViewPage` exactly: Information, Audio, Image,
+  Model, Text, Font, Video, Yaml, Json, Hex, Dependencies, Development. The port had a different
+  sequence before this round.
+- `assert_frozen_asset_tab_order` (in the routes e2e) pins it. Two things it encodes: an asset
+  renders a *subsequence* because every tab is conditional, and the frozen display names are
+  **`Yaml`/`Json`** from `Localization.Yaml`/`Localization.Json`, not `YAML`/`JSON`.
+- **Next candidates, in the order I would take them:**
+  1. `/FailedFiles/Stack` - the frozen page links a per-failure stack trace; the view route
+     exists, the stack route does not.
+  2. `/Scenes/View` extras and `/Export/PrimaryContent`.
+  3. The 25-row non-verified queue. Many rows are `实现中` (RES-TEXTURE-001, RES-MODEL-001,
+     EXPORT-UNITY-001, PROC-ANIM-001, PROC-SCENE-001, OBJ-REF-001, SER-TT-ABSENT-001,
+     TYPE-SCRIPT-001, IO-STREAM-001) - those need real implementation, not verification, and are
+     where the remaining product risk actually sits.
+  4. `PRODUCT-GUI-001` can move toward 已验证 once its remaining entry points are covered.
+- **Process reminder from last round:** commit a passing unit before any cleanup. I lost an
+  uncommitted fixture to a careless `git checkout --` and had to rewrite it.
+- Parity ledger: 403 rows, 378 verified, 25 non-verified, gate OPEN.
+- Do not run rustfmt on `src/main_tests_01.rs` or `src/main_tests_03.rs`.
+- Verified: 1834 library + 199 bin tests, 0 failed; warnings-denied Clippy exit 0.
+
 ## Latest current checkpoint - 2026-10-16 (model tab verified; all frozen tabs complete)
 
 - `PRODUCT-ASSET-MODEL-TAB-001` is 已验证. **Every tab in the frozen `ViewPage` list is now
