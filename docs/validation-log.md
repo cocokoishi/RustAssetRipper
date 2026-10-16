@@ -1,5 +1,33 @@
 # Validation log
 
+## 2026-10-16 - Texture fixture decodes under production layouts (metaFlag was dropped)
+
+- Outcome: **solved.** The reference Texture2D fixture now decodes both through the file
+  TypeTree route and through the full `load_game` production route, and the production leg is
+  asserted rather than printed. This closes the blocker that consumed rounds 17-20.
+- Root cause: the fixture builder parsed the dump's `NODE|` rows into a struct with only
+  `level`/`type`/`name`/`byteSize` and wrote every node through the six-argument `put_node`,
+  which hard-codes `meta_flags = 0`. That silently discarded the dump's `metaFlag` column.
+  The column is load-bearing: `type_tree.rs::field_aligns` ORs `ALIGN_BYTES_FLAG` (0x4000)
+  across a field's node chain and `codec.rs::decode_field` then pads to the next 4-byte
+  boundary. This record marks `m_DownscaleFallback`, `m_StreamingMipmaps`,
+  `m_StreamingMipmapsPriority` and `image data`, so dropping the column removed three
+  alignment pads and shifted every following field.
+- How it was pinned down: a temporary trace in `decode_field` printed each field's end offset
+  and its `align_after` flag. Before the fix every field showed `align_after=false` even
+  though the dump says the flags are set - which located the loss in the builder rather than
+  in the payload. After carrying `meta_flag` through, the trace shows `align_after=true`
+  exactly for the four flagged fields, `m_ColorSpace` ends at 80, and the payload's
+  `image data` length word sits at that same 80 (`debug_assert_eq!` now pins it).
+- Also fixed along the way: the fixture's tree was previously the *wrong record* (round 20),
+  so this is the second and final correction to that artifact. Nothing else about the payload
+  changed - the earlier "4 bytes short" symptom was entirely this dropped column plus the
+  wrong record.
+- Evidence: `cargo test --locked --workspace` - 1822 library + 195 bin tests, 0 failed, 1
+  ignored. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0. The
+  production assertion is `the texture must decode under production layouts too`.
+- Next: the `/Assets/Image` web route, which this fixture was blocking, can now be re-landed.
+
 ## 2026-10-16 - Texture payload: reader offset pinned at 81; three byte-layout leads
 
 - Outcome: no code change (tree restored to green at `d9e83e7`). The value is that the

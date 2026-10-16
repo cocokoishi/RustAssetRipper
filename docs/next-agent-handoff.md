@@ -1,5 +1,29 @@
 # RustAssetRipper hand-off — 2026-10-16
 
+## Latest current checkpoint - 2026-10-16 (texture fixture SOLVED; image route unblocked)
+
+- The texture fixture blocker is **closed**. It decodes through both the file TypeTree route
+  and the full `load_game` production route, and the production leg is asserted
+  (`the texture must decode under production layouts too`).
+- Root cause: the fixture builder wrote every node with the six-argument `put_node`, which
+  hard-codes `meta_flags = 0`, so the dump's `metaFlag` column was silently dropped.
+  `field_aligns` ORs `ALIGN_BYTES_FLAG` (0x4000) over a field's node chain and `decode_field`
+  pads after it; this record marks `m_DownscaleFallback`, `m_StreamingMipmaps`,
+  `m_StreamingMipmapsPriority` and `image data`. Losing the column removed three alignment
+  pads and shifted everything after them. The builder now carries `meta_flag` into
+  `put_node_with_meta`.
+- Debug recipe that found it: a temporary trace in `codec.rs::decode_field` printing each
+  field's end offset and `align_after`. All-false on a tree whose dump says otherwise points
+  at the builder, not the payload. The payload's `image data` length word is pinned at 80 by
+  `debug_assert_eq!`.
+- **Next task, now unblocked:** re-land the `/Assets/Image` web route (the arc from rounds
+  15-17): `src/web/tree.rs` `has_image`, `src/web/state.rs` `read_asset_image_bytes` +
+  `render_texture_image`, `src/web/routes.rs` `/Assets/Image`, `src/web/pages.rs` image
+  section, `src/web_paths.rs` `asset_image_url`. It was reverted only because this fixture
+  could not be trusted; re-apply and verify the routes e2e.
+- Do not run rustfmt on `src/main_tests_01.rs` (not clean at HEAD).
+- Verified: 1822 library + 195 bin tests, 0 failed; warnings-denied Clippy exit 0.
+
 ## Latest current checkpoint - 2026-10-16 (texture payload: exact one-byte gap, three leads)
 
 - No code change; tree green at `d9e83e7` with the corrected fixture. The remaining gap is now

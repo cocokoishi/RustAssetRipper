@@ -1084,15 +1084,11 @@
         );
 
         // The same bytes must also load through the full `load_game` pipeline the web
-        // surface uses, under production layouts, which is what makes the file TypeTree
-        // authoritative rather than the synthetic test substitution.
-        //
-        // The TypeTree side of the fixture is verified above (46 nodes, the dumped
-        // subtree shape, and the decode that reaches the texture fields under the
-        // fallback layout). Under production layouts the reference `m_StreamData` layout
-        // is applied and the hand-written payload is still 4 bytes short at that field,
-        // so the `load_game` leg is recorded as the open item rather than asserted here.
-        // The exact symptom and the measured offsets are in `docs/validation-log.md`.
+        // surface uses, under production layouts. That is the leg that matters: production
+        // resolves class 28 through the reference class database
+        // (`materialize.rs::class_layout` prefers `tpk_trees` over the file TypeTree), so
+        // passing here proves the fixture and payload are right for real files, not just for
+        // the synthetic test layout.
         let _production = super::SourceFactoryLayoutGuard::use_source_factory();
         let directory = TestInputDirectory::new_root();
         let disk_path = directory.join("z-texture.assets");
@@ -1106,26 +1102,29 @@
         let game = super::load_game(std::slice::from_ref(&disk_path), &full, &mut status)
             .expect("load_game mounts the texture");
         let object = game.objects.get(0, 0).expect("the texture object exists");
-        if std::env::var("TEXFIX_DEBUG").is_ok() {
-            eprintln!(
-                "PRODUCTION|ok={}|err={:?}",
-                object.payload.is_ok(),
-                object.payload.as_ref().err().map(|e| e.to_string())
-            );
-        }
+        // This is the leg that matters: production resolves class 28 through the reference
+        // class database, so decoding here proves the fixture is right for real files.
+        assert!(
+            object.payload.is_ok(),
+            "the texture must decode under production layouts too: {:?}",
+            object.payload.as_ref().err().map(|e| e.to_string())
+        );
     }
     /// Build a synthetic Texture2D SerializedFile whose TypeTree is the real release tree.
     ///
-    /// The hand-authored sketch used by the export tests suffices for the class-fallback
-    /// route, but the file-TypeTree route (which the web load takes) reads every node
-    /// including `m_IsReadable`, so a fixture omitting it decodes as `UnreadableObject`.
-    /// This emits the committed 46-node dump verbatim and writes the payload in node order.
+    /// The tree is emitted from the committed dump, and the dump's `metaFlag` column is
+    /// carried through into the node records. That column is load-bearing: the decoder's
+    /// `field_aligns` ORs `ALIGN_BYTES_FLAG` (0x4000) across a field's node chain and pads
+    /// after it, and this record marks `m_DownscaleFallback`, `m_StreamingMipmaps`,
+    /// `m_StreamingMipmapsPriority` and `image data`. Writing zero for every node silently
+    /// removes those bytes, so the payload and the decoder disagree.
     pub(super) fn make_reference_texture_file(width: i32, height: i32, data: &[u8]) -> Vec<u8> {
         struct DumpedNode {
             level: u8,
             type_text: String,
             name_text: String,
             byte_size: i32,
+            meta_flag: u32,
         }
 
         let mut nodes: Vec<DumpedNode> = Vec::new();
@@ -1139,12 +1138,13 @@
             };
             let fields: Vec<&str> = rest.split('|').collect();
             // After the `NODE|` prefix: [0]=version, [1]=level, [2]=type, [3]=name,
-            // [4]=byteSize.
+            // [4]=byteSize, [5]=versionField, [6]=typeFlags, [7]=metaFlag, [8]=nodeIndex.
             nodes.push(DumpedNode {
                 level: fields[1].parse().expect("node level"),
                 type_text: fields[2].to_owned(),
                 name_text: fields[3].to_owned(),
                 byte_size: fields[4].parse().expect("byte size"),
+                meta_flag: fields[7].parse().expect("meta flag"),
             });
         }
         assert_eq!(nodes.len(), 38, "the texture TypeTree fixture has 38 nodes");
@@ -1197,6 +1197,7 @@
                 name_offset,
                 node.byte_size,
                 i32::try_from(index).unwrap(),
+                node.meta_flag,
             ));
         }
         // The preorder walk above must partition the level column into one tree.
@@ -1213,14 +1214,15 @@
         put_i32_le(&mut metadata, 28);
         put_i32_le(&mut metadata, i32::try_from(nodes.len()).unwrap());
         put_i32_le(&mut metadata, i32::try_from(string_buffer.len()).unwrap());
-        for (level, type_offset, name_offset, byte_size, index) in node_records {
-            put_node(
+        for (level, type_offset, name_offset, byte_size, index, meta_flag) in node_records {
+            put_node_with_meta(
                 &mut metadata,
                 level,
                 type_offset,
                 name_offset,
                 byte_size,
                 index,
+                meta_flag,
             );
         }
         metadata.extend_from_slice(&string_buffer);
@@ -1230,17 +1232,20 @@
         put_u32_le(&mut metadata, 0);
 
         // Payload in node order for the 2019.4 class-28 layout the reference selects
-        // (release root 18204): strings are an `i32` length then bytes then align-to-4, and
-        // `TypelessData` is an aligned `i32` length then the bytes, aligned again.
-        //
-        // The emitted tree is verified correct (node count, subtree shape, and the field
-        // list asserted against the reference record). The payload below still does not
-        // satisfy both the file-tree leg and the production-layout leg at once, which is
-        // recorded in `docs/validation-log.md`; the production leg is not asserted.
+        // (release root 18204). The tree carries the dump's `metaFlag` column, so the
+        // decoder's `field_aligns` pads after `m_DownscaleFallback`, `m_StreamingMipmaps`,
+        // `m_StreamingMipmapsPriority` and `image data` (each marks `ALIGN_BYTES_FLAG`).
+        // This writer mirrors that, placing the `image data` length word at offset 84.
         let mut payload = Vec::new();
+        let align = |payload: &mut Vec<u8>| {
+            while !payload.len().is_multiple_of(4) {
+                payload.push(0);
+            }
+        };
         put_i32_le(&mut payload, 0); // m_Name (string: length 0)
         put_i32_le(&mut payload, 0); // m_ForcedFallbackFormat
-        payload.push(0); // m_DownscaleFallback
+        payload.push(0); // m_DownscaleFallback (align-flagged -> pads to 12)
+        align(&mut payload);
         put_i32_le(&mut payload, width); // m_Width
         put_i32_le(&mut payload, height); // m_Height
         put_i32_le(&mut payload, i32::try_from(data.len()).unwrap()); // m_CompleteImageSize
@@ -1249,8 +1254,10 @@
         payload.push(1); // m_IsReadable
         payload.push(0); // m_IgnoreMasterTextureLimit
         payload.push(0); // m_IsPreProcessed
-        payload.push(0); // m_StreamingMipmaps
-        put_i32_le(&mut payload, 0); // m_StreamingMipmapsPriority
+        payload.push(0); // m_StreamingMipmaps (align-flagged -> pads to 32)
+        align(&mut payload);
+        put_i32_le(&mut payload, 0); // m_StreamingMipmapsPriority (align-flagged)
+        align(&mut payload);
         put_i32_le(&mut payload, 1); // m_ImageCount
         put_i32_le(&mut payload, 2); // m_TextureDimension (2D)
         put_i32_le(&mut payload, 1); // m_TextureSettings.m_FilterMode
@@ -1261,18 +1268,20 @@
         put_i32_le(&mut payload, 1); // m_TextureSettings.m_WrapW
         put_i32_le(&mut payload, 1); // m_LightmapFormat
         put_i32_le(&mut payload, 1); // m_ColorSpace
+        debug_assert_eq!(payload.len(), 80, "image data starts where the decoder reports");
         // `image data` carries the pixel bytes; the reader consumes exactly the declared
         // length, so the count must equal the payload actually appended.
         put_i32_le(&mut payload, i32::try_from(data.len()).unwrap()); // image data length
         payload.extend_from_slice(data);
         // m_StreamData is `StreamingInfo`, and in this release tree the leaves are 32-bit:
         // `offset` (unsigned int), `size` (unsigned int), then the `path` string's length
-        // word. The `path` node is the last field, so nothing follows it.
+        // word, which the reader consumes before aligning the whole field.
         put_u32_le(&mut payload, 0); // m_StreamData.offset
         put_u32_le(&mut payload, 0); // m_StreamData.size
         put_i32_le(&mut payload, 0); // m_StreamData.path (string: length 0)
-        // The `path` string still consumes its aligned body tail, which is 3 bytes here.
-        payload.extend_from_slice(&[0u8; 3]);
+        while payload.len() % 4 != 0 {
+            payload.push(0);
+        }
 
         put_i32_le(&mut metadata, i32::try_from(payload.len()).unwrap());
         put_i32_le(&mut metadata, 28);
