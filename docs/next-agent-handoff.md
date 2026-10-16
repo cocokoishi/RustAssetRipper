@@ -1,5 +1,37 @@
 # RustAssetRipper hand-off — 2026-10-16
 
+## Latest current checkpoint - 2026-10-16 (`EXP-GLB-001` gap list corrected; one real gap left)
+
+- `EXP-GLB-001` stays 已实现但未验证, but its 已知差异 column was **wrong about two of four named
+  gaps** and is now accurate:
+  - **`GlbTerrainBuilder` is ported, wired and tested** - `build_terrain_glb_with_limits` is
+    reached from `src/export/res_wiring.rs` and covered by
+    `terrain_plan_reads_the_heightmap_and_scale_through_the_source_builder`;
+    `build_navmesh_glb_with_limits` is covered by
+    `navmesh_plan_reads_height_meshes_and_emits_position_only`. Do not re-implement these.
+  - **Morph targets / blend-shape emission are absent from the reference GLB module itself**
+    (re-verified: `AssetRipper.Export.Modules.Models` has no such code). That is a baseline
+    boundary, not a port gap.
+  - **The one real gap is `GlbLevelBuilder.Build`** - the 301-line scene-level builder that walks
+    Transform hierarchies over many assets and assembles the glTF scene graph. Its supporting
+    kernels are already ported (`references_dynamic_mesh`, `subset_indices`, and
+    `GlbLevelBuilder.GetTextures` in `src/resources/material.rs`), so **start from those**.
+  - **A stale "unported" list is a doc defect.** Before implementing a named gap, check whether it
+    exists; and after implementing one, remove it from the list.
+- `/Scenes/View` still returns 501. The frozen view needs a scene's name, path, GUID and
+  collection links; `SceneDefinitionPlan` carries name/path/guid and
+  `WorkspaceSceneDefinition::collection_file_indices()` carries the membership. The obstacle is
+  that `load_game` never runs `process_workspace_scenes_and_prefabs` - only the export workflow
+  does - so this needs that processing added to the load path, not just a route.
+- Corpus: the anonymous ledger (`docs/acceptance-corpus.md`) is intact and privacy-clean - no
+  original names, no absolute user paths, no content. Corpus replays are local-only and have not
+  been re-run in these web-surface rounds, so per-sample verdicts there predate recent changes.
+- Parity ledger: 404 rows, 380 verified, 24 non-verified, DUPES=0, MALFORMED=0, gate OPEN.
+- **Process reminders:** commit a passing unit before cleanup; PowerShell file writers introduce
+  CRLF into LF-normalised files (Git warns, and `git diff --check` catches trailing blank lines).
+- Do not run rustfmt on `src/main_tests_01.rs` or `src/main_tests_03.rs`.
+- Verified: 1834 library + 199 bin tests, 0 failed; warnings-denied Clippy exit 0.
+
 ## Latest current checkpoint - 2026-10-16 (mesh view closed; non-verified queue at 24)
 
 - `RES-MESH-VIEW-001` is 已验证: its recorded gap was "no version branch is asserted beyond the

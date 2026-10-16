@@ -1,5 +1,39 @@
 # Validation log
 
+## 2026-10-16 - Corrected stale gap claims on `EXP-GLB-001`
+
+- Outcome: the `EXP-GLB-001` row's 已知差异 column asserted four unported features and was
+  **materially wrong about two of them**. Corrected against the code, with no status change: the
+  row stays 已实现但未验证.
+- What the row claimed versus what the code does:
+  - *"`GlbTerrainBuilder` ... remain[s] unported"* - **false**. `build_terrain_glb_with_limits`
+    in `src/resources/glb.rs` is a line-for-line port of `AddTerrainToSceneBuilder`, reached from
+    production at `src/export/res_wiring.rs`, and covered by
+    `terrain_plan_reads_the_heightmap_and_scale_through_the_source_builder` on a two-by-two
+    heightmap with a non-uniform scale. `build_navmesh_glb_with_limits` is likewise wired and
+    covered by `navmesh_plan_reads_height_meshes_and_emits_position_only`.
+  - *"morph targets (absent on both sides, confirmed)"* - **true**, and I re-verified it rather
+    than trusting the note: `AssetRipper.Export.Modules.Models` contains no morph or blend-shape
+    code at all. That makes it a baseline boundary, not a port gap, so it does not belong in a
+    list of things to port.
+  - *"`GlbLevelBuilder` (scene-level GLB export)"* - **true**, and it is the one real remaining
+    gap. Its supporting kernels are already ported as caller-fact functions
+    (`references_dynamic_mesh`, `subset_indices`) and `GlbLevelBuilder.GetTextures` is ported in
+    `src/resources/material.rs`; what is missing is the 301-line `Build` that walks Transform
+    hierarchies over many assets and assembles the glTF scene graph.
+- Why this matters beyond bookkeeping: a stale "unported" list sends the next agent to redo work
+  that already exists, and it makes the row look further from done than it is. The objective
+  requires docs to be truthful, which cuts both ways - understating progress is a doc defect too.
+- The row's status is deliberately unchanged. Its remaining gap is a real unported feature, so a
+  stronger test or an accurate gap list does not close it.
+- Also audited this round without change: the acceptance corpus ledger uses anonymous
+  `VRC-AV##`/`VRC-W##` IDs with 16-hex truncated hashes and carries no original names, absolute
+  user paths, or content. A scan of `docs/` and `src/` for the six original sample names in the
+  private mapping table returns nothing. The absolute paths present are reference-toolchain
+  scratch paths (`%LOCALAPPDATA%\Temp\opencode`, `tools/probes/`), not sample data.
+- Evidence: the ledger parses (TOTAL=404, RECOGNIZED=404, NONVERIFIED=24, DUPES=0, MALFORMED=0,
+  GATE=OPEN); `cargo test --locked --workspace` unchanged at 1834 library + 199 bin tests.
+
 ## 2026-10-16 - `RES-MESH-VIEW-001` closed on the strength of the production-layout e2e
 
 - Outcome: `RES-MESH-VIEW-001` moves from 已实现但未验证 to 已验证. The non-verified queue drops
