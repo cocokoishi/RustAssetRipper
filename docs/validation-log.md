@@ -1,5 +1,37 @@
 # Validation log
 
+## 2026-10-16 - Texture payload: reader offset pinned at 81; three byte-layout leads
+
+- Outcome: no code change (tree restored to green at `d9e83e7`). The value is that the
+  remaining gap is now measured exactly instead of guessed, and three specific leads are
+  recorded. The corrected fixture from `d9e83e7` is intact and its test passes.
+- Measured with the corrected 2019.4 tree (release root 18204):
+  1. Walking the tree's own `metaFlag` column (`ALIGN_BYTES_FLAG = 0x4000`) over the level-1
+     fields predicts the `image data` length word at **offset 80**. The four align-flagged
+     fields are `m_DownscaleFallback` (16384), `m_StreamingMipmaps` (16384),
+     `m_StreamingMipmapsPriority` (16384) and `image data` (16385).
+  2. The decoder reports needing `image data` with **23 bytes remaining at byte offset 81**.
+     Note the reported value is `134217728` = `0x08000000`, whose little-endian bytes are
+     `00 00 00 08` - that is the fixture's own length word (8) read one byte late. So the
+     reader sits at **one byte past** the align-derived position, i.e. it consumes a byte the
+     writer does not emit, and the mismatch is a single byte, not four.
+  3. `StreamingInfo` children in this record are `unsigned int offset`, `unsigned int size`,
+     `string path` - **all 32-bit**, unlike the newer tree whose `offset` is `UInt64`. The
+     earlier 8-byte offset was taken from the wrong record.
+- Leads for the next attempt, in the order worth trying:
+  a. The one-byte difference points at the empty `m_Name` string: the writer emits its 4-byte
+     length word and nothing else, while the reader appears to consume a terminator byte.
+     Try an empty name with an explicit trailing byte and *without* re-aligning afterwards.
+  b. `make_texture_file` (the long-working 10-node builder in `main_tests_01.rs`) writes its
+     `m_LightmapFormat` as a **single byte** (`payload.push(0)`) and does not align before its
+     `image data` array. That builder is the best available oracle for this codebase's own
+     reader conventions and should be compared field-by-field against the new writer.
+  c. Confirm the body endianness flag: the value `0x08000000` is what a 4-byte little-endian
+     `8` looks like when the reader is one byte late, so rule out a wrong-endian read before
+     changing any field width.
+- Verified after the revert: 195 bin tests, 0 failed; working tree clean; HEAD ==
+  origin/main == `d9e83e7`.
+
 ## 2026-10-16 - Probe bug fixed: the committed Texture2D fixture held the wrong record
 
 - Outcome: the three-round "payload is 4 bytes short" mystery is resolved. It was never a

@@ -1,5 +1,26 @@
 # RustAssetRipper hand-off — 2026-10-16
 
+## Latest current checkpoint - 2026-10-16 (texture payload: exact one-byte gap, three leads)
+
+- No code change; tree green at `d9e83e7` with the corrected fixture. The remaining gap is now
+  **exactly one byte**, not four:
+  - Walking the corrected tree's `metaFlag` column (`ALIGN_BYTES_FLAG = 0x4000`) predicts the
+    `image data` length word at offset **80**.
+  - The decoder reports `image data requires 134217728` with `23 remain at byte offset 81`.
+    `134217728` is `0x08000000`, i.e. the fixture's own length word `8` read one byte late.
+    So the reader is one byte **ahead** of the align-derived offset.
+  - `StreamingInfo` in this record is `unsigned int offset` / `unsigned int size` /
+    `string path` - all 32-bit (the 8-byte offset came from the wrong record).
+- Try next, in order:
+  1. Empty `m_Name`: writer emits only its 4-byte length word; the reader seems to consume a
+     terminator byte. Try a trailing byte **without** re-aligning after it.
+  2. Use `make_texture_file` in `main_tests_01.rs` as the oracle - it is the long-working
+     builder and writes `m_LightmapFormat` as a single byte with no align before `image data`.
+     Compare it field-by-field with the new writer.
+  3. Rule out an endianness read before changing any field width.
+- Recipe: `TEXFIX_DEBUG=1` prints the production-layout decode result in one run.
+- Do not run rustfmt on `src/main_tests_01.rs` (not clean at HEAD).
+
 ## Latest current checkpoint - 2026-10-16 (fixture was wrong; probe bug fixed)
 
 - The "payload 4 bytes short" mystery is solved and it was **the fixture, not the payload**.
