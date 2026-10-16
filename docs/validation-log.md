@@ -6077,3 +6077,6 @@ These results do not pass the first-phase gate. The reference .NET solution buil
 
 ### Nothing else locally audited this session
 - No VRChat bundle, no oracle output, and no third-party library code was changed or read in violation of the stage-1 gate.
+## 2026-10-16 (budget seed) - W11 fresh audit
+
+- Re-ran audit-project-documents.ps1 with SourceProject target/ra-w11/ref/ExportedProject, RustProject target/ra-w11/rust-r1, ReportPath target/ra-w11/audit-fresh-1.json. Exit 0. Counts reproduced exactly: pairedFiles=1107 onlySource=0 onlyRust=0, all 27 listed classes diff=0, opaque 367 with 261 pending probe (PNG 260 + OGG 1), additionalDifferences=1 (AuxiliaryFiles/path_id_map.json). No new mismatch.
