@@ -248,14 +248,14 @@
         output.extend_from_slice(&value.to_le_bytes());
     }
 
-    fn push_type_tree_string(buffer: &mut Vec<u8>, value: &str) -> u32 {
+    pub(super) fn push_type_tree_string(buffer: &mut Vec<u8>, value: &str) -> u32 {
         let offset = u32::try_from(buffer.len()).unwrap();
         buffer.extend_from_slice(value.as_bytes());
         buffer.push(0);
         offset
     }
 
-    fn put_node(
+    pub(super) fn put_node(
         output: &mut Vec<u8>,
         level: u8,
         type_offset: u32,
@@ -1024,6 +1024,207 @@
 
     fn make_texture2d_file() -> Vec<u8> {
         make_texture_file(28, "Texture2D", 2, 1, &[10, 20, 30, 255, 40, 50, 60, 255])
+    }
+
+    /// The committed reference dump of the class-28 release TypeTree.
+    pub(super) const TEXTURE_TYPETREE_FIXTURE: &str =
+        include_str!("resources/texture_typetree_fixture.txt");
+
+    /// The reference-dumped release TypeTree decodes a texture through the file-TypeTree
+    /// route, which the hand-authored 10-node sketch cannot (it omits `m_IsReadable`).
+    #[test]
+    fn reference_texture_typetree_decodes_through_the_file_route() {
+        let bytes = make_reference_texture_file(2, 1, &[10, 20, 30, 255, 40, 50, 60, 255]);
+        let file = assetripper::serialized_file::file::SerializedFile::parse(&bytes)
+            .expect("the reference texture file parses");
+        assert_eq!(file.metadata.objects.len(), 1);
+        let type_index = file.metadata.objects[0]
+            .resolved_type_index
+            .expect("the object resolves its serialized type");
+        let tree = file.metadata.types[type_index]
+            .type_tree
+            .as_ref()
+            .expect("the fixture carries the file TypeTree");
+        assert_eq!(tree.nodes.len(), 46);
+
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem.create_directory(Some("/game")).unwrap();
+        filesystem
+            .write_all_bytes("/game/z-texture.assets", &bytes)
+            .unwrap();
+        let input_path = DependencyFilePath {
+            file_name: "z-texture.assets".to_owned(),
+            virtual_path: "/game/z-texture.assets".to_owned(),
+        };
+        let workspace = load_workspace_from_vfs(
+            &filesystem,
+            &[input_path],
+            SerializedFileWorkspaceLimits::default(),
+        )
+        .expect("the workspace loads");
+        let objects =
+            load_object_workspace(&filesystem, &workspace, ObjectWorkspaceLimits::default())
+                .expect("the object workspace loads");
+        let object = objects.get(0, 0).expect("the texture object exists");
+        let payload = object
+            .payload
+            .as_ref()
+            .unwrap_or_else(|error| panic!("the texture must decode, not fall back: {error}"));
+        let view = assetripper::resources::texture::Texture2DView::from_value(&payload.root)
+            .expect("the decoded payload exposes texture fields");
+        assert_eq!((view.width, view.height), (2, 1));
+        assert_eq!(view.texture_format, 4);
+        assert_eq!(view.image_data, [10, 20, 30, 255, 40, 50, 60, 255]);
+    }
+
+    /// Build a synthetic Texture2D SerializedFile whose TypeTree is the real release tree.
+    ///
+    /// The hand-authored sketch used by the export tests suffices for the class-fallback
+    /// route, but the file-TypeTree route (which the web load takes) reads every node
+    /// including `m_IsReadable`, so a fixture omitting it decodes as `UnreadableObject`.
+    /// This emits the committed 46-node dump verbatim and writes the payload in node order.
+    pub(super) fn make_reference_texture_file(width: i32, height: i32, data: &[u8]) -> Vec<u8> {
+        struct DumpedNode {
+            level: u8,
+            type_text: String,
+            name_text: String,
+            byte_size: i32,
+        }
+
+        let mut nodes: Vec<DumpedNode> = Vec::new();
+        for line in TEXTURE_TYPETREE_FIXTURE.lines() {
+            // The header comments describe this same format, so skip them.
+            if line.starts_with('#') {
+                continue;
+            }
+            let Some(rest) = line.strip_prefix("NODE|") else {
+                continue;
+            };
+            let fields: Vec<&str> = rest.split('|').collect();
+            // After the `NODE|` prefix: [0]=version, [1]=level, [2]=type, [3]=name,
+            // [4]=byteSize.
+            nodes.push(DumpedNode {
+                level: fields[1].parse().expect("node level"),
+                type_text: fields[2].to_owned(),
+                name_text: fields[3].to_owned(),
+                byte_size: fields[4].parse().expect("byte size"),
+            });
+        }
+        assert_eq!(nodes.len(), 46, "the texture TypeTree fixture has 46 nodes");
+        assert_eq!(nodes[0].type_text, "Texture2D");
+        assert_eq!(nodes[0].level, 0);
+
+        let mut string_buffer = Vec::new();
+        let mut offsets = std::collections::HashMap::new();
+        let mut intern = |text: &str, buffer: &mut Vec<u8>| -> u32 {
+            if let Some(offset) = offsets.get(text) {
+                return *offset;
+            }
+            let offset = push_type_tree_string(buffer, text);
+            offsets.insert(text.to_owned(), offset);
+            offset
+        };
+
+        let mut node_records = Vec::new();
+        for (index, node) in nodes.iter().enumerate() {
+            let type_offset = intern(&node.type_text, &mut string_buffer);
+            let name_offset = intern(&node.name_text, &mut string_buffer);
+            node_records.push((
+                node.level,
+                type_offset,
+                name_offset,
+                node.byte_size,
+                i32::try_from(index).unwrap(),
+            ));
+        }
+
+        let mut metadata = Vec::new();
+        metadata.extend_from_slice(b"2019.4.40f1\0");
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 1);
+        put_i32_le(&mut metadata, 28);
+        put_i32_le(&mut metadata, i32::try_from(nodes.len()).unwrap());
+        put_i32_le(&mut metadata, i32::try_from(string_buffer.len()).unwrap());
+        for (level, type_offset, name_offset, byte_size, index) in node_records {
+            put_node(
+                &mut metadata,
+                level,
+                type_offset,
+                name_offset,
+                byte_size,
+                index,
+            );
+        }
+        metadata.extend_from_slice(&string_buffer);
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 1);
+        put_i32_le(&mut metadata, 42);
+        put_u32_le(&mut metadata, 0);
+
+        // Payload in node order, matching the reader's own alignment rules: strings are an
+        // `i32` length then bytes then align-to-4, and `vector`/`TypelessData` arrays are an
+        // aligned `i32` length then the element bytes, aligned again.
+        let mut payload = Vec::new();
+        put_i32_le(&mut payload, 0); // m_Name (string: length 0)
+        payload.push(0); // m_IsAlphaChannelOptional
+        put_i32_le(&mut payload, width); // m_Width
+        put_i32_le(&mut payload, height); // m_Height
+        put_i32_le(&mut payload, i32::try_from(data.len()).unwrap()); // m_CompleteImageSize
+        put_i32_le(&mut payload, 0); // m_MipsStripped
+        put_i32_le(&mut payload, 4); // m_TextureFormat (RGBA32)
+        put_i32_le(&mut payload, 1); // m_MipCount
+        payload.push(1); // m_IsReadable
+        payload.push(0); // m_IsPreProcessed
+        payload.push(0); // m_IgnoreMipmapLimit
+        put_i32_le(&mut payload, 0); // m_MipmapLimitGroupName (string: length 0)
+        payload.push(0); // m_StreamingMipmaps
+        put_i32_le(&mut payload, 0); // m_StreamingMipmapsPriority
+        put_i32_le(&mut payload, 1); // m_ImageCount
+        put_i32_le(&mut payload, 2); // m_TextureDimension (2D)
+        put_i32_le(&mut payload, 1); // m_TextureSettings.m_FilterMode
+        put_i32_le(&mut payload, 1); // m_TextureSettings.m_Aniso
+        put_f32_le(&mut payload, 0.0); // m_TextureSettings.m_MipBias
+        put_i32_le(&mut payload, 1); // m_TextureSettings.m_WrapU
+        put_i32_le(&mut payload, 1); // m_TextureSettings.m_WrapV
+        put_i32_le(&mut payload, 1); // m_TextureSettings.m_WrapW
+        put_i32_le(&mut payload, 1); // m_LightmapFormat
+        put_i32_le(&mut payload, 1); // m_ColorSpace
+        put_i32_le(&mut payload, 0); // m_PlatformBlob (empty vector)
+        while payload.len() % 4 != 0 {
+            payload.push(0);
+        }
+        put_i32_le(&mut payload, i32::try_from(data.len()).unwrap()); // image data length
+        payload.extend_from_slice(data);
+        while payload.len() % 4 != 0 {
+            payload.push(0);
+        }
+        put_u32_le(&mut payload, 0); // m_StreamData.offset low
+        put_u32_le(&mut payload, 0); // m_StreamData.offset high
+        put_u32_le(&mut payload, 0); // m_StreamData.size
+        put_i32_le(&mut payload, 0); // m_StreamData.path (string: length 0)
+        while payload.len() % 4 != 0 {
+            payload.push(0);
+        }
+
+        put_i32_le(&mut metadata, i32::try_from(payload.len()).unwrap());
+        put_i32_le(&mut metadata, 28);
+        put_u16_le(&mut metadata, 28);
+        put_u16_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 0);
+        metadata.push(0);
+
+        let data_offset = 20 + metadata.len();
+        let file_size = data_offset + payload.len();
+        let mut file = Vec::with_capacity(file_size);
+        file.extend_from_slice(&i32::try_from(metadata.len()).unwrap().to_be_bytes());
+        file.extend_from_slice(&u32::try_from(file_size).unwrap().to_be_bytes());
+        file.extend_from_slice(&10i32.to_be_bytes());
+        file.extend_from_slice(&u32::try_from(data_offset).unwrap().to_be_bytes());
+        file.push(0);
+        file.extend_from_slice(&[0; 3]);
+        file.extend_from_slice(&metadata);
+        file.extend_from_slice(&payload);
+        file
     }
 
     fn make_texture_file(

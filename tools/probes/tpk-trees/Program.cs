@@ -172,9 +172,9 @@ if (Environment.GetEnvironmentVariable("TPK_LIST_METHODS") is not null)
 	void WalkDirect(int index, int level)
 	{
 		object node = nodeItem.GetValue(nodeBuffer, [index])!;
-		string type = stringItem
+		string typeText = stringItem
 			.GetValue(stringBuffer, [Convert.ToInt32(Get(node, "TypeName"))])?.ToString() ?? string.Empty;
-		string name = stringItem
+		string nameText = stringItem
 			.GetValue(stringBuffer, [Convert.ToInt32(Get(node, "Name"))])?.ToString() ?? string.Empty;
 		int byteSize = Convert.ToInt32(Get(node, "ByteSize"));
 		int versionField = Convert.ToInt32(Get(node, "Version"));
@@ -182,7 +182,7 @@ if (Environment.GetEnvironmentVariable("TPK_LIST_METHODS") is not null)
 		uint metaFlag = Convert.ToUInt32(Get(node, "MetaFlag"));
 		ushort[] subNodes = (ushort[])(Get(node, "SubNodes") ?? Array.Empty<ushort>());
 		Console.WriteLine(
-			$"NODE|{versionText}|{level}|{type}|{name}|{byteSize}|{versionField}|{typeFlags}|{metaFlag}|{index}|{subNodes.Length}");
+			$"NODE|{versionText}|{level}|{typeText}|{nameText}|{byteSize}|{versionField}|{typeFlags}|{metaFlag}|{index}|{subNodes.Length}");
 		foreach (ushort child in subNodes)
 		{
 			WalkDirect(child, level + 1);

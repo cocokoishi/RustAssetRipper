@@ -1,5 +1,27 @@
 # RustAssetRipper hand-off — 2026-10-16
 
+## Latest current checkpoint - 2026-10-16 (reference Texture2D fixture decodes; image arc ready)
+
+- The fixture is **verified working**, not just generated.
+  `reference_texture_typetree_decodes_through_the_file_route` builds a class-28 file from
+  the committed 46-node dump, loads it through the workspace/object-workspace route the web
+  uses, and asserts `(2, 1)`, format 4 and the exact pixel bytes. Bin suite now **195/195**.
+- Builder entry point: `main_tests_01.rs::make_reference_texture_file(width, height, data)`
+  (plus `TEXTURE_TYPETREE_FIXTURE`), both `pub(super)` so the web tests can use them.
+- Two gotchas the next author must not re-hit:
+  1. Fixture header comments start with `# NODE|`, so skip `#` lines when parsing the dump.
+  2. After stripping `NODE|`, the columns are `[version, level, type, name, byteSize, ...]`
+     - type is index 2, byte size index 4.
+  3. Payload alignment (from `writer/encode.rs`): strings are `i32` length + bytes +
+     align-to-4; `vector`/`TypelessData` arrays are an aligned `i32` length then element
+     bytes, aligned again. Missing that trailing alignment shows up as
+     `field Texture2D.image data requires <huge> bytes, but only N remain`.
+- Next step: re-apply the `/Assets/Image` implementation (row image facts, the route serving
+  raw pixels plus `Extension`-encoded formats, and the image section) and switch the web
+  end-to-end to `make_reference_texture_file`, then re-run the full battery.
+- Note: `make_texture_file` (the 10-node sketch) is still used by the texture export,
+  cubemap and settings tests and must not be modified; append a new builder instead.
+
 ## Latest current checkpoint - 2026-10-16 (Texture2D TypeTree fixture generated; image arc unblocked)
 
 - The blocker recorded in the entry below is **solved at the source**. New committed probe

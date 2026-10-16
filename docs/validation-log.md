@@ -6380,6 +6380,34 @@ These results do not pass the first-phase gate. The reference .NET solution buil
   the other `/Assets/*` data routes, `/FailedFiles/View` + `/StackTrace`, `/Scenes/View`,
   `/Export/PrimaryContent`. Unity Editor import/runtime and UABEA remain blocked
   (license/tooling), unchanged by this increment.
+## 2026-10-16 - Real TypeTree fixture now decodes a Texture2D through the file route
+
+- Outcome: the fixture built from the committed reference dump actually decodes. New test
+  `reference_texture_typetree_decodes_through_the_file_route` parses a synthetic
+  class-28 SerializedFile whose TypeTree is the 46-node release dump, loads it through the
+  workspace and object workspace (the route the web load uses), and asserts a decoded
+  payload with `(width, height) = (2, 1)`, `m_TextureFormat = 4` and the exact pixel bytes
+  `[10, 20, 30, 255, 40, 50, 60, 255]`. This is the capability the hand-written 10-node
+  sketch could not provide.
+- Two real bugs were found and fixed while authoring the payload, both worth recording:
+  1. The dump-format header comments begin with `# NODE|`, so a naive `strip_prefix("NODE|")`
+     parser also consumed the format documentation and overflowed parsing a level. The
+     builder now skips `#` lines.
+  2. The field indices after stripping `NODE|` are `[version, level, type, name, size, ...]`,
+     so type is index 2 and the byte size index 4 - the parser originally read them one
+     column late, which silently produced `"Base"` as the root type.
+- Payload alignment rule confirmed from the encoder itself
+  (`serialized_file/object/writer/encode.rs`): strings are `i32` length + bytes + 4-byte
+  align, and `vector`/`TypelessData` arrays are an aligned `i32` length then the element
+  bytes, aligned again. The previous attempts were 7 bytes short at the `image data`
+  boundary purely from missing that trailing alignment; the decoder reported it as
+  `field Texture2D.image data requires 504629760 bytes, but only 24 remain at byte offset
+  92`, which is the pixel bytes being misread as a length.
+- Commands run: `cargo test --locked --bin assetripper-rs` - **195 bin tests, 0 failed**
+  (one more than before this increment). No product behavior changed yet: the
+  `/Assets/Image` implementation is still reverted, so this increment lands the verified
+  fixture and its proof only.
+
 ## 2026-10-16 - Image-tab blocker resolved: real Texture2D TypeTree fixture generated
 
 - Outcome: the fixture gap recorded in the previous entry is closed at the source. A new
