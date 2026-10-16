@@ -263,6 +263,7 @@ struct RoutedObject<'a> {
     script_export: Option<ScriptExportDetails>,
     scriptable_object_group: Option<RoutedScriptableObjectGroup<'a>>,
     controller_collection: Option<RoutedControllerCollection<'a>>,
+    terrain_collection: Option<RoutedTerrainCollection<'a>>,
     selection: super::project_exporter::CollectionSelection,
     route: ObjectRoute,
     /// Planning-time prediction that a streamed generic-asset `Texture2D`
@@ -328,6 +329,17 @@ struct AudioBinaryExportDetails {
 
 struct RoutedFontCollection<'a> {
     children: Vec<RoutedFontCollectionChild<'a>>,
+}
+
+/// A TerrainData collection: the terrain data document plus the splat-alpha texture
+/// documents the frozen `TerrainYamlExportCollection` adds to it.
+struct RoutedTerrainCollection<'a> {
+    children: Vec<RoutedTerrainMember<'a>>,
+}
+
+struct RoutedTerrainMember<'a> {
+    object: &'a WorkspaceObject,
+    file_id: i64,
 }
 
 struct RoutedFontCollectionChild<'a> {
@@ -454,6 +466,7 @@ struct WorkspaceProjectExportContext<'inputs, 'provider, 'graph> {
     prefab_member_keys: HashSet<ExportAssetObjectKey>,
     scriptable_object_groups: PreparedScriptableObjectGroups,
     controller_collections: PreparedControllerCollections,
+    terrain_collections: PreparedTerrainCollections,
     processing_warnings: Vec<String>,
     used_guids: HashSet<[u8; 16]>,
     lightmap_texture_directories: HashMap<(usize, usize), String>,
@@ -491,6 +504,7 @@ struct ProjectRoutingContext<'context, 'provider, 'graph> {
     prefab_member_keys: &'context HashSet<ExportAssetObjectKey>,
     scriptable_object_groups: &'context PreparedScriptableObjectGroups,
     controller_collections: &'context PreparedControllerCollections,
+    terrain_collections: &'context PreparedTerrainCollections,
     lightmap_texture_directories: &'context HashMap<(usize, usize), String>,
     scene_lighting_subasset_directories: &'context HashMap<(usize, usize), String>,
     bundle_container_original_directories: &'context HashMap<(usize, usize), String>,
@@ -527,6 +541,7 @@ mod project_settings;
 mod scene_collections;
 mod script_exports;
 mod scriptable_object_groups;
+mod terrain_collections;
 mod workspace_identity;
 
 use self::animator_collections::{
@@ -556,6 +571,7 @@ use self::planning::{
 use self::scene_collections::*;
 use self::script_exports::*;
 use self::scriptable_object_groups::*;
+use self::terrain_collections::{prepare_terrain_collections, PreparedTerrainCollections};
 use self::workspace_identity::*;
 
 pub use self::entrypoints::{

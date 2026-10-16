@@ -1060,6 +1060,7 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
     let prefab_member_keys = context.prefab_member_keys;
     let scriptable_object_groups = context.scriptable_object_groups;
     let controller_collections = context.controller_collections;
+    let terrain_collections = context.terrain_collections;
     let lightmap_texture_directories = context.lightmap_texture_directories;
     let scene_lighting_subasset_directories = context.scene_lighting_subasset_directories;
     let bundle_container_original_directories = context.bundle_container_original_directories;
@@ -1085,6 +1086,9 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
             if scene_member_keys.contains(&source_key)
                 || prefab_member_keys.contains(&source_key)
                 || controller_collections
+                    .member_keys
+                    .contains(&(file_index, object_index))
+                || terrain_collections
                     .member_keys
                     .contains(&(file_index, object_index))
                 || scriptable_object_groups
@@ -2045,6 +2049,32 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                     })
                 })
                 .transpose()?;
+            let terrain_collection = terrain_collections
+                .roots
+                .get(&(file_index, object_index))
+                .map(|plan| {
+                    let mut children = Vec::new();
+                    children
+                        .try_reserve_exact(plan.children.len())
+                        .map_err(|_| {
+                            invalid_project(
+                                "could not allocate routed terrain splat-alpha members",
+                            )
+                        })?;
+                    for member in &plan.children {
+                        let object = objects.get(member.key.0, member.key.1).ok_or_else(|| {
+                            invalid_project(
+                                "routed TerrainData splat-alpha member is absent from ObjectWorkspace",
+                            )
+                        })?;
+                        children.push(RoutedTerrainMember {
+                            object,
+                            file_id: member.file_id,
+                        });
+                    }
+                    Ok::<_, Box<dyn Error>>(RoutedTerrainCollection { children })
+                })
+                .transpose()?;
             let guid = if let Some(engine_guid) = engine_guid {
                 used_guids.insert(engine_guid);
                 engine_guid
@@ -2087,6 +2117,7 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                 script_export,
                 scriptable_object_group,
                 controller_collection,
+                terrain_collection,
                 selection,
                 route,
                 texture_file_skipped,

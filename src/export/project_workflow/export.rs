@@ -195,6 +195,13 @@ fn validate_workspace_project_export<'inputs, 'provider, 'graph>(
         inputs.reference_graph,
         &already_owned_scene_objects,
     )?;
+    let terrain_collections = prepare_terrain_collections(
+        inputs.objects,
+        inputs.reference_graph,
+        &already_owned_scene_objects,
+        project_version,
+        inputs.limits.pointer_map,
+    )?;
     let lightmap_texture_directories = lightmap_texture_scene_directories(
         &scene_processing,
         inputs.objects,
@@ -222,6 +229,7 @@ fn validate_workspace_project_export<'inputs, 'provider, 'graph>(
         prefab_member_keys,
         scriptable_object_groups,
         controller_collections,
+        terrain_collections,
         processing_warnings,
         used_guids,
         lightmap_texture_directories,
@@ -316,6 +324,7 @@ pub fn export_workspace_yaml_project_with_serialized_settings(
         prefab_member_keys,
         scriptable_object_groups,
         controller_collections,
+        terrain_collections,
         processing_warnings,
         used_guids,
         lightmap_texture_directories,
@@ -358,6 +367,7 @@ pub fn export_workspace_yaml_project_with_serialized_settings(
         prefab_member_keys: &prefab_member_keys,
         scriptable_object_groups: &scriptable_object_groups,
         controller_collections: &controller_collections,
+        terrain_collections: &terrain_collections,
         lightmap_texture_directories: &lightmap_texture_directories,
         scene_lighting_subasset_directories: &scene_lighting_subasset_directories,
         bundle_container_original_directories: &bundle_container_original_directories,

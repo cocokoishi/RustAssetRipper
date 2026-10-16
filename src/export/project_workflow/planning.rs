@@ -843,6 +843,60 @@ pub(super) fn plan_routed_asset_files(
                         });
                     }
                     controller_bytes
+                } else if let Some(collection) = &entry.terrain_collection {
+                    // `TerrainYamlExportCollection` writes the terrain data document followed
+                    // by every splat-alpha texture it collected, so members land in the
+                    // terrain's own asset file and their pointers resolve locally.
+                    let document_capacity =
+                        collection.children.len().checked_add(1).ok_or_else(|| {
+                            invalid_project("TerrainData document count overflows")
+                        })?;
+                    let mut documents = Vec::new();
+                    documents
+                        .try_reserve_exact(document_capacity)
+                        .map_err(|_| {
+                            invalid_project("could not allocate TerrainData member documents")
+                        })?;
+                    documents.push(document);
+                    for child in &collection.children {
+                        let source = ExportAssetIdentity {
+                            collection: ExportAssetCollectionIdentity::SerializedFile {
+                                file_index: child.object.file_index,
+                            },
+                            object_index: child.object.object_index,
+                            path_id: child.object.path_id,
+                            class_id: child.object.factory.class_id,
+                        };
+                        let member_document =
+                            workspace_object_to_unity_yaml_document_with_atlas_overlay(
+                                workspace,
+                                reference_graph,
+                                pointer_map,
+                                child.object,
+                                source,
+                                child.file_id,
+                                entry.collection_index,
+                                Some(
+                                    crate::export::script_hashing::UnityGuid::MISSING_REFERENCE
+                                        .to_byte_array(),
+                                ),
+                                limits.yaml_collection.object_conversion,
+                                None,
+                                &streamed_resources,
+                                false,
+                                None,
+                                None,
+                            )?
+                            .ok_or_else(|| {
+                                invalid_project(format!(
+                                    "TerrainData splat-alpha member {}:{} produced no YAML document",
+                                    child.object.file_index, child.object.path_id,
+                                ))
+                            })?;
+                        documents.push(member_document);
+                    }
+                    additional_exported_document_count = documents.len().saturating_sub(1);
+                    write_unity_yaml_documents(&documents, limits.yaml_write)?.into_bytes()
                 } else {
                     write_unity_yaml_documents(&[document], limits.yaml_write)?.into_bytes()
                 }

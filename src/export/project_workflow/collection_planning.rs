@@ -277,6 +277,12 @@ pub(super) fn build_project_pointer_map(
                     .controller_collection
                     .as_ref()
                     .map_or(0, |group| group.children.len()),
+            )?
+            .checked_add(
+                entry
+                    .terrain_collection
+                    .as_ref()
+                    .map_or(0, |group| group.children.len()),
             )
     });
     let pointer_capacity = routed_pointer_count
@@ -422,6 +428,28 @@ pub(super) fn build_project_pointer_map(
                     local_copies.push(pointer);
                 }
             }
+        }
+        if let Some(group) = &entry.terrain_collection {
+            // A terrain splat-alpha texture is written inside the terrain's own asset
+            // file as an extra document, so its pointer entry shares the terrain's
+            // collection index and resolves locally.
+            pointer_entries.extend(
+                group
+                    .children
+                    .iter()
+                    .map(|child| ExportedAssetPointerEntry {
+                        asset: ExportAssetIdentity {
+                            collection: ExportAssetCollectionIdentity::SerializedFile {
+                                file_index: child.object.file_index,
+                            },
+                            object_index: child.object.object_index,
+                            path_id: child.object.path_id,
+                            class_id: child.object.factory.class_id,
+                        },
+                        file_id: child.file_id,
+                        collection_index: entry.collection_index,
+                    }),
+            );
         }
     }
     for scene in scenes {
