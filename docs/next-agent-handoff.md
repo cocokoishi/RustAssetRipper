@@ -1,5 +1,24 @@
 # RustAssetRipper hand-off — 2026-10-16
 
+## Latest current checkpoint - 2026-10-16 (`PRODUCT-I18N-001` closed, gate 26 to 25)
+
+- Worktree: `main-work` detached; HEAD == origin/main before this slice. Full re-audit of
+  the localization row: 23 vendored tables byte-identical to frozen, `language_names.json`
+  identical 23/23 to the frozen build's baked dictionary (new `tools/probes/lang-names/`
+  reflection dump), new exhaustive 272x23 fallback test; row promoted to verified with
+  both old caveats resolved (names pinned as build-time data; `LanguageCode` parse-opaque
+  matches the source). Ledger gate now 25 non-verified (9 `实现中` + 1 blocked + 15
+  `已实现但未验证`).
+- Verification evidence: full `cargo test --locked --workspace` **1822 lib + 194 bin,
+  0 failed**, 1 ignored; Clippy `-D warnings` exit 0; per-file rustfmt and
+  `git diff --check` clean; parity report 396 rows, 0 malformed. Full evidence in
+  `docs/validation-log.md`.
+- Privacy: no sample content/paths/names in code, tests, docs or commit text. Mapping table
+  stays outside the repo; history untouched.
+- Next move: the ten remaining asset tabs plus `/Assets/*` data routes,
+  `/FailedFiles/View` + `/StackTrace`, `/Scenes/View`, `/Export/PrimaryContent`; then
+  continue down the ledger (next candidates among the 15 unverified).
+
 ## Latest current checkpoint - 2026-10-16 (asset pages list reference edges)
 
 - Worktree: `main-work` detached; HEAD == origin/main before this slice. The snapshot

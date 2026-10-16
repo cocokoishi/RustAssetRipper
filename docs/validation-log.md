@@ -6296,3 +6296,35 @@ These results do not pass the first-phase gate. The reference .NET solution buil
   The literal `Missing` row has no fixture coverage (every fixture edge resolves); it
   mirrors the frozen text for targets the lookup cannot resolve. Unity Editor
   import/runtime and UABEA remain blocked (license/tooling), unchanged by this increment.
+## 2026-10-16 - `PRODUCT-I18N-001` closed: localized strings verified end to end
+
+- Scope: full re-audit of the localization row against the frozen baseline and the
+  current port. All 23 vendored locale tables are byte-identical to the frozen sources
+  (272 `en_US` keys; `id.json` is `{}` in both); `language_names.json` is identical
+  23/23 to the frozen build's baked `LanguageNameDictionary` (new isolated
+  `LangNamesProbe` reflection dump of the reference `AssetRipper.GUI.Free` build; an
+  early console-decoding scare was proven to be mojibake by a rigorous UTF-8 comparison).
+  The web surface consumes every table through `Messages::text` with the per-key en-US
+  fallback and the missing-key marker. Row promoted to verified; the two old caveats
+  were resolved, not dropped: native names ARE ported (pinned data, disclosed as
+  build-time-pinned rather than live `CultureInfo`), and settings `LanguageCode`
+  parse-opaque handling matches the source (validated at startup `LoadLanguage`). No
+  export-path behavior changes; no sample content touched.
+- Frozen reference: `AssetRipper.GUI.Localizations/` (`Localization.cs`,
+  `LanguageCodes.cs`), `AssetRipper/Localizations/` (23 files),
+  `AssetRipper.GUI.Free` build `AssetRipper.GUI.Localizations.dll`.
+- Commands run (worktree `main-work`, detached, HEAD == origin/main before this change):
+  1. `dotnet run --project tools/probes/lang-names/LangNamesProbe.csproj -c Release
+     -p:ReferenceRoot='<workspace>/AssetRipper'` - exit 0, 23 rows (the isolated
+     `ar-ref` tree lost its prebuilt GUI assemblies, so the workspace baseline outputs
+     were used; the established anim-convert probe currently fails to build there too).
+  2. New `every_key_resolves_in_every_language_without_a_marker` (272 keys x 23 locales).
+  3. `cargo test --locked --workspace` - 1822 library + 194 bin tests, 0 failed, 1 ignored.
+  4. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+  5. `rustfmt --edition 2021 --check` on the touched file - clean; `git diff --check` -
+     exit 0; `tools/parity-report.ps1` - 396 rows, 0 malformed, gate OPEN with 25
+     non-verified (down from 26).
+- Open after this increment: the ten remaining asset tabs plus the `/Assets/*` data
+  routes, `/FailedFiles/View` + `/StackTrace`, `/Scenes/View`, `/Export/PrimaryContent`.
+  Unity Editor import/runtime and UABEA remain blocked (license/tooling), unchanged by
+  this increment.

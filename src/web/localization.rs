@@ -208,6 +208,34 @@ mod tests {
     }
 
     #[test]
+    fn every_key_resolves_in_every_language_without_a_marker() {
+        use assetripper::json::{parse_json, JsonLimits};
+
+        let messages = messages();
+        let english = parse_json(
+            include_str!("localizations/en_US.json"),
+            JsonLimits::default(),
+        )
+        .expect("the English table parses");
+        let keys: Vec<&str> = english
+            .as_object("$")
+            .expect("the English table is an object")
+            .iter()
+            .map(|(key, _)| key.as_str())
+            .collect();
+        assert_eq!(keys.len(), messages.key_count());
+        for code in LANGUAGE_CODES {
+            for key in &keys {
+                let text = messages.text(code, key);
+                assert!(
+                    !text.starts_with(MISSING_MARKER_PREFIX),
+                    "language {code} has no text for key {key}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn language_display_names_are_the_baseline_culture_names() {
         let messages = messages();
         let name = |code: &str| {
