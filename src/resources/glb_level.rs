@@ -276,6 +276,177 @@ fn attached_mesh(transform: &GlbLevelTransform) -> Option<GlbLevelAttachedMesh> 
 mod tests {
     use super::*;
 
+    /// The reference-runtime rows for the two-root, three-deep hierarchy.
+    ///
+    /// `glb_level_fixture.txt` holds the node output the isolated baseline build produced through
+    /// the probe's `level` mode, which drives the shipped `GlbLevelBuilder.Build`. The test builds
+    /// the same hierarchy and compares node for node, so the port is checked against the reference
+    /// runtime instead of against a reading of its source.
+    #[test]
+    fn level_plan_matches_the_reference_runtime_rows() {
+        // The fixture's inputs: Root -> Child -> Grandchild, plus a parentless Second.
+        fn node(
+            name: &str,
+            position: [f32; 3],
+            rotation: [f32; 4],
+            scale: [f32; 3],
+            children: Vec<GlbLevelTransform>,
+        ) -> GlbLevelTransform {
+            GlbLevelTransform {
+                game_object_name: name.to_owned(),
+                local_position: position,
+                local_rotation: rotation,
+                local_scale: scale,
+                children,
+                mesh: None,
+            }
+        }
+        // +90 degrees about Y, +60 degrees about X, +90 degrees about Z, then identity.
+        const ROOT_ROTATION: [f32; 4] = [0.0, 0.707_106_77, 0.0, 0.707_106_77];
+        const CHILD_ROTATION: [f32; 4] = [0.5, 0.0, 0.0, 0.866_025_4];
+        const GRANDCHILD_ROTATION: [f32; 4] = [0.0, 0.0, 0.707_106_77, 0.707_106_77];
+        const IDENTITY_ROTATION: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+
+        let hierarchy = || {
+            vec![
+                node(
+                    "Root",
+                    [1.0, 2.0, 3.0],
+                    ROOT_ROTATION,
+                    [2.0, 2.0, 2.0],
+                    vec![node(
+                        "Child",
+                        [4.0, 5.0, 6.0],
+                        CHILD_ROTATION,
+                        [1.0, 1.0, 1.0],
+                        vec![node(
+                            "Grandchild",
+                            [7.0, 8.0, 9.0],
+                            GRANDCHILD_ROTATION,
+                            [1.0, 1.0, 1.0],
+                            Vec::new(),
+                        )],
+                    )],
+                ),
+                node(
+                    "Second",
+                    [-1.0, -2.0, -3.0],
+                    IDENTITY_ROTATION,
+                    [1.0, 1.0, 1.0],
+                    Vec::new(),
+                ),
+            ]
+        };
+
+        let fixture = include_str!("glb_level_fixture.txt");
+        let mut rows_checked = 0usize;
+        let mut is_scene: Option<bool> = None;
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let fields: Vec<&str> = line.split('|').collect();
+            match fields[0] {
+                "LEVEL" => {
+                    let scene = fields[1] == "scene";
+                    is_scene = Some(scene);
+                    rows_checked = 0;
+                    let plan = build_level_plan(&hierarchy(), scene).expect("the plan builds");
+                    expected_plans(plan, scene);
+                }
+                "NODE" => {
+                    let scene = is_scene.expect("a LEVEL row comes first");
+                    assert_eq!(fields[1], if scene { "scene" } else { "asset" });
+                    let plan = build_level_plan(&hierarchy(), scene).expect("the plan builds");
+                    let node = plan
+                        .nodes
+                        .get(rows_checked)
+                        .unwrap_or_else(|| panic!("no node at {rows_checked}"));
+                    assert_eq!(node.name, fields[2], "node {rows_checked} name");
+                    assert_eq!(
+                        node.parent.map(|index| plan.nodes[index].name.as_str()),
+                        match fields[3] {
+                            "<none>" => None,
+                            other => Some(other),
+                        },
+                        "node {} parent", fields[2]
+                    );
+                    let children: Vec<&str> = if fields[4].is_empty() {
+                        Vec::new()
+                    } else {
+                        fields[4].split(';').collect()
+                    };
+                    let actual_children: Vec<&str> = plan
+                        .nodes
+                        .iter()
+                        .filter(|candidate| candidate.parent == Some(rows_checked))
+                        .map(|candidate| candidate.name.as_str())
+                        .collect();
+                    assert_eq!(actual_children, children, "node {} children", fields[2]);
+                    assert_eq!(fields[5], "false", "the fixture carries no meshes");
+
+                    let expected_translation = parse_f32_row(fields[6], 3);
+                    let expected_scale = parse_f32_row(fields[7], 3);
+                    let expected_rotation = parse_f32_row(fields[8], 4);
+                    let local = node
+                        .local_transform
+                        .unwrap_or(GlbLevelLocalTransform {
+                            scale: [1.0, 1.0, 1.0],
+                            rotation: [0.0, 0.0, 0.0, 1.0],
+                            translation: [0.0, 0.0, 0.0],
+                        });
+                    assert_eq!(
+                        local.translation.as_slice(),
+                        expected_translation.as_slice(),
+                        "node {} translation", fields[2]
+                    );
+                    assert_eq!(
+                        local.rotation.as_slice(),
+                        expected_rotation.as_slice(),
+                        "node {} rotation", fields[2]
+                    );
+                    assert_eq!(
+                        local.scale.as_slice(),
+                        expected_scale.as_slice(),
+                        "node {} scale", fields[2]
+                    );
+                    rows_checked += 1;
+                }
+                other => panic!("unknown fixture row {other}"),
+            }
+        }
+        assert_eq!(rows_checked, 4, "the last run's rows are all checked");
+    }
+
+    /// Guard against the fixture and the code drifting together: assert the two runs differ
+    /// exactly where `IsScene` says they should.
+    fn expected_plans(plan: GlbLevelPlan, is_scene: bool) {
+        assert_eq!(plan.nodes.len(), 4);
+        let names: Vec<&str> = plan.nodes.iter().map(|node| node.name.as_str()).collect();
+        assert_eq!(names, ["Root", "Child", "Grandchild", "Second"]);
+        if is_scene {
+            assert!(
+                plan.nodes[0].local_transform.is_some(),
+                "a scene build transforms its roots"
+            );
+        } else {
+            assert!(
+                plan.nodes[0].local_transform.is_none(),
+                "an asset build leaves roots untransformed"
+            );
+        }
+        // A non-root is always transformed, in both modes.
+        assert!(plan.nodes[1].local_transform.is_some());
+    }
+
+    /// Parse a comma-separated float row of an expected length.
+    fn parse_f32_row(text: &str, expected: usize) -> Vec<f32> {
+        let values: Vec<f32> = text.split(',').map(|v| v.parse().unwrap()).collect();
+        assert_eq!(values.len(), expected, "{text}");
+        values
+    }
+
     fn transform(name: &str, children: Vec<GlbLevelTransform>) -> GlbLevelTransform {
         GlbLevelTransform {
             game_object_name: name.to_owned(),

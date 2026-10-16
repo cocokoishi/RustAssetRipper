@@ -1,5 +1,48 @@
 # Validation log
 
+## 2026-10-16 - The scene-level hierarchy walk verified against the reference runtime
+
+- Outcome: `src/resources/glb_level.rs` now matches the shipped `GlbLevelBuilder.Build` node for
+  node, on evidence taken from the reference runtime rather than from its source. Six tests pass.
+- **A new probe mode, `level`, drives the real thing.** It builds four GameObjects
+  (`Root -> Child -> Grandchild`, plus a parentless `Second`) with distinct local transforms,
+  links them through the reference's own generated API, and dumps every node of the `ToGltf2()`
+  result of the shipped `Build`. The rows are committed verbatim as
+  `src/resources/glb_level_fixture.txt`, and `level_plan_matches_the_reference_runtime_rows`
+  rebuilds the same hierarchy and compares name, parent, children, translation, rotation and scale
+  for all four nodes in both modes.
+- **Three of the port's rules are now confirmed rather than inferred:**
+  - Node order is depth-first in source order: `Root, Child, Grandchild, Second`.
+  - The `parentNode is not null || parameters.IsScene` rule is real and observable: an **asset**
+    build leaves both roots at the identity transform, while a **scene** build converts them
+    (`Root` position `(1,2,3)` becomes `(-1,2,3)`). A child is transformed in both modes.
+  - Scale is untouched by the conversion, including the `(2,2,2)` root.
+- **Last round's quaternion fix is now confirmed end-to-end.** The scene rows show the +90-degree
+  Y rotation arriving as `-0.70710677` about Y and the +90-degree Z rotation as `-0.70710677`
+  about Z, while the +60-degree X rotation keeps its sign. That is exactly
+  `axisFlipScale * CoordinateSpaceConversionScale` = `(1, -1, -1)`, seen through a real scene
+  build rather than through a unit call on the helper - independent corroboration of
+  `DIFF-GLB-QUATERNION-SIGN-001`.
+- **A genuine reference finding, kept as a boundary rather than worked around:** a scene build
+  *validates* the local rotation. An all-zero quaternion makes SharpGLTF throw
+  `(Parameter 'rotation')`, which is how the probe first failed. That is the reference's own
+  behaviour feeding into a third-party validator, not a port gap; the fixture therefore uses valid
+  rotations and the note is recorded so a future reader does not mistake identity-initialised
+  Transforms for a port bug.
+- **Getting a usable fixture took several attempts, and the dead ends are worth recording** so the
+  next agent does not repeat them: `ProcessedAssetCollection` does not register assets created
+  through a factory, and a PPtr resolves *through the collection*, so every link failed with
+  "Can't find transform component" until the assets were registered. `AddAsset` is protected; the
+  dictionary is declared on the base `AssetCollection`, not the concrete type, so the reflection
+  lookup has to walk `BaseType`. Hand-building `ComponentPair` PPtrs does not type them - the
+  generated `AddComponent` extension calls `SetAsset`, which is what makes the pointer resolve.
+  `Children_C4P` is a *view* over `Children_C4`, so a child has to be added to the parent's list as
+  well as pointed at its father.
+- Status: `src/resources/glb_level.rs` is still **not** wired into an export path, so `EXP-GLB-001`
+  keeps 已实现但未验证. What changed is that the traversal it will use is now reference-verified.
+- Evidence: `cargo test --locked --workspace` - **1842** library (up from 1841) + 199 bin tests,
+  0 failed, 1 ignored. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+
 ## 2026-10-16 - Found and fixed a real glTF quaternion sign bug (DIFF-GLB-QUATERNION-SIGN-001)
 
 - Outcome: a genuine correctness bug in the port's glTF coordinate conversion, found by starting

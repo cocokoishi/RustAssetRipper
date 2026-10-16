@@ -1,0 +1,40 @@
+# GlbLevelBuilder.Build: reference-runtime node output for a two-root, three-deep hierarchy.
+#
+# Captured from the isolated baseline build of the frozen reference by the probe mode
+#   dotnet run --project tools/probes/res-glb/ResGlbProbe.csproj -c Release -- level
+# which builds four GameObjects (Root -> Child -> Grandchild, plus a parentless Second) with
+# distinct local transforms, links them through the generated API, and dumps every node of the
+# `ToGltf2()` result of the shipped `GlbLevelBuilder.Build`.
+#
+# Columns:
+#   LLEVEL|<scene|asset>|unity version
+#   LNODE|<tag>|<name>|<parent>|<children>|<mesh>|<translation>|<scale>|<rotation xyzw>
+#
+# The two runs differ only in `BuildParameters.IsScene`, which is the point: the source writes a
+# node's local transform when `parentNode is not null || parameters.IsScene`, so an asset build
+# leaves a root at the identity while a scene build converts it.
+LEVEL|asset|2019.4.0f1
+NODE|asset|Root|<none>|Child|false|0,0,0|1,1,1|0,0,0,1
+NODE|asset|Child|Root|Grandchild|false|-4,5,6|1,1,1|0.5,-0,-0,0.8660254
+NODE|asset|Grandchild|Child||false|-7,8,9|1,1,1|0,-0,-0.70710677,0.70710677
+NODE|asset|Second|<none>||false|0,0,0|1,1,1|0,0,0,1
+LEVEL|scene|2019.4.0f1
+NODE|scene|Root|<none>|Child|false|-1,2,3|2,2,2|0,-0.70710677,-0,0.70710677
+NODE|scene|Child|Root|Grandchild|false|-4,5,6|1,1,1|0.5,-0,-0,0.8660254
+NODE|scene|Grandchild|Child||false|-7,8,9|1,1,1|0,-0,-0.70710677,0.70710677
+NODE|scene|Second|<none>||false|1,-2,-3|1,1,1|0,0,0,1
+#
+# Inputs, so the fixture is reproducible:
+#   Root       local position (1, 2, 3),  rotation +90 degrees about Y,  scale (2, 2, 2)
+#   Child      local position (4, 5, 6),  rotation +60 degrees about X,  scale (1, 1, 1)
+#   Grandchild local position (7, 8, 9),  rotation +90 degrees about Z,  scale (1, 1, 1)
+#   Second     local position (-1, -2, -3), identity rotation,          scale (1, 1, 1)
+#
+# Two observations worth keeping:
+#   * Translation is `(-x, y, z)`: 1 -> -1, 4 -> -4, 7 -> -7, -1 -> 1.
+#   * Rotation is `(x, -y, -z, w)`: the +90-degree Y rotation comes back as -0.70710677 about Y and
+#     the +90-degree Z rotation as -0.70710677 about Z, while the +60-degree X rotation keeps its
+#     sign. That is `axisFlipScale * CoordinateSpaceConversionScale` = (1, -1, -1), the rule fixed
+#     in DIFF-GLB-QUATERNION-SIGN-001, now confirmed through a real scene build rather than a unit
+#     call.
+#   * Scale is unchanged between coordinate systems, including the (2, 2, 2) root.

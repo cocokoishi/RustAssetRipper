@@ -1,6 +1,42 @@
 # RustAssetRipper hand-off — 2026-10-16
 
-## Latest current checkpoint - 2026-10-16 (glTF quaternion sign bug fixed; level plan ported)
+## Latest current checkpoint - 2026-10-16 (scene walk verified against the reference runtime)
+
+- `src/resources/glb_level.rs` now matches the shipped `GlbLevelBuilder.Build` **node for node**,
+  verified against the reference runtime and not against a reading of its source. The new probe
+  mode `dotnet run --project tools/probes/res-glb/ResGlbProbe.csproj -c Release -- level` builds a
+  two-root hierarchy, drives the real `Build`, and dumps every node; the rows are committed as
+  `src/resources/glb_level_fixture.txt`.
+- **Three rules confirmed, not inferred:** depth-first source order
+  (`Root, Child, Grandchild, Second`); the `parentNode is not null || IsScene` rule (an **asset**
+  build leaves roots at identity, a **scene** build converts them); and scale unchanged by the
+  conversion.
+- **`DIFF-GLB-QUATERNION-SIGN-001` is now corroborated end-to-end.** The scene rows show a
+  +90-degree Y rotation arriving as `-0.70710677` about Y, and +90 about Z as `-0.70710677` about
+  Z, while +60 about X keeps its sign - the `(1, -1, -1)` product seen through a real scene build.
+- **Reference behaviour worth knowing:** a scene build validates the local rotation, so an
+  all-zero quaternion makes SharpGLTF throw `(Parameter 'rotation')`. Use valid rotations in probe
+  fixtures; this is third-party validation of the reference's input, not a port gap.
+- **The `level` probe fixture took several attempts; these are the traps.**
+  `ProcessedAssetCollection` does not register factory-created assets, and a PPtr resolves
+  *through the collection*, so links fail with "Can't find transform component" until they are
+  registered. `AddAsset` is protected and its dictionary lives on the base `AssetCollection`, so
+  walk `BaseType`. Hand-built `ComponentPair` PPtrs are untyped; the generated `AddComponent`
+  extension's `SetAsset` call is what types them. `Children_C4P` views `Children_C4`, so a child
+  must be added to the parent's list as well as pointed at its father.
+- **Next step for `EXP-GLB-001`:** the traversal is reference-verified, so the remaining work is to
+  feed the plan into the GLB document writer and emit a real multi-node glTF scene, then compare
+  that document against the same probe output (which already dumps meshes and accessors).
+- Parity ledger: 405 rows, 381 verified, 24 non-verified, DUPES=0, MALFORMED=0, gate OPEN.
+  `glb_level.rs` is **not** wired into an export path and carries no parity row yet.
+- `/Scenes/View` still returns 501; the obstacle remains that `load_game` does not run
+  `process_workspace_scenes_and_prefabs` (only the export workflow does).
+- **Never run rustfmt on `src/resources/glb_tests_01.rs`**, `src/main_tests_01.rs`, or
+  `src/main_tests_03.rs` - all three are indented fragments and a whole-file run rewrites them.
+- Corpus replays are local-only and have not run in these rounds.
+- Verified: **1842** library + 199 bin tests, 0 failed; warnings-denied Clippy exit 0.
+
+## Previous checkpoint - 2026-10-16 (glTF quaternion sign bug fixed; level plan ported)
 
 - **A real correctness bug was found and fixed: `DIFF-GLB-QUATERNION-SIGN-001`.** The glTF
   quaternion conversion had every axis sign inverted. The reference multiplies the axis by
