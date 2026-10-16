@@ -369,6 +369,397 @@
         );
     }
 
+    /// Build a `Mesh` file matching the **production** class-43 layout at 2019.4.0f1.
+    ///
+    /// The ten-node `make_mesh_file` sketch above decodes only under the synthetic layout source:
+    /// production places `m_Shapes` between `m_SubMeshes` and `m_BindPose`, then
+    /// `m_BoneNameHashes`, `m_RootBoneNameHash`, `m_BonesAABB`, `m_VariableBoneCountWeights`, the
+    /// compression byte, three readability flags, `m_IndexFormat`, `m_IndexBuffer`,
+    /// `m_VertexData`, `m_CompressedMesh`, `m_LocalAABB`, `m_MeshUsageFlags`, the two baked
+    /// collision meshes, two mesh metrics and `m_StreamData`. This builder writes that full field
+    /// list with empty containers where the reference has none, and one triangle of real geometry.
+    ///
+    /// The vertex stream is one `Float32` dimension-3 channel at offset 0 with stride 12.
+    pub(super) fn make_production_mesh_file() -> Vec<u8> {
+        let mut strings = Vec::new();
+        let t = |strings: &mut Vec<u8>, value: &str| push_type_tree_string(strings, value);
+        let mesh_type = t(&mut strings, "Mesh");
+        let empty = t(&mut strings, "");
+        let array_type = t(&mut strings, "Array");
+        let int_type = t(&mut strings, "int");
+        let uint_type = t(&mut strings, "unsigned int");
+        let uint8_type = t(&mut strings, "UInt8");
+        let char_type = t(&mut strings, "char");
+        let bool_type = t(&mut strings, "bool");
+        let float_type = t(&mut strings, "float");
+        let vector_type = t(&mut strings, "vector");
+        let vector3_type = t(&mut strings, "Vector3f");
+        let aabb_type = t(&mut strings, "AABB");
+        let sub_mesh_type = t(&mut strings, "SubMesh");
+        let blend_data_type = t(&mut strings, "BlendShapeData");
+        let channel_info_type = t(&mut strings, "ChannelInfo");
+        let vertex_data_type = t(&mut strings, "VertexData");
+        let typeless_type = t(&mut strings, "TypelessData");
+        let compressed_type = t(&mut strings, "CompressedMesh");
+        let packed_type = t(&mut strings, "PackedBitVector");
+        let variable_type = t(&mut strings, "VariableBoneCountWeights");
+        let streaming_type = t(&mut strings, "StreamingInfo");
+
+        let f_name = t(&mut strings, "m_Name");
+        let f_size = t(&mut strings, "size");
+        let f_data = t(&mut strings, "data");
+        let f_sub_meshes = t(&mut strings, "m_SubMeshes");
+        let f_first_byte = t(&mut strings, "firstByte");
+        let f_index_count = t(&mut strings, "indexCount");
+        let f_topology = t(&mut strings, "topology");
+        let f_base_vertex = t(&mut strings, "baseVertex");
+        let f_first_vertex = t(&mut strings, "firstVertex");
+        let f_vertex_count = t(&mut strings, "vertexCount");
+        let f_local_aabb = t(&mut strings, "localAABB");
+        let f_center = t(&mut strings, "m_Center");
+        let f_extent = t(&mut strings, "m_Extent");
+        let f_x = t(&mut strings, "x");
+        let f_y = t(&mut strings, "y");
+        let f_z = t(&mut strings, "z");
+        let f_shapes = t(&mut strings, "m_Shapes");
+        let f_bs_vertices = t(&mut strings, "vertices");
+        let f_shapes_vec = t(&mut strings, "shapes");
+        let f_channels = t(&mut strings, "channels");
+        let f_full_weights = t(&mut strings, "fullWeights");
+        let f_bind_pose = t(&mut strings, "m_BindPose");
+        let f_bone_hashes = t(&mut strings, "m_BoneNameHashes");
+        let f_root_bone_hash = t(&mut strings, "m_RootBoneNameHash");
+        let f_bones_aabb = t(&mut strings, "m_BonesAABB");
+        let f_variable = t(&mut strings, "m_VariableBoneCountWeights");
+        let f_data_vec = t(&mut strings, "m_Data");
+        let f_mesh_compression = t(&mut strings, "m_MeshCompression");
+        let f_is_readable = t(&mut strings, "m_IsReadable");
+        let f_keep_vertices = t(&mut strings, "m_KeepVertices");
+        let f_keep_indices = t(&mut strings, "m_KeepIndices");
+        let f_index_format = t(&mut strings, "m_IndexFormat");
+        let f_index_buffer = t(&mut strings, "m_IndexBuffer");
+        let f_vertex_data = t(&mut strings, "m_VertexData");
+        let f_vd_count = t(&mut strings, "m_VertexCount");
+        let f_vd_channels = t(&mut strings, "m_Channels");
+        let f_stream = t(&mut strings, "stream");
+        let f_offset = t(&mut strings, "offset");
+        let f_format = t(&mut strings, "format");
+        let f_dimension = t(&mut strings, "dimension");
+        let f_data_size = t(&mut strings, "m_DataSize");
+        let f_compressed = t(&mut strings, "m_CompressedMesh");
+        let f_num_items = t(&mut strings, "m_NumItems");
+        let f_range = t(&mut strings, "m_Range");
+        let f_start = t(&mut strings, "m_Start");
+        let f_bit_size = t(&mut strings, "m_BitSize");
+        let f_local_aabb2 = t(&mut strings, "m_LocalAABB");
+        let f_usage_flags = t(&mut strings, "m_MeshUsageFlags");
+        let f_baked_convex = t(&mut strings, "m_BakedConvexCollisionMesh");
+        let f_baked_tri = t(&mut strings, "m_BakedTriangleCollisionMesh");
+        let f_metric0 = t(&mut strings, "m_MeshMetrics[0]");
+        let f_metric1 = t(&mut strings, "m_MeshMetrics[1]");
+        let f_stream_data = t(&mut strings, "m_StreamData");
+        let f_path = t(&mut strings, "path");
+
+        let mut nodes: Vec<(u8, u32, u32, i32)> = Vec::new();
+        fn push(
+            nodes: &mut Vec<(u8, u32, u32, i32)>,
+            level: u8,
+            type_offset: u32,
+            name_offset: u32,
+            byte_size: i32,
+        ) {
+            nodes.push((level, type_offset, name_offset, byte_size));
+        }
+        // A `string` field: Array -> size (int), data (char).
+        fn push_string(
+            nodes: &mut Vec<(u8, u32, u32, i32)>,
+            level: u8,
+            name: u32,
+            types: (u32, u32, u32),
+            names: (u32, u32),
+        ) {
+            let (array_type, int_type, char_type) = types;
+            let (size, data) = names;
+            push(nodes, level, array_type, name, -1);
+            push(nodes, level + 1, array_type, array_type, -1);
+            push(nodes, level + 2, int_type, size, 4);
+            push(nodes, level + 2, char_type, data, 1);
+        }
+        // An empty `vector`: Array -> size only.
+        fn push_empty_vector(
+            nodes: &mut Vec<(u8, u32, u32, i32)>,
+            level: u8,
+            name: u32,
+            types: (u32, u32, u32),
+            size: u32,
+        ) {
+            let (vector_type, array_type, int_type) = types;
+            push(nodes, level, vector_type, name, -1);
+            push(nodes, level + 1, array_type, array_type, -1);
+            push(nodes, level + 2, int_type, size, 4);
+        }
+        // A `Vector3f` of three floats.
+        fn push_vector3(
+            nodes: &mut Vec<(u8, u32, u32, i32)>,
+            level: u8,
+            name: u32,
+            types: (u32, u32),
+            components: (u32, u32, u32),
+        ) {
+            let (vector3_type, float_type) = types;
+            push(nodes, level, vector3_type, name, 12);
+            for component in [components.0, components.1, components.2] {
+                push(nodes, level + 1, float_type, component, 4);
+            }
+        }
+
+        let string_types = (array_type, int_type, char_type);
+        let vector_types = (vector_type, array_type, int_type);
+        let vector3_types = (vector3_type, float_type);
+        let coords = (f_x, f_y, f_z);
+
+        push(&mut nodes, 0, mesh_type, empty, -1);
+        push_string(
+            &mut nodes,
+            1,
+            f_name,
+            string_types,
+            (f_size, f_data),
+        );
+        // m_SubMeshes: one 48-byte SubMesh.
+        push(&mut nodes, 1, vector_type, f_sub_meshes, -1);
+        push(&mut nodes, 2, array_type, array_type, -1);
+        push(&mut nodes, 3, int_type, f_size, 4);
+        push(&mut nodes, 3, sub_mesh_type, f_data, 48);
+        push(&mut nodes, 4, uint_type, f_first_byte, 4);
+        push(&mut nodes, 4, uint_type, f_index_count, 4);
+        push(&mut nodes, 4, int_type, f_topology, 4);
+        push(&mut nodes, 4, uint_type, f_base_vertex, 4);
+        push(&mut nodes, 4, uint_type, f_first_vertex, 4);
+        push(&mut nodes, 4, uint_type, f_vertex_count, 4);
+        push(&mut nodes, 4, aabb_type, f_local_aabb, 24);
+        push_vector3(&mut nodes, 5, f_center, vector3_types, coords);
+        push_vector3(&mut nodes, 5, f_extent, vector3_types, coords);
+        // m_Shapes: a BlendShapeData with four empty vectors.
+        push(&mut nodes, 1, blend_data_type, f_shapes, -1);
+        for name in [f_bs_vertices, f_shapes_vec, f_channels, f_full_weights] {
+            push_empty_vector(&mut nodes, 2, name, vector_types, f_size);
+        }
+        // Bone data: three empty vectors, a root hash, an empty AABB vector, then the
+        // variable-bone-count weights' own empty vector.
+        for name in [f_bind_pose, f_bone_hashes] {
+            push_empty_vector(&mut nodes, 1, name, vector_types, f_size);
+        }
+        push(&mut nodes, 1, uint_type, f_root_bone_hash, 4);
+        push_empty_vector(&mut nodes, 1, f_bones_aabb, vector_types, f_size);
+        push(&mut nodes, 1, variable_type, f_variable, -1);
+        push_empty_vector(&mut nodes, 2, f_data_vec, vector_types, f_size);
+        push(&mut nodes, 1, uint8_type, f_mesh_compression, 1);
+        push(&mut nodes, 1, bool_type, f_is_readable, 1);
+        push(&mut nodes, 1, bool_type, f_keep_vertices, 1);
+        push(&mut nodes, 1, bool_type, f_keep_indices, 1);
+        push(&mut nodes, 1, int_type, f_index_format, 4);
+        push(&mut nodes, 1, vector_type, f_index_buffer, -1);
+        push(&mut nodes, 2, array_type, array_type, -1);
+        push(&mut nodes, 3, int_type, f_size, 4);
+        push(&mut nodes, 3, uint8_type, f_data, 1);
+        // m_VertexData: count, one channel, then the raw data blob.
+        push(&mut nodes, 1, vertex_data_type, f_vertex_data, -1);
+        push(&mut nodes, 2, uint_type, f_vd_count, 4);
+        push(&mut nodes, 2, vector_type, f_vd_channels, -1);
+        push(&mut nodes, 3, array_type, array_type, -1);
+        push(&mut nodes, 4, int_type, f_size, 4);
+        push(&mut nodes, 4, channel_info_type, f_data, 4);
+        push(&mut nodes, 5, uint8_type, f_stream, 1);
+        push(&mut nodes, 5, uint8_type, f_offset, 1);
+        push(&mut nodes, 5, uint8_type, f_format, 1);
+        push(&mut nodes, 5, uint8_type, f_dimension, 1);
+        push(&mut nodes, 2, typeless_type, f_data_size, -1);
+        push(&mut nodes, 3, int_type, f_size, 4);
+        push(&mut nodes, 3, uint8_type, f_data, 1);
+        // m_CompressedMesh: ten PackedBitVectors. The production order interleaves the two
+        // shapes - `m_Vertices`, `m_UV`, `m_Normals` and `m_Tangents` carry a range and a start,
+        // then `m_Weights`, `m_NormalSigns` and `m_TangentSigns` do not, then `m_FloatColors`
+        // does, and `m_BoneIndices` and `m_Triangles` do not. The payload is positional, so
+        // reading that order matters.
+        let packed: [(u32, bool); 10] = [
+            (t(&mut strings, "m_Vertices"), true),
+            (t(&mut strings, "m_UV"), true),
+            (t(&mut strings, "m_Normals"), true),
+            (t(&mut strings, "m_Tangents"), true),
+            (t(&mut strings, "m_Weights"), false),
+            (t(&mut strings, "m_NormalSigns"), false),
+            (t(&mut strings, "m_TangentSigns"), false),
+            (t(&mut strings, "m_FloatColors"), true),
+            (t(&mut strings, "m_BoneIndices"), false),
+            (t(&mut strings, "m_Triangles"), false),
+        ];
+        push(&mut nodes, 1, compressed_type, f_compressed, -1);
+        for (name, has_range) in packed {
+            push(&mut nodes, 2, packed_type, name, -1);
+            push(&mut nodes, 3, uint_type, f_num_items, 4);
+            if has_range {
+                push(&mut nodes, 3, float_type, f_range, 4);
+                push(&mut nodes, 3, float_type, f_start, 4);
+            }
+            push(&mut nodes, 3, vector_type, f_data_vec, -1);
+            push(&mut nodes, 4, array_type, array_type, -1);
+            push(&mut nodes, 5, int_type, f_size, 4);
+            push(&mut nodes, 5, uint8_type, f_data, 1);
+            push(&mut nodes, 3, uint8_type, f_bit_size, 1);
+        }
+        push(&mut nodes, 2, uint_type, t(&mut strings, "m_UVInfo"), 4);
+        push(&mut nodes, 1, aabb_type, f_local_aabb2, 24);
+        push_vector3(&mut nodes, 2, f_center, vector3_types, coords);
+        push_vector3(&mut nodes, 2, f_extent, vector3_types, coords);
+        push(&mut nodes, 1, int_type, f_usage_flags, 4);
+        push_empty_vector(&mut nodes, 1, f_baked_convex, vector_types, f_size);
+        push_empty_vector(&mut nodes, 1, f_baked_tri, vector_types, f_size);
+        push(&mut nodes, 1, float_type, f_metric0, 4);
+        push(&mut nodes, 1, float_type, f_metric1, 4);
+        push(&mut nodes, 1, streaming_type, f_stream_data, -1);
+        push(&mut nodes, 2, uint_type, f_offset, 4);
+        push(&mut nodes, 2, uint_type, f_size, 4);
+        push_string(&mut nodes, 2, f_path, string_types, (f_size, f_data));
+
+        let vertex_data: [f32; 9] = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let mut vertex_bytes = Vec::with_capacity(36);
+        for value in vertex_data {
+            vertex_bytes.extend_from_slice(&value.to_le_bytes());
+        }
+
+        let mut payload = Vec::new();
+        put_typetree_string_value(&mut payload, "Tri");
+        // m_SubMeshes: one sub-mesh with three indices.
+        put_i32_le(&mut payload, 1);
+        put_u32_le(&mut payload, 0); // firstByte
+        put_u32_le(&mut payload, 3); // indexCount
+        put_i32_le(&mut payload, 0); // topology
+        put_u32_le(&mut payload, 0); // baseVertex
+        put_u32_le(&mut payload, 0); // firstVertex
+        put_u32_le(&mut payload, 3); // vertexCount
+        for _ in 0..6 {
+            put_f32_le(&mut payload, 0.0); // localAABB center + extent
+        }
+        // m_Shapes: four empty vectors.
+        for _ in 0..4 {
+            put_i32_le(&mut payload, 0);
+        }
+        // m_BindPose, m_BoneNameHashes, m_RootBoneNameHash, m_BonesAABB, then the
+        // VariableBoneCountWeights' own empty vector.
+        put_i32_le(&mut payload, 0);
+        put_i32_le(&mut payload, 0);
+        put_u32_le(&mut payload, 0);
+        put_i32_le(&mut payload, 0);
+        put_i32_le(&mut payload, 0);
+        // m_MeshCompression, the three readability flags, m_IndexFormat.
+        payload.push(0);
+        payload.push(1);
+        payload.push(1);
+        payload.push(1);
+        put_i32_le(&mut payload, 0); // m_IndexFormat: 16-bit
+        // m_IndexBuffer: 0, 1, 2 as 16-bit indices.
+        put_i32_le(&mut payload, 6);
+        for value in [0u16, 1, 2] {
+            payload.extend_from_slice(&value.to_le_bytes());
+        }
+        payload.resize(payload.len() + 2, 0);
+        // m_VertexData
+        put_u32_le(&mut payload, 3); // m_VertexCount
+        put_i32_le(&mut payload, 1); // m_Channels size
+        payload.push(0); // stream
+        payload.push(0); // offset
+        payload.push(0); // format (Float32)
+        payload.push(3); // dimension
+        put_i32_le(&mut payload, i32::try_from(vertex_bytes.len()).unwrap());
+        payload.extend_from_slice(&vertex_bytes);
+        // m_CompressedMesh: every PackedBitVector empty, in the production field order. The
+        // reader aligns the next 4-byte field after each trailing `m_BitSize` byte, so every
+        // vector ends on a word boundary.
+        for extra_floats in [2, 2, 2, 2, 0, 0, 0, 2, 0, 0] {
+            put_u32_le(&mut payload, 0); // m_NumItems
+            for _ in 0..extra_floats {
+                put_f32_le(&mut payload, 0.0); // m_Range, m_Start
+            }
+            put_i32_le(&mut payload, 0); // m_Data size
+            payload.push(0); // m_BitSize
+            while !payload.len().is_multiple_of(4) {
+                payload.push(0);
+            }
+        }
+        put_u32_le(&mut payload, 0); // m_UVInfo
+        // m_LocalAABB center + extent.
+        for _ in 0..6 {
+            put_f32_le(&mut payload, 0.0);
+        }
+        put_i32_le(&mut payload, 0); // m_MeshUsageFlags
+        put_i32_le(&mut payload, 0); // m_BakedConvexCollisionMesh (empty)
+        put_i32_le(&mut payload, 0); // m_BakedTriangleCollisionMesh (empty)
+        put_f32_le(&mut payload, 0.0); // m_MeshMetrics[0]
+        put_f32_le(&mut payload, 0.0); // m_MeshMetrics[1]
+        put_u32_le(&mut payload, 0); // m_StreamData.offset
+        put_u32_le(&mut payload, 0); // m_StreamData.size
+        put_i32_le(&mut payload, 0); // m_StreamData.path (empty)
+        let padding = (4 - payload.len() % 4) % 4;
+        payload.resize(payload.len() + padding, 0);
+        finish_single_object_file(b"2019.4.0f1\0", 43, &nodes, &strings, &payload, 42)
+    }
+
+    #[test]
+    fn production_mesh_fixture_decodes_and_builds_a_glb() {
+        use crate::{load_object_workspace, load_workspace_from_vfs};
+        use assetripper::io::dependency::DependencyFilePath;
+        use assetripper::io::filesystem::VirtualFileSystem;
+        use assetripper::serialized_file::object_workspace::ObjectWorkspaceLimits;
+        use assetripper::serialized_file::workspace::SerializedFileWorkspaceLimits;
+
+        let _production = crate::SourceFactoryLayoutGuard::use_source_factory();
+        let bytes = make_production_mesh_file();
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem.create_directory(Some("/game")).unwrap();
+        filesystem
+            .write_all_bytes("/game/mesh.assets", &bytes)
+            .unwrap();
+        let input = DependencyFilePath {
+            file_name: "mesh.assets".to_owned(),
+            virtual_path: "/game/mesh.assets".to_owned(),
+        };
+        let workspace = load_workspace_from_vfs(
+            &filesystem,
+            &[input],
+            SerializedFileWorkspaceLimits::default(),
+        )
+        .expect("the workspace loads");
+        let objects =
+            load_object_workspace(&filesystem, &workspace, ObjectWorkspaceLimits::default())
+                .expect("the object workspace loads");
+        let object = objects.get(0, 0).expect("the mesh exists");
+        let payload = object
+            .payload
+            .as_ref()
+            .unwrap_or_else(|error| panic!("the mesh must decode: {error}"));
+        let view = assetripper::resources::mesh::MeshView::from_value(
+            &payload.root,
+            assetripper::resources::vertex_data_blob::UnityVersion {
+                major: 2019,
+                minor: 4,
+                patch: 0,
+            },
+            assetripper::resources::vertex_data_blob::EndianType::Little,
+        )
+        .unwrap_or_else(|error| panic!("the mesh view reads: {error}"));
+        let mesh_data = view
+            .read_mesh_data(
+                assetripper::resources::packed_bit_vector::PackedBitVectorLimits::default(),
+            )
+            .unwrap_or_else(|error| panic!("the mesh data reads: {error}"))
+            .expect("the mesh has data");
+        assert_eq!(mesh_data.vertices.len(), 3);
+        let exported = assetripper::resources::glb::build_glb("Tri", &mesh_data)
+            .unwrap_or_else(|error| panic!("the GLB builds: {error}"));
+        assert_eq!(&exported.bytes[0..4], b"glTF");
+    }
+
     /// A class-43 `Mesh` whose vertex data is a single Float32 position channel and whose index
     /// buffer holds one 16-bit triangle.
     pub(super) fn make_mesh_file() -> Vec<u8> {

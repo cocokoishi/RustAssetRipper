@@ -1018,7 +1018,7 @@ mod tests {
         // The probe input lives under the ignored `target/` scratch tree, like the
         // other repository tests' temporary inputs.
         use crate::tests::{
-            make_font_file, make_generated_audio_clip_file, make_mesh_file,
+            make_font_file, make_generated_audio_clip_file, make_production_mesh_file,
             make_reference_texture_file, make_video_clip_file,
         };
 
@@ -1099,7 +1099,8 @@ mod tests {
         // A Mesh whose payload follows the production class-43 layout, so the model tab and the
         // `/Assets/Model.glb` route exercise `MeshView` plus `build_glb`.
         let mesh_input = directory.join("z-mesh.assets");
-        std::fs::write(&mesh_input, make_mesh_file()).expect("the mesh asset is written");
+        std::fs::write(&mesh_input, make_production_mesh_file())
+            .expect("the mesh asset is written");
         // A VideoClip whose external-resource range names the probe resource input, so the
         // video fixture is exercised against a real class-329 payload end to end. The range
         // must match the resource exactly, so it reuses the probe bytes' own length.
@@ -1615,12 +1616,26 @@ mod tests {
             let response = get(&mut state, &mesh_hrefs[0]);
             assert_eq!(response.status(), 200);
             let mesh_asset = String::from_utf8(response.body().to_vec()).expect("pages are UTF-8");
-            // The model route and tab are implemented, but NOT verified end to end: the
-            // committed mesh fixture decodes only under the synthetic layout source, so under
-            // production layouts its class-43 payload falls back to `UnreadableObject` and the
-            // asset page shows no model tab. A production-layout mesh fixture is the next step;
-            // the render/route assertions stay out until they can pass against real bytes.
-            assert!(mesh_asset.contains("<h1>"), "{mesh_asset}");
+            assert!(mesh_asset.contains("/Assets/Model.glb?Path="), "{mesh_asset}");
+            assert!(mesh_asset.contains("babylonRenderCanvas"), "{mesh_asset}");
+            let mesh_path = mesh_hrefs[0].replacen("/Assets/View?Path=", "", 1);
+            let response = get(&mut state, &format!("/Assets/Model.glb?Path={mesh_path}"));
+            assert_eq!(
+                response.status(),
+                200,
+                "model body: {}",
+                String::from_utf8_lossy(response.body())
+            );
+            assert_eq!(response.content_type(), "model/gltf-binary");
+            // A GLB is a binary glTF container: magic `glTF`, version 2, then the total length.
+            let glb = response.body();
+            assert_eq!(&glb[0..4], b"glTF", "the route serves a GLB container");
+            assert_eq!(u32::from_le_bytes([glb[4], glb[5], glb[6], glb[7]]), 2);
+            assert_eq!(
+                u32::from_le_bytes([glb[8], glb[9], glb[10], glb[11]]) as usize,
+                glb.len(),
+                "the GLB header length matches the body"
+            );
 
             // Searching the class finds every fixture asset (both loaded copies),
             // case-insensitively.
