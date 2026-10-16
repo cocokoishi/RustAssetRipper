@@ -1,5 +1,40 @@
 # Validation log
 
+## 2026-10-16 - Model tab and `/Assets/Model.glb` verified
+
+- Outcome: `PRODUCT-ASSET-MODEL-TAB-001` is 已验证. The last tab in the frozen `ViewPage` list
+  now works end to end.
+- The previous round's blocker was a fixture, and `make_production_mesh_file` removes it. It
+  writes the full production class-43 field list: `m_Name`, `m_SubMeshes`, `m_Shapes`,
+  `m_BindPose`, `m_BoneNameHashes`, `m_RootBoneNameHash`, `m_BonesAABB`,
+  `m_VariableBoneCountWeights`, `m_MeshCompression`, the three readability flags,
+  `m_IndexFormat`, `m_IndexBuffer`, `m_VertexData`, `m_CompressedMesh`, `m_LocalAABB`,
+  `m_MeshUsageFlags`, both baked collision meshes, both mesh metrics and `m_StreamData`.
+- **Two payload details, both load bearing and both found by reading the dump rather than
+  guessing:**
+  1. The ten `PackedBitVector`s in `m_CompressedMesh` are ordered `m_Vertices`, `m_UV`,
+     `m_Normals`, `m_Tangents`, `m_Weights`, `m_NormalSigns`, `m_TangentSigns`, `m_FloatColors`,
+     `m_BoneIndices`, `m_Triangles` - and only `m_Vertices`, `m_UV`, `m_Normals`, `m_Tangents`
+     and `m_FloatColors` carry `m_Range`/`m_Start`. `m_FloatColors` sits **eighth**, not fifth.
+     Because the payload is positional, putting it fifth shifted everything after it and the
+     reader failed at `m_BakedConvexCollisionMesh`.
+  2. The reader aligns the next 4-byte field after each trailing `m_BitSize` byte, so every
+     `PackedBitVector` must end on a word boundary. Ten vectors each short by two padding bytes
+     produced a 4-byte shortfall that surfaced as `truncated input` at `m_LocalAABB`.
+- The e2e asserts the asset page links the route (with the Babylon canvas), and that the route
+  answers `model/gltf-binary` with a GLB whose magic is `glTF`, whose version is 2, and whose
+  declared length equals the body length.
+- **Process note, recorded because it cost real work.** While tidying, I ran a `git checkout --`
+  on `src/main_tests_03.rs` to drop what I believed were only formatting changes. It discarded
+  the entire uncommitted fixture, which was recoverable only by rewriting it. Nothing else was
+  affected (`routes.rs` kept its changes, and the reflog held no copy). The lesson is to commit a
+  working unit as soon as it passes rather than batching it with cosmetics, and never to run a
+  path-reverting command against a file whose uncommitted contents are not already safe. This
+  entry records the mistake rather than hiding it.
+- Evidence: `cargo test --locked --workspace` - 1834 library + 199 bin tests, 0 failed, 1
+  ignored. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0. Parity:
+  new row `PRODUCT-ASSET-MODEL-TAB-001` 已验证.
+
 ## 2026-10-16 - Model tab and `/Assets/Model.glb` implemented; not yet verified
 
 - Outcome: `render_asset_model`, the `/Assets/Model.glb` route and the model tab are implemented.

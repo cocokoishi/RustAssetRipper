@@ -1,5 +1,30 @@
 # RustAssetRipper hand-off — 2026-10-16
 
+## Latest current checkpoint - 2026-10-16 (model tab verified; all frozen tabs complete)
+
+- `PRODUCT-ASSET-MODEL-TAB-001` is 已验证. **Every tab in the frozen `ViewPage` list is now
+  implemented**, and all but the ordering detail below are verified.
+- The mesh blocker is gone: `make_production_mesh_file` writes the full production class-43
+  field list. Two payload facts to remember if this fixture is ever touched: the ten
+  `PackedBitVector`s are ordered so that `m_FloatColors` is **eighth** (only `m_Vertices`,
+  `m_UV`, `m_Normals`, `m_Tangents`, `m_FloatColors` carry `m_Range`/`m_Start`), and the reader
+  aligns the next 4-byte field after each trailing `m_BitSize` byte.
+- E2e model assertions are in place: the page links the route, and the response is a GLB with
+  magic `glTF`, version 2, and a declared length equal to the body.
+- **Next:** align the port's asset tab order with the frozen `ViewPage` order (Information,
+  Audio, Image, Model, Text, Font, Video, Yaml, Json, Hex, Dependencies, Development) - the port
+  currently emits them in a different sequence. Then `/Scenes/View` extras,
+  `/FailedFiles/Stack`, and `/Export/PrimaryContent`.
+- **Process warning.** I lost an uncommitted fixture this round by running `git checkout --` on
+  `src/main_tests_03.rs` to drop formatting noise, and had to rewrite it. Commit a passing unit
+  before doing any cleanup, and never revert a path whose uncommitted contents are not already
+  safe somewhere.
+- The e2e fixture set is nine inputs with root collections ordering
+  `z-audio(0), z-font(1), z-mesh(2), z-textasset(3), z-texture(4), z-unknown(5), z-video(6)`.
+- Parity ledger: 403 rows, 378 verified, 25 non-verified, gate OPEN.
+- Do not run rustfmt on `src/main_tests_01.rs` or `src/main_tests_03.rs`.
+- Verified: 1834 library + 199 bin tests, 0 failed; warnings-denied Clippy exit 0.
+
 ## Latest current checkpoint - 2026-10-16 (model tab implemented; blocked on a mesh fixture)
 
 - **Start here.** `render_asset_model`, `/Assets/Model.glb` and the model tab are implemented and
