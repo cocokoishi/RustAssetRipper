@@ -1,5 +1,12 @@
 # RustAssetRipper hand-off — 2026-10-10
 
+## Latest current checkpoint — 2026-10-15 (predefined Mesh redirect implemented; replay pending)
+
+- Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public (only class IDs/counts/field names in docs; audit outputs quarantined).
+- DIFF-ENGINE-MESH-CACHE-001 fix implemented: the `tools/probes/engine-assets` probe gained a `meshtsv` mode and four `predefined_meshes_band_*.tsv` tables (2018.3.0b6, 2022.2.15f1, 2022.3.11f1, 6000.0.29f1) are embedded; the routing decision derives the frozen `MeshKey` (name, `m_VertexData.m_VertexCount`, `m_SubMeshes` count, `m_LocalAABB` center/extent) from a decoded class-43 payload and redirects when the band table matches, declining whenever a key component is unreadable.
+- Local checks: 1807 library + 133 CLI tests pass, warnings-denied Clippy clean, `git diff --check` clean, edited files rustfmt-clean (whole-tree fmt still shows only the five documented pre-existing drift files). **Next step: replay the affected world and audit that the two extra Cube mesh assets are no longer written and the later mesh suffixes realign** (this is the evidence that closes DIFF-ENGINE-MESH-CACHE-001).
+- Converged set unchanged until re-verified: AV01-AV11, W01-W05.
+
 ## Latest current checkpoint — 2026-10-15 (fourth world down to one real cluster; next blocker is the predefined Mesh redirect)
 
 - Worktree `../main-work` (detached); the Desktop checkout's conflicts and local changes are untouched. Real samples are the top corpus; strict anonymity everywhere public (only class IDs/counts/field names in docs; audit outputs quarantined).

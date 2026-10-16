@@ -36,6 +36,14 @@ const PREDEFINED_ENGINE_SPRITES_BAND_2018_3_0B6: &str =
     include_str!("predefined_sprites_band_2018_3_0b6.tsv");
 const PREDEFINED_ENGINE_TEXTURES_BAND_2018_3_0B6: &str =
     include_str!("predefined_textures_band_2018_3_0b6.tsv");
+const PREDEFINED_ENGINE_MESHES_BAND_2022_2_15F1: &str =
+    include_str!("predefined_meshes_band_2022_2_15f1.tsv");
+const PREDEFINED_ENGINE_MESHES_BAND_2022_3_11F1: &str =
+    include_str!("predefined_meshes_band_2022_3_11f1.tsv");
+const PREDEFINED_ENGINE_MESHES_BAND_6000_0_29F1: &str =
+    include_str!("predefined_meshes_band_6000_0_29f1.tsv");
+const PREDEFINED_ENGINE_MESHES_BAND_2018_3_0B6: &str =
+    include_str!("predefined_meshes_band_2018_3_0b6.tsv");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PredefinedEngineAssetTarget {
@@ -289,6 +297,21 @@ fn predefined_engine_texture_rows(band: &str) -> Option<&'static str> {
     }
 }
 
+/// Mesh identity rows for an `EngineAssetsTpk` band key.
+///
+/// Only probed bands have embedded rows; anything else selects nothing. Each row is
+/// `fileID|resourceKind|meshName|vertexCount|subMeshCount|cx|cy|cz|ex|ey|ez`, mirroring the
+/// frozen `MeshKey(Name, VertexCount, SubMeshCount, LocalAABB)` match.
+fn predefined_engine_mesh_rows(band: &str) -> Option<&'static str> {
+    match band {
+        "2018.3.0b6" => Some(PREDEFINED_ENGINE_MESHES_BAND_2018_3_0B6),
+        "2022.2.15f1" => Some(PREDEFINED_ENGINE_MESHES_BAND_2022_2_15F1),
+        "2022.3.11f1" => Some(PREDEFINED_ENGINE_MESHES_BAND_2022_3_11F1),
+        "6000.0.29f1" => Some(PREDEFINED_ENGINE_MESHES_BAND_6000_0_29F1),
+        _ => None,
+    }
+}
+
 fn predefined_engine_guid_words(
     table_kind: &str,
     line_index: usize,
@@ -421,8 +444,156 @@ fn predefined_engine_texture_target(
     Ok(None)
 }
 
-/// Lenient `m_Name` read for predefined engine-asset matching.
+/// The frozen `PredefinedAssetCache.MeshKey` components read from one decoded class-43 Mesh:
+/// name, vertex count, sub-mesh count and the local bounding box.
+struct PredefinedEngineMeshKey {
+    name: String,
+    vertex_count: i32,
+    sub_mesh_count: usize,
+    center: [f32; 3],
+    extent: [f32; 3],
+}
+
+/// The frozen `PredefinedAssetCache.MeshKey` decided from a decoded class-43 Mesh.
 ///
+/// Every component must be readable; a mesh whose identity cannot be established keeps
+/// its ordinary route instead of risking a wrong redirect.
+fn predefined_engine_mesh_key(root: &SerializedValue) -> Option<PredefinedEngineMeshKey> {
+    let name = predefined_engine_object_name(root)?;
+    let vertex_data = root
+        .unique_field_in_base_chain("m_VertexData")
+        .ok()
+        .flatten()?;
+    let vertex_count = match vertex_data.unique_field("m_VertexCount").ok().flatten()? {
+        SerializedValue::I32(count) => *count,
+        SerializedValue::U32(count) => i32::try_from(*count).ok()?,
+        _ => return None,
+    };
+    let sub_mesh_count = match root
+        .unique_field_in_base_chain("m_SubMeshes")
+        .ok()
+        .flatten()?
+    {
+        SerializedValue::Array(sub_meshes) => sub_meshes.len(),
+        SerializedValue::Bytes(bytes) => bytes.len(),
+        _ => return None,
+    };
+    let aabb = root
+        .unique_field_in_base_chain("m_LocalAABB")
+        .ok()
+        .flatten()?;
+    let center = predefined_engine_vector3(aabb, "m_Center")?;
+    let extent = predefined_engine_vector3(aabb, "m_Extent")?;
+    Some(PredefinedEngineMeshKey {
+        name,
+        vertex_count,
+        sub_mesh_count,
+        center,
+        extent,
+    })
+}
+
+fn predefined_engine_vector3(value: &SerializedValue, field_name: &str) -> Option<[f32; 3]> {
+    let vector = value.unique_field(field_name).ok().flatten()?;
+    let mut components = [0.0f32; 3];
+    for (index, name) in ["x", "y", "z"].into_iter().enumerate() {
+        let component = vector.unique_field(name).ok().flatten()?;
+        let SerializedValue::F32(component) = component else {
+            return None;
+        };
+        components[index] = *component;
+    }
+    Some(components)
+}
+
+fn predefined_engine_mesh_target(
+    name: &str,
+    vertex_count: i32,
+    sub_mesh_count: usize,
+    center: [f32; 3],
+    extent: [f32; 3],
+    unity_version: Option<&str>,
+) -> Result<Option<PredefinedEngineAssetTarget>, Box<dyn Error>> {
+    let Some(band) = select_engine_assets_band(unity_version) else {
+        return Ok(None);
+    };
+    let Some(table) = predefined_engine_mesh_rows(band) else {
+        return Ok(None);
+    };
+    // The counts are compared as parsed numbers because the table stores one numeric
+    // column kind; every value is a small integer or an exact float, so f64 is lossless.
+    let expected: [f64; 8] = [
+        f64::from(vertex_count),
+        sub_mesh_count as f64,
+        f64::from(center[0]),
+        f64::from(center[1]),
+        f64::from(center[2]),
+        f64::from(extent[0]),
+        f64::from(extent[1]),
+        f64::from(extent[2]),
+    ];
+    for (line_index, line) in table.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut fields = line.splitn(11, '|');
+        let Some(file_id_text) = fields.next() else {
+            return Err(invalid_project(format!(
+                "predefined Mesh table row {} has no file ID",
+                line_index + 1
+            )));
+        };
+        let Some(resource_kind) = fields.next() else {
+            return Err(invalid_project(format!(
+                "predefined Mesh table row {} has no resource kind",
+                line_index + 1
+            )));
+        };
+        let Some(candidate_name) = fields.next() else {
+            return Err(invalid_project(format!(
+                "predefined Mesh table row {} has no name",
+                line_index + 1
+            )));
+        };
+        if candidate_name != name {
+            continue;
+        }
+        // The frozen `MeshKey` compares the vertex count, the sub-mesh count and all six
+        // bounding-box components exactly, so every numeric field must parse.
+        let mut numbers = [0f64; 8];
+        let mut malformed = false;
+        for slot in numbers.iter_mut() {
+            match fields.next().and_then(|text| text.parse::<f64>().ok()) {
+                Some(value) => *slot = value,
+                None => {
+                    malformed = true;
+                    break;
+                }
+            }
+        }
+        if malformed || fields.next().is_some() {
+            return Err(invalid_project(format!(
+                "predefined Mesh table row {} has malformed numeric fields",
+                line_index + 1
+            )));
+        }
+        if numbers != expected {
+            continue;
+        }
+        let file_id = file_id_text.parse::<i64>().map_err(|error| {
+            invalid_project(format!(
+                "predefined Mesh table row {} has an invalid file ID: {error}",
+                line_index + 1
+            ))
+        })?;
+        let guid = predefined_engine_guid_words("Mesh", line_index, resource_kind)?;
+        return Ok(Some(PredefinedEngineAssetTarget { file_id, guid }));
+    }
+    Ok(None)
+}
+
+/// Lenient `m_Name` read for predefined engine-asset matching.
 /// Missing fields, wrong types, and non-UTF-8 bytes select no redirect rather
 /// than failing the export: the redirect is opportunistic and the asset keeps
 /// its ordinary route when identity cannot be established.
@@ -1075,10 +1246,36 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
             } else {
                 None
             };
+            let predefined_engine_mesh = if source_engine_guid.is_none()
+                && class_id == crate::export::res_wiring::MESH_CLASS_ID
+            {
+                if let Some(payload) = payload {
+                    // The frozen cache keys a Mesh by name, vertex count, sub-mesh count
+                    // and local bounding box; a mesh that reproduces the builtin identity
+                    // is redirected and consumes no export file name, which keeps the
+                    // shared-name suffix sequence aligned with the baseline.
+                    match predefined_engine_mesh_key(&payload.root) {
+                        Some(key) => predefined_engine_mesh_target(
+                            &key.name,
+                            key.vertex_count,
+                            key.sub_mesh_count,
+                            key.center,
+                            key.extent,
+                            file.metadata.prefix.unity_version_text.as_deref(),
+                        )?,
+                        None => None,
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             let predefined_engine_target = predefined_engine_shader
                 .or(predefined_engine_material)
                 .or(predefined_engine_sprite)
-                .or(predefined_engine_texture);
+                .or(predefined_engine_texture)
+                .or(predefined_engine_mesh);
             let engine_guid =
                 source_engine_guid.or_else(|| predefined_engine_target.map(|target| target.guid));
             let audio_view = if source_engine_guid.is_none()
@@ -2085,6 +2282,7 @@ fn font_collection_subasset<'object>(
 mod tests {
     use super::{
         predefined_engine_material_rows, predefined_engine_material_target,
+        predefined_engine_mesh_rows, predefined_engine_mesh_target,
         predefined_engine_shader_target, predefined_engine_sprite_rows,
         predefined_engine_sprite_target, predefined_engine_texture_rows,
         predefined_engine_texture_target, project_object_name, select_engine_assets_band,
@@ -2384,6 +2582,95 @@ mod tests {
             data_rows(predefined_engine_texture_rows("2022.2.15f1").unwrap()),
             data_rows(predefined_engine_texture_rows("2022.3.11f1").unwrap())
         );
+    }
+
+    #[test]
+    fn unity_2022_3_predefined_mesh_matches_name_counts_and_bounds() {
+        // 2022.3.22f1 selects the 2022.3.11f1 band. The builtin cube is path ID 10202
+        // with 24 vertices, one sub-mesh and a (0,0,0)/(0.5,0.5,0.5) bounding box.
+        let target = predefined_engine_mesh_target(
+            "Cube",
+            24,
+            1,
+            [0.0, 0.0, 0.0],
+            [0.5, 0.5, 0.5],
+            Some("2022.3.22f1"),
+        )
+        .unwrap()
+        .expect("the 2022.3.11f1 engine-assets band contains the builtin Cube mesh");
+        assert_eq!(target.file_id, 10202);
+        // The builtin primitives live in Unity's default resources, so the row's resource
+        // kind is `D` and the redirect identity is the default-resources GUID.
+        assert_eq!(target.guid, default_resources_guid());
+        // Every MeshKey component participates in the match.
+        for (label, vertex_count, sub_mesh_count, center, extent) in [
+            ("vertex count", 23, 1, [0.0, 0.0, 0.0], [0.5, 0.5, 0.5]),
+            ("sub-mesh count", 24, 2, [0.0, 0.0, 0.0], [0.5, 0.5, 0.5]),
+            ("center", 24, 1, [0.0, 0.0, 0.25], [0.5, 0.5, 0.5]),
+            ("extent", 24, 1, [0.0, 0.0, 0.0], [0.5, 0.5, 0.25]),
+        ] {
+            assert_eq!(
+                predefined_engine_mesh_target(
+                    "Cube",
+                    vertex_count,
+                    sub_mesh_count,
+                    center,
+                    extent,
+                    Some("2022.3.22f1")
+                )
+                .unwrap(),
+                None,
+                "a mismatched {label} must not redirect"
+            );
+        }
+        assert_eq!(
+            predefined_engine_mesh_target(
+                "NoSuchMesh",
+                24,
+                1,
+                [0.0, 0.0, 0.0],
+                [0.5, 0.5, 0.5],
+                Some("2022.3.22f1")
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn predefined_mesh_bands_are_per_band_and_include_the_builtin_cube() {
+        for band in ["2018.3.0b6", "2022.2.15f1", "2022.3.11f1", "6000.0.29f1"] {
+            let table = predefined_engine_mesh_rows(band).expect("probed band has a mesh table");
+            assert!(
+                table.lines().any(|line| line.contains("|Cube|24|1|")),
+                "band {band} must carry the builtin Cube row"
+            );
+        }
+        let rows = |table: &'static str| -> Vec<&'static str> {
+            table
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                .collect()
+        };
+        // Comparing 2022.2.15f1 with 2022.3.11f1 pins that these two probed bands carry
+        // the same mesh identity rows; the 2018 band is allowed to differ.
+        assert_eq!(
+            rows(predefined_engine_mesh_rows("2022.2.15f1").unwrap()),
+            rows(predefined_engine_mesh_rows("2022.3.11f1").unwrap())
+        );
+        assert!(predefined_engine_mesh_rows("2030.1.0f1").is_none());
+    }
+
+    fn default_resources_guid() -> [u8; 16] {
+        let mut guid = [0; 16];
+        for (index, word) in crate::export::guid_policy::ENGINE_DEFAULT_RESOURCES_GUID_WORDS
+            .iter()
+            .enumerate()
+        {
+            guid[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        guid
     }
 
     fn builtin_extra_guid() -> [u8; 16] {

@@ -13,6 +13,17 @@
 //       rows sorted by class ID. These are the frozen `Pass110` ClassName
 //       overrides (unversioned Unity names), read via reflection over the
 //       SourceGenerated assembly. Reads nothing else; writes only <out>.
+//   spritetextsv <version> <spritesOut> <texturesOut>
+//       Applies the frozen band selection for <version> and writes the Sprite
+//       (`fileID|kind|Name|TextureName`) and Texture2D
+//       (`fileID|kind|Name|Width|Height`) rows of that band.
+//   meshtsv <version> <meshesOut>
+//       Applies the frozen band selection for <version>, prints the selected
+//       band key to stdout, and writes the Mesh rows as
+//       `fileID|kind|Name|VertexCount|SubMeshCount|center.x|center.y|center.z|extent.x|extent.y|extent.z`
+//       — the exact fields of the frozen `MeshKey`. Rows missing a key field
+//       are counted on stderr instead of being guessed.
+using System.Globalization;
 using System.Reflection;
 using System.Text.Json;
 using AssetRipper.Primitives;
@@ -22,7 +33,7 @@ using AssetRipper.Tpk.EngineAssets;
 
 if (args.Length == 0)
 {
-	Console.Error.WriteLine("usage: bands <out> | bandjson <version> <out> | tsv <version> <materialsOut> <shadersOut> | spritetextsv <version> <spritesOut> <texturesOut> | classnames <out>");
+	Console.Error.WriteLine("usage: bands <out> | bandjson <version> <out> | tsv <version> <materialsOut> <shadersOut> | spritetextsv <version> <spritesOut> <texturesOut> | meshtsv <version> <meshesOut> | classnames <out>");
 	return 2;
 }
 
@@ -41,6 +52,9 @@ try
 			return 0;
 		case "spritetextsv":
 			DumpSpriteTextureTsv(args[1], args[2], args[3]);
+			return 0;
+		case "meshtsv":
+			DumpMeshTsv(args[1], args[2]);
 			return 0;
 		case "classnames":
 			DumpClassNames(args[1]);
@@ -61,6 +75,26 @@ static TpkEngineAssetsBlob LoadBlob()
 	using Stream stream = EngineAssetsTpk.GetStream();
 	return (TpkEngineAssetsBlob)TpkFile.FromStream(stream).GetDataBlob();
 }
+
+static int SelectBandIndex(TpkEngineAssetsBlob blob, UnityVersion version)
+{
+	// Exact copy of EngineAssetsExporter.CreateFromTpkBlob band selection.
+	if (version <= blob.Data[0].Key)
+	{
+		return 0;
+	}
+	int index = blob.Data.Count - 1;
+	for (int i = 1; i < blob.Data.Count; i++)
+	{
+		if (version <= blob.Data[i].Key)
+		{
+			index = i - 1;
+			break;
+		}
+	}
+	return index;
+}
+
 
 static void DumpBands(string output)
 {
@@ -222,6 +256,68 @@ static void DumpSpriteTextureTsv(string versionText, string spritesOut, string t
 	}
 	File.WriteAllLines(spritesOut, sprites);
 	File.WriteAllLines(texturesOut, textures);
+}
+
+static void DumpMeshTsv(string versionText, string meshesOut)
+{
+	TpkEngineAssetsBlob blob = LoadBlob();
+	UnityVersion version = UnityVersion.Parse(versionText);
+	int index = SelectBandIndex(blob, version);
+	Console.WriteLine($"KEY|{blob.Data[index].Key}");
+	using JsonDocument document = JsonDocument.Parse(blob.Data[index].Value);
+	List<string> meshes = new();
+	int skipped = 0;
+	foreach (string section in new[] { "DefaultResources", "ExtraResources" })
+	{
+		string kind = section == "DefaultResources" ? "D" : "F";
+		if (!document.RootElement.TryGetProperty(section, out JsonElement resources))
+		{
+			continue;
+		}
+		foreach (JsonProperty entry in resources.EnumerateObject())
+		{
+			JsonElement value = entry.Value;
+			string type = value.GetProperty("$type").GetString() ?? "";
+			if (type != "Mesh")
+			{
+				continue;
+			}
+			// Every frozen MeshKey component must be present; a guessed default
+			// would create a redirect key the baseline cache does not hold.
+			if (!value.TryGetProperty("Name", out JsonElement nameElement)
+				|| !value.TryGetProperty("VertexCount", out JsonElement vertexElement)
+				|| !value.TryGetProperty("SubMeshCount", out JsonElement subMeshElement)
+				|| !value.TryGetProperty("LocalAABB", out JsonElement aabb)
+				|| !aabb.TryGetProperty("Center", out JsonElement center)
+				|| !aabb.TryGetProperty("Extent", out JsonElement extent))
+			{
+				skipped++;
+				continue;
+			}
+			meshes.Add(string.Join('|', new[]
+			{
+				entry.Name,
+				kind,
+				nameElement.GetString() ?? "",
+				vertexElement.GetInt32().ToString(CultureInfo.InvariantCulture),
+				subMeshElement.GetInt32().ToString(CultureInfo.InvariantCulture),
+				FormatFloat(center, "X"),
+				FormatFloat(center, "Y"),
+				FormatFloat(center, "Z"),
+				FormatFloat(extent, "X"),
+				FormatFloat(extent, "Y"),
+				FormatFloat(extent, "Z"),
+			}));
+		}
+	}
+	File.WriteAllLines(meshesOut, meshes);
+	Console.WriteLine($"MESHROWS|{meshes.Count}|SKIPPED|{skipped}");
+}
+
+static string FormatFloat(JsonElement source, string property)
+{
+	// "R" is the shortest round-trippable form, so the Rust f32 parse is exact.
+	return source.GetProperty(property).GetSingle().ToString("R", CultureInfo.InvariantCulture);
 }
 
 static void DumpClassNames(string output)
