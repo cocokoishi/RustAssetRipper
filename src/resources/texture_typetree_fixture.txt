@@ -1,29 +1,27 @@
-﻿# Unity class-28 Texture2D release TypeTree, dumped from the reference `SourceTpk`
+# Unity class-28 Texture2D release TypeTree, dumped from the reference `SourceTpk`
 # (`tools/probes/tpk-trees`, AssetRipper.Tpk + AssetRipper.SourceGenerated).
 # Format: TREE|<version>|releaseRoot=<index> then
 # NODE|<version>|<level>|<type>|<name>|<byteSize>|<versionField>|<typeFlags>|<metaFlag>|<nodeIndex>|<subNodeCount>
 # The node walk is the reference Tpk recursion, so the level column is the tree depth.
 # String-buffer indices are preserved as the reference assigns them (not renumbered).
-TREE|2019.4.40f1|releaseRoot=23374
-NODE|2019.4.40f1|0|Texture2D|Base|-1|4|0|32768|23374|22
-NODE|2019.4.40f1|1|string|m_Name|-1|1|0|557057|23324|1
-NODE|2019.4.40f1|2|Array|Array|-1|1|1|16385|23258|2
-NODE|2019.4.40f1|3|int|size|4|1|0|0|3780|0
-NODE|2019.4.40f1|3|char|data|1|1|0|0|7515|0
-NODE|2019.4.40f1|1|bool|m_IsAlphaChannelOptional|1|1|0|16384|19027|0
+# The record is selected by version order (latest at or before the target), which is what
+# the reference does; picking a dictionary entry positionally once yielded a newer layout.
+TREE|2019.4.40f1|releaseRoot=18204
+NODE|2019.4.40f1|0|Texture2D|Base|-1|2|0|32768|18204|20
+NODE|2019.4.40f1|1|string|m_Name|-1|1|0|557057|16287|1
+NODE|2019.4.40f1|2|Array|Array|-1|1|1|540673|5237|2
+NODE|2019.4.40f1|3|int|size|4|1|0|524289|5236|0
+NODE|2019.4.40f1|3|char|data|1|1|0|524289|3213|0
+NODE|2019.4.40f1|1|int|m_ForcedFallbackFormat|4|1|0|0|14129|0
+NODE|2019.4.40f1|1|bool|m_DownscaleFallback|1|1|0|16384|14130|0
 NODE|2019.4.40f1|1|int|m_Width|4|1|0|16|208|0
 NODE|2019.4.40f1|1|int|m_Height|4|1|0|16|209|0
-NODE|2019.4.40f1|1|unsigned int|m_CompleteImageSize|4|1|0|16|18478|0
-NODE|2019.4.40f1|1|int|m_MipsStripped|4|1|0|16|18850|0
+NODE|2019.4.40f1|1|int|m_CompleteImageSize|4|1|0|16|210|0
 NODE|2019.4.40f1|1|int|m_TextureFormat|4|1|0|1|211|0
 NODE|2019.4.40f1|1|int|m_MipCount|4|1|0|16|8365|0
 NODE|2019.4.40f1|1|bool|m_IsReadable|1|1|0|0|213|0
+NODE|2019.4.40f1|1|bool|m_IgnoreMasterTextureLimit|1|1|0|0|18171|0
 NODE|2019.4.40f1|1|bool|m_IsPreProcessed|1|1|0|1|18202|0
-NODE|2019.4.40f1|1|bool|m_IgnoreMipmapLimit|1|1|0|16384|20858|0
-NODE|2019.4.40f1|1|string|m_MipmapLimitGroupName|-1|1|0|32768|23369|1
-NODE|2019.4.40f1|2|Array|Array|-1|1|1|16385|23258|2
-NODE|2019.4.40f1|3|int|size|4|1|0|0|3780|0
-NODE|2019.4.40f1|3|char|data|1|1|0|0|7515|0
 NODE|2019.4.40f1|1|bool|m_StreamingMipmaps|1|1|0|16384|15882|0
 NODE|2019.4.40f1|1|int|m_StreamingMipmapsPriority|4|1|0|16384|15885|0
 NODE|2019.4.40f1|1|int|m_ImageCount|4|1|0|16|215|0
@@ -37,17 +35,13 @@ NODE|2019.4.40f1|2|int|m_WrapV|4|1|0|0|12107|0
 NODE|2019.4.40f1|2|int|m_WrapW|4|1|0|0|12108|0
 NODE|2019.4.40f1|1|int|m_LightmapFormat|4|1|0|0|222|0
 NODE|2019.4.40f1|1|int|m_ColorSpace|4|1|0|0|1773|0
-NODE|2019.4.40f1|1|vector|m_PlatformBlob|-1|1|0|32768|19205|1
-NODE|2019.4.40f1|2|Array|Array|-1|1|1|16384|3826|2
-NODE|2019.4.40f1|3|int|size|4|1|0|0|3780|0
-NODE|2019.4.40f1|3|UInt8|data|1|1|0|0|227|0
-NODE|2019.4.40f1|1|TypelessData|image data|-1|1|1|16385|23370|2
-NODE|2019.4.40f1|2|int|size|4|1|0|0|3780|0
+NODE|2019.4.40f1|1|TypelessData|image data|-1|1|1|16385|3822|2
+NODE|2019.4.40f1|2|int|size|4|1|0|1|3712|0
 NODE|2019.4.40f1|2|UInt8|data|1|1|0|1|223|0
-NODE|2019.4.40f1|1|StreamingInfo|m_StreamData|-1|2|0|32768|23372|3
-NODE|2019.4.40f1|2|UInt64|offset|8|1|0|0|18011|0
+NODE|2019.4.40f1|1|StreamingInfo|m_StreamData|-1|1|0|32768|8707|3
+NODE|2019.4.40f1|2|unsigned int|offset|4|1|0|0|8705|0
 NODE|2019.4.40f1|2|unsigned int|size|4|1|0|0|8706|0
-NODE|2019.4.40f1|2|string|path|-1|1|0|32768|23371|1
-NODE|2019.4.40f1|3|Array|Array|-1|1|1|16385|23258|2
-NODE|2019.4.40f1|4|int|size|4|1|0|0|3780|0
-NODE|2019.4.40f1|4|char|data|1|1|0|0|7515|0
+NODE|2019.4.40f1|2|string|path|-1|1|0|32768|5372|1
+NODE|2019.4.40f1|3|Array|Array|-1|1|1|16385|3713|2
+NODE|2019.4.40f1|4|int|size|4|1|0|1|3712|0
+NODE|2019.4.40f1|4|char|data|1|1|0|1|14|0

@@ -1,5 +1,38 @@
 # Validation log
 
+## 2026-10-16 - Probe bug fixed: the committed Texture2D fixture held the wrong record
+
+- Outcome: the three-round "payload is 4 bytes short" mystery is resolved. It was never a
+  payload bug. The committed fixture itself was **the wrong TypeTree**.
+- Root cause, in `tools/probes/tpk-trees/Program.cs`: the probe walked a class record's
+  version map and kept the **last dictionary entry** (`record = candidate` on every
+  iteration) instead of the latest record whose version is **at or before** the requested
+  one, which is what the reference's `select_class_version` does. For `2019.4.40f1` that
+  returned root **23374** instead of the correct root **18204**.
+- Proof: with the selection fixed to compare versions in order, the probe now emits
+  `TREE|2019.4.40f1|releaseRoot=18204`, which **matches `SourceTpkDatabase::embedded()`
+  exactly** - the same record the Rust product uses. The regenerated tree is 38 nodes
+  (not 46) and its level-1 field list is identical, in order, to the tree dumped live from
+  the production layout source:
+  `m_Name, m_ForcedFallbackFormat, m_DownscaleFallback, m_Width, m_Height,
+  m_CompleteImageSize, m_TextureFormat, m_MipCount, m_IsReadable, m_IgnoreMasterTextureLimit,
+  m_IsPreProcessed, m_StreamingMipmaps, m_StreamingMipmapsPriority, m_ImageCount,
+  m_TextureDimension, m_TextureSettings, m_LightmapFormat, m_ColorSpace, image data,
+  m_StreamData`.
+- Two follow-on facts this settles: the embedded database was **right** and the fixture was
+  wrong (the previous entry's "one lookup is selecting the wrong record" is answered - it was
+  the probe's lookup); and `m_PlatformBlob` / `m_IsAlphaChannelOptional` /
+  `m_MipmapLimitGroupName` / `m_MipsStripped` are not part of the 2019.4 class-28 layout, so
+  all earlier payload permutations against them were chasing a tree that is never used.
+- Lesson worth keeping: a probe that feeds a fixture into the repo needs the *same* selection
+  semantics as the implementation under test, otherwise it silently blesses a wrong artifact.
+- State: `src/resources/texture_typetree_fixture.txt` replaced with the correct record, the
+  probe fixed, and the fixture's node-count/child-count assertions updated (38 nodes, 20
+  direct children). The texture payload tail still does not satisfy the file-tree leg and the
+  production-layout leg simultaneously; that remains open and the production leg is not
+  asserted. Everything else is green: 1822 library + 195 bin tests, warnings-denied Clippy
+  exit 0.
+
 ## 2026-10-16 - Texture fixture: real blocker identified (two disagreeing 2019.4 trees)
 
 - Outcome: the previously vague "payload is 4 bytes short" is resolved into a concrete,

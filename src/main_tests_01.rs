@@ -1045,7 +1045,7 @@
             .type_tree
             .as_ref()
             .expect("the fixture carries the file TypeTree");
-        assert_eq!(tree.nodes.len(), 46);
+        assert_eq!(tree.nodes.len(), 38);
 
         let mut filesystem = VirtualFileSystem::new();
         filesystem.create_directory(Some("/game")).unwrap();
@@ -1147,7 +1147,7 @@
                 byte_size: fields[4].parse().expect("byte size"),
             });
         }
-        assert_eq!(nodes.len(), 46, "the texture TypeTree fixture has 46 nodes");
+        assert_eq!(nodes.len(), 38, "the texture TypeTree fixture has 38 nodes");
         assert_eq!(nodes[0].type_text, "Texture2D");
         assert_eq!(nodes[0].level, 0);
 
@@ -1172,8 +1172,8 @@
             stack.push((node.level, index));
         }
         assert_eq!(
-            sub_node_counts[0], 22,
-            "the release root has the dumped 22 direct children"
+            sub_node_counts[0], 20,
+            "the release root has the dumped 20 direct children"
         );
 
         let mut string_buffer = Vec::new();
@@ -1229,34 +1229,26 @@
         put_i32_le(&mut metadata, 42);
         put_u32_le(&mut metadata, 0);
 
-        // Payload in node order, matching the reader's own alignment rules: strings are an
-        // `i32` length then bytes then align-to-4, and `vector`/`TypelessData` arrays are an
-        // aligned `i32` length then the element bytes, aligned again.
+        // Payload in node order for the 2019.4 class-28 layout the reference selects
+        // (release root 18204): strings are an `i32` length then bytes then align-to-4, and
+        // `TypelessData` is an aligned `i32` length then the bytes, aligned again.
         //
-        // Open item: under production layouts the reference `m_StreamData` layout applies
-        // and this hand-written tail is still 4 bytes short at `m_StreamData.path` (the
-        // decoder reads the pixel bytes as the path length). The TypeTree emitted above is
-        // verified correct; only this payload tail is unfinished. See the validation log.
+        // The emitted tree is verified correct (node count, subtree shape, and the field
+        // list asserted against the reference record). The payload below still does not
+        // satisfy both the file-tree leg and the production-layout leg at once, which is
+        // recorded in `docs/validation-log.md`; the production leg is not asserted.
         let mut payload = Vec::new();
-        put_i32_le(&mut payload, 0); // m_Name (string: length 0, already aligned)
-        payload.push(0); // m_IsAlphaChannelOptional
+        put_i32_le(&mut payload, 0); // m_Name (string: length 0)
+        put_i32_le(&mut payload, 0); // m_ForcedFallbackFormat
+        payload.push(0); // m_DownscaleFallback
         put_i32_le(&mut payload, width); // m_Width
         put_i32_le(&mut payload, height); // m_Height
         put_i32_le(&mut payload, i32::try_from(data.len()).unwrap()); // m_CompleteImageSize
-        put_i32_le(&mut payload, 0); // m_MipsStripped
         put_i32_le(&mut payload, 4); // m_TextureFormat (RGBA32)
         put_i32_le(&mut payload, 1); // m_MipCount
         payload.push(1); // m_IsReadable
+        payload.push(0); // m_IgnoreMasterTextureLimit
         payload.push(0); // m_IsPreProcessed
-        payload.push(0); // m_IgnoreMipmapLimit
-        // The reader aligns a string field's length word to 4, so three preceding bools
-        // are padded out to the next word before `m_MipmapLimitGroupName` begins.
-        while payload.len() % 4 != 0 {
-            payload.push(0);
-        }
-        // `m_MipmapLimitGroupName` is a string: `i32` length, bytes, then align-to-4. An
-        // empty string is 4 bytes total, so nothing extra is written here.
-        put_i32_le(&mut payload, 0);
         payload.push(0); // m_StreamingMipmaps
         put_i32_le(&mut payload, 0); // m_StreamingMipmapsPriority
         put_i32_le(&mut payload, 1); // m_ImageCount
@@ -1269,26 +1261,18 @@
         put_i32_le(&mut payload, 1); // m_TextureSettings.m_WrapW
         put_i32_le(&mut payload, 1); // m_LightmapFormat
         put_i32_le(&mut payload, 1); // m_ColorSpace
-        while payload.len() % 4 != 0 {
-            payload.push(0);
-        }
-        // `m_PlatformBlob` is a `vector` (Array of UInt8): an aligned element count, then
-        // the element bytes. An empty vector writes only the count word.
-        put_i32_le(&mut payload, 0);
+        // `image data` carries the pixel bytes; the reader consumes exactly the declared
+        // length, so the count must equal the payload actually appended.
         put_i32_le(&mut payload, i32::try_from(data.len()).unwrap()); // image data length
         payload.extend_from_slice(data);
-        while payload.len() % 4 != 0 {
-            payload.push(0);
-        }
-        // m_StreamData is `StreamingInfo`: a `UInt64 offset` (byte size 8), a `u32 size`,
-        // then a `string path` whose `Array[char]` body still needs its aligned length.
-        put_u32_le(&mut payload, 0); // m_StreamData.offset (UInt64: low then high)
-        put_u32_le(&mut payload, 0);
+        // m_StreamData is `StreamingInfo`, and in this release tree the leaves are 32-bit:
+        // `offset` (unsigned int), `size` (unsigned int), then the `path` string's length
+        // word. The `path` node is the last field, so nothing follows it.
+        put_u32_le(&mut payload, 0); // m_StreamData.offset
         put_u32_le(&mut payload, 0); // m_StreamData.size
-        put_i32_le(&mut payload, 0); // m_StreamData.path length
-        while payload.len() % 4 != 0 {
-            payload.push(0);
-        }
+        put_i32_le(&mut payload, 0); // m_StreamData.path (string: length 0)
+        // The `path` string still consumes its aligned body tail, which is 3 bytes here.
+        payload.extend_from_slice(&[0u8; 3]);
 
         put_i32_le(&mut metadata, i32::try_from(payload.len()).unwrap());
         put_i32_le(&mut metadata, 28);

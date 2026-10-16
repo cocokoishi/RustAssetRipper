@@ -134,6 +134,7 @@ if (Environment.GetEnvironmentVariable("TPK_LIST_METHODS") is not null)
 {
 	// Walk the class record's release root through the node buffer directly.
 	object? record = null;
+	object? recordVersion = null;
 	foreach (object info in (IEnumerable)Get(blob, "ClassInformation")!)
 	{
 		if (Convert.ToInt32(Get(info, "ID")) != classId)
@@ -145,16 +146,32 @@ if (Environment.GetEnvironmentVariable("TPK_LIST_METHODS") is not null)
 		{
 			continue;
 		}
+		// Select the same record the reference does: the latest class record whose version is
+		// at or before the requested one. Taking the *last* dictionary entry instead (as an
+		// earlier revision of this probe did) silently returns a newer layout, which is how a
+		// wrong Texture2D tree was dumped and committed.
 		foreach (object? pair in entries)
 		{
 			if (pair is null)
 			{
 				continue;
 			}
+			object? key = Get(pair, "Key");
 			object? candidate = Get(pair, "Value");
-			if (candidate is not null)
+			if (key is null || candidate is null)
+			{
+				continue;
+			}
+			if (CompareVersionOrder(key, version) > 0)
+			{
+				continue;
+			}
+			// Keep the greatest eligible version seen so far, not merely the most recent
+			// iteration, so iteration order cannot change the answer.
+			if (record == null || CompareVersionOrder(key, recordVersion!) > 0)
 			{
 				record = candidate;
+				recordVersion = key;
 			}
 		}
 	}
@@ -267,6 +284,31 @@ return 0;
 static object? Get(object instance, string name) =>
 	instance.GetType().GetProperty(name, BindingFlags.Public | BindingFlags.Instance)?.GetValue(instance)
 	?? instance.GetType().GetField(name, BindingFlags.Public | BindingFlags.Instance)?.GetValue(instance);
+
+// Order two UnityVersion values the way the reference does: by its packed integer form, so
+// "latest record at or before the target" matches `select_class_version` in the Rust port.
+// Both UnityVersion and the TPK blob's key type expose the same ordering surface, so the
+// comparison is done through their shared IComparable implementation when available.
+static int CompareVersionOrder(object left, object right)
+{
+	if (ReferenceEquals(left, right))
+	{
+		return 0;
+	}
+	if (left is IComparable comparable)
+	{
+		try
+		{
+			return comparable.CompareTo(right);
+		}
+		catch (ArgumentException)
+		{
+			// Fall through to the string form when the types differ but describe the same
+			// version value (the blob may key by a TPK-specific wrapper type).
+		}
+	}
+	return string.CompareOrdinal(left.ToString(), right.ToString());
+}
 
 static T? Prop<T>(object instance, string name)
 {

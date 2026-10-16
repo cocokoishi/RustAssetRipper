@@ -1,5 +1,24 @@
 # RustAssetRipper hand-off — 2026-10-16
 
+## Latest current checkpoint - 2026-10-16 (fixture was wrong; probe bug fixed)
+
+- The "payload 4 bytes short" mystery is solved and it was **the fixture, not the payload**.
+  `tools/probes/tpk-trees/Program.cs` kept the *last* entry of a class record's version map
+  instead of the latest record at or before the target, so it dumped release root **23374**
+  for `2019.4.40f1` when the correct record is root **18204**. The fixed probe now emits
+  18204, matching `SourceTpkDatabase::embedded()` exactly.
+- `src/resources/texture_typetree_fixture.txt` is **replaced** with the correct 38-node
+  record (was 46 nodes from the wrong one). `m_PlatformBlob` / `m_IsAlphaChannelOptional` /
+  `m_MipmapLimitGroupName` / `m_MipsStripped` are not part of the 2019.4 class-28 layout;
+  all earlier payload work against them was chasing an unused tree.
+- Assertions updated to 38 nodes / 20 direct children. The texture payload tail still does
+  not satisfy the file-tree leg and the production-layout leg at the same time, and the
+  production leg is deliberately not asserted; that is the remaining open item.
+- Rule for any future probe that feeds a checked-in fixture: use the *same* selection
+  semantics as the implementation under test.
+- Do not run rustfmt on `src/main_tests_01.rs` (not clean at HEAD).
+- Verified: 1822 library + 195 bin tests, 0 failed; warnings-denied Clippy exit 0.
+
 ## Latest current checkpoint - 2026-10-16 (texture blocker: two 2019.4 trees disagree)
 
 - The "payload 4 bytes short" is **solved as a diagnosis**: it is not a payload bug. Read
