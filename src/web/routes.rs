@@ -72,6 +72,7 @@ fn get(state: &mut WebState, request: &Request) -> Response {
         "/Assets/Binary" => assets_binary(state, request),
         "/Assets/Image" => assets_image(state, request),
         "/Assets/Json" => assets_json(state, request),
+        "/Assets/Yaml" => assets_yaml(state, request),
         "/Resources/View" => resources_view(state, request),
         "/Resources/Data" => resources_data(state, request),
         "/FailedFiles/View" => pending_tree_view::<FailedFilePath>(
@@ -457,6 +458,41 @@ fn assets_json(state: &mut WebState, request: &Request) -> Response {
     };
     match state.render_asset_json(asset.file_index, asset.object_index) {
         Ok(text) => Response::json(text),
+        Err(diagnostic) => Response::internal_error(diagnostic),
+    }
+}
+
+/// `GET /Assets/Yaml`: serve the resolved asset as a standalone Unity YAML document.
+///
+/// The frozen route answers `application/yaml`; an asset with no decoded payload answers an
+/// error body rather than YAML, matching the frozen route's `ex.ToString()` fallback.
+fn assets_yaml(state: &mut WebState, request: &Request) -> Response {
+    let path = match tree_gates::<AssetPath>(state, request) {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
+    let Some(tree) = loaded_tree(state) else {
+        return Response::internal_error("A game is loaded but its bundle tree is missing.");
+    };
+    let Some((bundle_index, position, row)) = tree.resolve_asset(&path) else {
+        return Response::text(format!(
+            "Asset could not be resolved: {}",
+            path.to_diagnostic()
+        ))
+        .with_status(404);
+    };
+    let Some(asset) = tree
+        .bundle(bundle_index)
+        .and_then(|bundle| bundle.collections.get(position))
+        .and_then(|collection| collection.assets.get(row))
+    else {
+        return Response::internal_error(format!(
+            "The bundle tree disagrees with the resolved path {}.",
+            path.to_diagnostic()
+        ));
+    };
+    match state.render_asset_yaml(asset.file_index, asset.object_index) {
+        Ok(text) => Response::bytes("application/yaml", text.into_bytes()),
         Err(diagnostic) => Response::internal_error(diagnostic),
     }
 }
@@ -1202,6 +1238,32 @@ mod tests {
                 texture_asset.contains("&quot;m_Width&quot;: 2"),
                 "{texture_asset}"
             );
+
+            // The YAML tab is enabled for every asset too, and its document carries the baseline
+            // header, the class-prefixed main export id, and the decoded fields.
+            assert!(
+                texture_asset.contains("/Assets/Yaml?Path="),
+                "{texture_asset}"
+            );
+            assert!(
+                texture_asset.contains("download=\"Texture2D.asset\""),
+                "{texture_asset}"
+            );
+            let texture_yaml =
+                texture_hrefs[0].replacen("/Assets/View?Path=", "/Assets/Yaml?Path=", 1);
+            let response = get(&mut state, &texture_yaml);
+            assert_eq!(response.status(), 200);
+            assert_eq!(response.content_type(), "application/yaml");
+            let yaml = String::from_utf8(response.body().to_vec()).expect("YAML is UTF-8");
+            assert!(
+                yaml.starts_with("%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n"),
+                "{yaml}"
+            );
+            // `GetMainExportID(28, 0)` is `2800000` and the class tag is `!u!28`.
+            assert!(yaml.contains("--- !u!28 &2800000"), "{yaml}");
+            assert!(yaml.contains("Texture2D:"), "{yaml}");
+            assert!(yaml.contains("m_Width: 2"), "{yaml}");
+            assert!(yaml.contains("m_Height: 1"), "{yaml}");
 
             // Searching the class finds every fixture asset (both loaded copies),
             // case-insensitively.

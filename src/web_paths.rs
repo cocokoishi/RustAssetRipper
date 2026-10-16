@@ -470,6 +470,11 @@ pub fn asset_json_url(path: &AssetPath) -> String {
     format!("/Assets/Json?Path={}", url_encode(&path.to_json()))
 }
 
+/// The YAML URL the frozen `AssetAPI.GetYamlUrl` builds for `path`.
+pub fn asset_yaml_url(path: &AssetPath) -> String {
+    format!("/Assets/Yaml?Path={}", url_encode(&path.to_json()))
+}
+
 /// The image URL the frozen `AssetAPI.GetImageUrl` builds for `path`.
 ///
 /// The frozen builder appends an `Extension` parameter when the caller supplies one, and

@@ -861,6 +861,21 @@ pub fn asset_page(
         inner.raw("</div>");
     }
 
+    // The YAML tab is also enabled for every asset in the frozen page, and it names its download
+    // `<best name>.asset`, so the tab and its save button use that extension rather than `.yaml`.
+    if let Ok(text) = state.render_asset_yaml(asset.file_index, asset.object_index) {
+        use assetripper::web_paths::asset_yaml_url;
+
+        inner.element("h2", &[], &t(state, "yaml"));
+        inner.open("pre", &[("class", "bg-dark-subtle rounded-3 p-2")]);
+        inner.text(&text);
+        inner.close("pre");
+        let file_name = format!("{}.asset", asset.best_name);
+        inner.raw("<div class=\"text-center\">");
+        save_button(&mut inner, state, &asset_yaml_url(path), &file_name);
+        inner.raw("</div>");
+    }
+
     Some(layout(state, &asset.best_name, inner.as_str()))
 }
 

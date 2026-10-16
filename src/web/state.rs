@@ -296,6 +296,95 @@ impl WebState {
         })
     }
 
+    /// Render one asset's decoded payload as a standalone Unity YAML document.    ///
+    /// The frozen route walks the asset with `YamlWalker` and anchors the document with
+    /// `ExportIdHandler.GetMainExportID(asset)`. This port converts the already-decoded value
+    /// through the same object-document path the project export uses, so the tab shows the same
+    /// text the exporter would write, anchored with the class-prefixed main export id.
+    ///
+    /// References resolve to null: the frozen standalone walker has no project export map, so a
+    /// PPtr has no target to name. That matches the route rather than degrading it.
+    pub fn render_asset_yaml(
+        &self,
+        file_index: usize,
+        object_index: usize,
+    ) -> Result<String, String> {
+        use assetripper::export::ids::get_main_export_id;
+        use assetripper::export::pointer_map::ProjectPointerResolution;
+        use assetripper::export::scene_collection::{
+            ExportAssetCollectionIdentity, ExportAssetIdentity,
+        };
+        use assetripper::export::unity_yaml::{write_unity_yaml_documents, UnityYamlWriteLimits};
+        use assetripper::export::value_yaml::{
+            serialized_object_value_to_unity_yaml_document, UnityYamlObjectConversionHints,
+            UnityYamlObjectConversionLimits, UnityYamlObjectFieldMode,
+        };
+
+        let game = self
+            .loaded
+            .as_ref()
+            .ok_or_else(|| "no game is loaded".to_owned())?;
+        let object = game
+            .objects
+            .get(file_index, object_index)
+            .ok_or_else(|| "the snapshot row has no workspace object".to_owned())?;
+        let payload = object
+            .payload
+            .as_ref()
+            .map_err(|error| error.to_string())?
+            .clone();
+        let file = game
+            .workspace
+            .files()
+            .get(file_index)
+            .ok_or_else(|| "the snapshot row has no workspace file".to_owned())?;
+        let unity_version =
+            parse_scene_unity_version(file.metadata.prefix.unity_version_text.as_deref());
+
+        // The asset's own TypeTree is the schema the value was decoded with, so its hints are
+        // the right ones. An asset decoded from a class layout instead has no file tree; default
+        // hints still emit every field.
+        let limits = UnityYamlObjectConversionLimits::default();
+        let file_tree = object
+            .serialized_type_index
+            .and_then(|index| usize::try_from(index).ok())
+            .and_then(|index| file.metadata.types.get(index))
+            .and_then(|serialized_type| serialized_type.type_tree.as_ref());
+        let hints = match file_tree {
+            Some(tree) => {
+                UnityYamlObjectConversionHints::from_type_tree(tree, unity_version, limits)
+                    .map_err(|error| error.to_string())?
+            }
+            None => UnityYamlObjectConversionHints::default(),
+        };
+        let export_id =
+            get_main_export_id(object.factory.class_id, 0).map_err(|error| error.to_string())?;
+        let document = serialized_object_value_to_unity_yaml_document(
+            ExportAssetIdentity {
+                collection: ExportAssetCollectionIdentity::ProcessedCollection {
+                    collection_index: 0,
+                },
+                object_index,
+                path_id: object.factory.path_id,
+                class_id: object.factory.class_id,
+            },
+            &payload.type_name,
+            0,
+            export_id,
+            false,
+            &payload.root,
+            &hints,
+            UnityYamlObjectFieldMode::ProjectAsset,
+            unity_version,
+            None,
+            limits,
+            |_pointer| ProjectPointerResolution::Null,
+        )
+        .map_err(|error| error.to_string())?;
+        write_unity_yaml_documents(&[document], UnityYamlWriteLimits::default())
+            .map_err(|error| error.to_string())
+    }
+
     /// Render one asset's decoded payload as JSON.
     ///
     /// The frozen `DefaultJsonWalker` writes JSON during traversal; this port builds the same
@@ -528,6 +617,24 @@ impl WebState {
             self.log.push(line.to_owned());
         }
     }
+}
+
+/// The Unity version fields for the YAML rules, falling back when the file declares none.
+///
+/// The frozen `YamlWalker` reads the asset's collection version, which a SerializedFile always
+/// carries. A file whose version text is absent or unparseable still has to render, so the
+/// oldest supported shape is used rather than refusing to serve the tab.
+fn parse_scene_unity_version(
+    text: Option<&str>,
+) -> assetripper::processing::scene_naming::SceneUnityVersion {
+    use assetripper::processing::scene_naming::SceneUnityVersion;
+
+    text.and_then(SceneUnityVersion::parse)
+        .unwrap_or(SceneUnityVersion {
+            major: 5,
+            minor: 0,
+            patch: 0,
+        })
 }
 
 #[cfg(test)]

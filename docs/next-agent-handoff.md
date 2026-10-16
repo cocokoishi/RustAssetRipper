@@ -1,5 +1,22 @@
 # RustAssetRipper hand-off — 2026-10-16
 
+## Latest current checkpoint - 2026-10-16 (YAML tab + route)
+
+- `PRODUCT-ASSET-YAML-TAB-001` is 已验证. `render_asset_yaml` in `src/web/state.rs` reuses the
+  project export's object-document path, so the tab and `/Assets/Yaml` serve the same text the
+  exporter writes. Anchor is `GetMainExportID(class_id, 0)` = `class_id * 100000`.
+- Deliberate readings to preserve: PPtr fields render null (the frozen standalone walker has no
+  export map either), and the download name is `<best name>.asset` per the frozen tab.
+- Parity ledger: 399 rows, 374 verified, 25 non-verified, gate OPEN.
+- **Next in the same style:** the remaining *conditional* tabs, which need `has_*` flags on
+  `TreeAsset` plus a route each. The frozen URL constants are `Base + "/Audio"` (plus
+  `?Extension=wav` for the playback source), `"/Model.glb"`, `"/Font"`, `"/Video"`; their gates
+  are `asset is IAudioClip`, `asset is IMesh`, `asset is IFont` with readable data, and
+  `asset is IVideoClip` with integrity. The Development tab needs no route: it is a table of
+  `Asset.GetType().Name`.
+- Do not run rustfmt on `src/main_tests_01.rs` (not clean at HEAD).
+- Verified: 1830 library + 195 bin tests, 0 failed; warnings-denied Clippy exit 0.
+
 ## Latest current checkpoint - 2026-10-16 (JSON tab + DefaultJsonWalker port)
 
 - `PRODUCT-ASSET-JSON-TAB-001` is 已验证. New `src/export/json_walker.rs` ports

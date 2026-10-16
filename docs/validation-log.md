@@ -1,5 +1,31 @@
 # Validation log
 
+## 2026-10-16 - YAML tab and route: the standalone Unity YAML document (PRODUCT-ASSET-YAML-TAB-001)
+
+- Outcome: the YAML tab is landed and verified. Like the JSON tab it is enabled for every asset
+  in the frozen `AssetsPage`, so it applies across classes rather than to one.
+- Implementation reuses the **project export's own machinery** instead of adding a second
+  serializer: `render_asset_yaml` converts the decoded value with
+  `serialized_object_value_to_unity_yaml_document` and writes it with
+  `write_unity_yaml_documents`, so the tab shows exactly the text the exporter would write.
+- Anchoring follows the frozen route: `GetMainExportID(class_id, 0)`, which is `class_id *
+  100000`, so the texture fixture anchors as `--- !u!28 &2800000`. Field hints come from the
+  asset's own file TypeTree when the object has one; an object decoded from a class layout falls
+  back to default hints, which still emit every field.
+- Two deliberate readings of the frozen route, recorded so they are not mistaken for gaps:
+  - PPtr fields render as **null**. The frozen `YamlWalker` has no project export map either, so
+    a standalone walk has no target to name. Linking references needs the export map and belongs
+    with the export path.
+  - A file whose Unity version text is absent or unparseable still renders, using the oldest
+    supported version shape, rather than failing the tab.
+- The download name follows the frozen tab: `<best name>.asset`, not `.yaml`.
+- Evidence: the routes end-to-end test asserts the `%YAML 1.1` / `%TAG !u!` header, the
+  `--- !u!28 &2800000` anchor, the `Texture2D:` mapping, and the decoded `m_Width: 2` /
+  `m_Height: 1`. Full workspace: 1830 library + 195 bin tests, 0 failed, 1 ignored;
+  warnings-denied Clippy exit 0; changed files rustfmt clean.
+- Parity: new row `PRODUCT-ASSET-YAML-TAB-001` marked 已验证. `parity-report.ps1` reports
+  TOTAL=399, RECOGNIZED=399, NONVERIFIED=25, GATE=OPEN, DUPES=0, MALFORMED=0.
+
 ## 2026-10-16 - JSON tab and route: the DefaultJsonWalker port (PRODUCT-ASSET-JSON-TAB-001)
 
 - Outcome: the JSON tab is landed and verified. It is the second of the asset tabs the frozen
