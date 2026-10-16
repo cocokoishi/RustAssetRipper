@@ -1,5 +1,36 @@
 # RustAssetRipper hand-off — 2026-10-16
 
+## Latest current checkpoint - 2026-10-16 (image tab blocked on fixture, not product)
+
+- **No code change this round.** The `/Assets/Image` arc (image facts on rows, route,
+  image section) was written, compiled, and driven to a fully green 193/194 state, then
+  deliberately reverted: the last failure is a *fixture* limitation, not a product one.
+- Concrete blocker, with evidence, for whoever picks this up:
+  1. `GET /Assets/Image` must run under production layouts, which take the file-TypeTree
+     route, and that route reads `Texture2D.m_IsReadable`.
+  2. The shared synthetic texture builder (`main_tests_01.rs::make_texture_file`) writes a
+     10-node TypeTree without that field, so the object decodes as `Unreadable`:
+     `truncated input (requested 1 bytes, 0 remain) at byte offset 36 while parsing
+     Texture2D.m_IsReadable`. The texture *export* tests pass only because
+     `export_texture_to` resolves through the class-fallback (TPK) route, which never
+     reads the flag — so their success is not evidence the fixture is web-usable.
+  3. Adding the node by hand does not work: the real 2019.4 layout places `m_IsReadable`
+     at TypeTree node index **2664** (`src/resources/mesh_typetree_fixture.txt`), i.e. a
+     full release-ordered class layout, not a 10-node sketch. Three hand placements were
+     tried (before `image data`, after `image data`, node 7 vs 10) and all three kept the
+     reader at byte offset 36.
+  4. Therefore: do not retry this arc with a hand-written node. Either (a) author a
+     complete Texture2D TypeTree fixture from the frozen class database the way other
+     fixtures were generated, or (b) pick a different remaining tab whose data the
+     existing fixtures already carry (audio/video/YAML/JSON/text-adjacent rows, or
+     `/FailedFiles/*`).
+  5. Note the shared-builder hazard: `make_texture_file` is used by the texture export,
+     cubemap, and settings tests, and appending a byte to its payload broke 5 of them
+     (payload tail/padding is asserted). Any change there must be a new builder, not an
+     edit.
+- Current verified state is unchanged and green: HEAD == origin/main == `cf5f753`,
+  working tree clean, bin suite 194/194.
+
 ## Latest current checkpoint - 2026-10-16 (asset raw bytes served, hex section)
 
 - Worktree: `main-work` detached; HEAD == origin/main before this slice. Snapshot rows

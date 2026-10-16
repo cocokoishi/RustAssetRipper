@@ -6380,3 +6380,27 @@ These results do not pass the first-phase gate. The reference .NET solution buil
   the other `/Assets/*` data routes, `/FailedFiles/View` + `/StackTrace`, `/Scenes/View`,
   `/Export/PrimaryContent`. Unity Editor import/runtime and UABEA remain blocked
   (license/tooling), unchanged by this increment.
+## 2026-10-16 - Image tab attempt reverted: fixture gap, no product change
+
+- Outcome: no commit. The `/Assets/Image` implementation (image facts on snapshot rows,
+  the route serving raw pixels and `Extension`-encoded formats, and the image section
+  with its PNG link and raw download) was written, compiled, and taken to a green
+  193/194 bin suite; the remaining failure is a fixture limitation, so the whole arc was
+  reverted and the tree left at the pushed `cf5f753` (clean, 194/194 bin).
+- Evidence for the blocker: with production layouts the file-TypeTree route reads
+  `Texture2D.m_IsReadable` and the shared 10-node synthetic texture fixture does not
+  carry it, giving `truncated input (requested 1 bytes, 0 remain) at byte offset 36 while
+  parsing Texture2D.m_IsReadable`. The existing texture export/cubemap/settings tests
+  pass because `export_texture_to` resolves via the class-fallback (TPK) route, which
+  never reads that flag; their green state is therefore not evidence the fixture works
+  for the web load path. The real 2019.4 layout puts the node at TypeTree index 2664
+  (`src/resources/mesh_typetree_fixture.txt`), so a hand-authored 10-node sketch cannot
+  satisfy it; three placements were tried and all three failed identically.
+- Also recorded: `main_tests_01.rs::make_texture_file` is shared by the texture export,
+  cubemap and settings tests, and appending one payload byte broke five of them, so any
+  variant must be a separate builder.
+- Commands run: `cargo test --locked --bin assetripper-rs` on the reverted tree - 194 bin
+  tests, 0 failed. `git status` clean; HEAD == origin/main == `cf5f753`.
+- Next step for this arc: build a complete Texture2D TypeTree fixture from the frozen
+  class database, or take a different remaining tab whose data the current fixtures
+  already provide.
