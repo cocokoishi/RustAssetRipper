@@ -82,6 +82,9 @@ const FONT_CLASS_ID: i32 = 128;
 /// The Unity class ID of `VideoClip`, whose streamed content the video tab serves.
 const VIDEO_CLIP_CLASS_ID: i32 = 329;
 
+/// The Unity class ID of `Mesh`, whose GLB rendering the model tab serves.
+const MESH_CLASS_ID: i32 = 43;
+
 /// The display name when a container bundle carries neither a fixed name nor a scope.
 pub const NAMELESS_BUNDLE_NAME: &str = "Bundle";
 
@@ -130,6 +133,9 @@ pub struct TreeAsset {
     /// Whether the asset serves video content, mirroring `AssetAPI.HasVideoData` (`asset is
     /// IVideoClip` *and* its external resources pass `CheckIntegrity`).
     pub has_video: bool,
+    /// Whether the asset serves a GLB model, mirroring `AssetAPI.HasModelData` (`asset is
+    /// IMesh`).
+    pub has_model: bool,
     /// The non-null reference edges in field traversal order.
     pub dependencies: Vec<TreeDependency>,
 }
@@ -578,6 +584,7 @@ fn asset_row(
             has_audio: false,
             has_font: false,
             has_video: false,
+            has_model: false,
             dependencies: Vec::new(),
         };
     };
@@ -618,6 +625,9 @@ fn asset_row(
             assetripper::resources::video_clip::VideoClipView::from_value(&value.root)
                 .is_ok_and(|view| view.check_integrity())
         });
+    // `HasModelData` is the type test alone: the frozen `ModelTab` offers the tab for every
+    // mesh, and the route reports a mesh it cannot build.
+    let has_model = class_id == MESH_CLASS_ID;
     // `HasFontData` is the type test *and* a successful read, so a Font whose `m_FontData` is
     // absent, too short to identify, or malformed advertises no font tab.
     let has_font = class_id == FONT_CLASS_ID
@@ -643,6 +653,7 @@ fn asset_row(
         has_audio,
         has_font,
         has_video,
+        has_model,
         dependencies: Vec::new(),
     }
 }

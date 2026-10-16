@@ -1,5 +1,34 @@
 # Validation log
 
+## 2026-10-16 - Model tab and `/Assets/Model.glb` implemented; not yet verified
+
+- Outcome: `render_asset_model`, the `/Assets/Model.glb` route and the model tab are implemented.
+  **They are NOT marked 已验证 and have no parity row**: the end-to-end path is not proven, and
+  this entry records exactly why.
+- Implementation reuses the export path's own machinery rather than adding a second GLB writer:
+  `MeshView::from_value` + `read_mesh_data` for `GlbMeshBuilder.Build`, then `build_glb` for
+  `GlbWriter.TryWrite`. The route answers `model/gltf-binary` and the download name is the frozen
+  `model.glb`; failures answer the frozen `404 Model data could not be decoded.`
+- `has_model` mirrors `HasModelData`, which is the type test alone (`asset is IMesh`) - unlike the
+  font and video gates, which also require a successful read. The frozen `ModelTab` therefore
+  offers the tab for every mesh, and the route reports a mesh it cannot build.
+- Two details worth keeping: `EndianType` lives in `resources::vertex_data_blob` while the file
+  header's endian is `io::binary::Endian`; and `UnityVersion` has no `Default`, so a file without
+  a version string needs an explicit fallback rather than `unwrap_or_default`.
+- **Why it is unverified.** The committed `make_mesh_file` fixture builds a ten-node class-43
+  sketch that decodes only under the *synthetic* layout source. Under production layouts the
+  payload fails at `Mesh.m_Shapes.vertices array count 6 requires at least 240 bytes (40 per
+  element), but only 80 remain`, falls back to `UnreadableObject`, so the asset page shows no
+  model tab and the route answers 404. The e2e therefore asserts only that the mesh asset page
+  renders, and the render/route assertions are deliberately absent rather than written to pass.
+- **This is the fifth occurrence of the same fixture pattern** (texture, audio, font, video,
+  mesh). A production-layout class-43 fixture needs vertex streams, channel descriptors,
+  sub-meshes and an index buffer - a much larger fixture than the tab-level ones. Recorded as
+  the next concrete step.
+- Evidence: `cargo test --locked --workspace` - 1834 library + 198 bin tests, 0 failed, 1
+  ignored. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0. The parity
+  ledger is unchanged; nothing was marked verified on the strength of code alone.
+
 ## 2026-10-16 - Video tab and route verified; the previous round's "gap" was my own error
 
 - Outcome: `PRODUCT-ASSET-VIDEO-TAB-001` is 已验证. The `/Assets/Video` route and the video tab

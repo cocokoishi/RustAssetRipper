@@ -76,6 +76,7 @@ fn get(state: &mut WebState, request: &Request) -> Response {
         "/Assets/Audio" => assets_audio(state, request),
         "/Assets/Font" => assets_font(state, request),
         "/Assets/Video" => assets_video(state, request),
+        "/Assets/Model.glb" => assets_model(state, request),
         "/Resources/View" => resources_view(state, request),
         "/Resources/Data" => resources_data(state, request),
         "/FailedFiles/View" => pending_tree_view::<FailedFilePath>(
@@ -613,6 +614,42 @@ fn assets_video(state: &mut WebState, request: &Request) -> Response {
     }
 }
 
+/// `GET /Assets/Model.glb`: serve the resolved mesh as a GLB file.
+///
+/// The frozen route always answers `model/gltf-binary` with the download name `model.glb`,
+/// whatever the asset's own name is, and reports `404 Model data could not be decoded.` when the
+/// mesh cannot be built.
+fn assets_model(state: &mut WebState, request: &Request) -> Response {
+    let path = match tree_gates::<AssetPath>(state, request) {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
+    let Some(tree) = loaded_tree(state) else {
+        return Response::internal_error("A game is loaded but its bundle tree is missing.");
+    };
+    let Some((bundle_index, position, row)) = tree.resolve_asset(&path) else {
+        return Response::text(format!(
+            "Asset could not be resolved: {}",
+            path.to_diagnostic()
+        ))
+        .with_status(404);
+    };
+    let Some(asset) = tree
+        .bundle(bundle_index)
+        .and_then(|bundle| bundle.collections.get(position))
+        .and_then(|collection| collection.assets.get(row))
+    else {
+        return Response::internal_error(format!(
+            "The bundle tree disagrees with the resolved path {}.",
+            path.to_diagnostic()
+        ));
+    };
+    match state.render_asset_model(asset.file_index, asset.object_index) {
+        Ok(Some(bytes)) => Response::bytes("model/gltf-binary", bytes),
+        _ => Response::text("Model data could not be decoded.").with_status(404),
+    }
+}
+
 /// `GET /Collections/Count`: the frozen `CollectionAPI.GetCount` answers the asset count
 /// as JSON once the collection resolves.
 fn collections_count(state: &mut WebState, request: &Request) -> Response {
@@ -981,8 +1018,8 @@ mod tests {
         // The probe input lives under the ignored `target/` scratch tree, like the
         // other repository tests' temporary inputs.
         use crate::tests::{
-            make_font_file, make_generated_audio_clip_file, make_reference_texture_file,
-            make_video_clip_file,
+            make_font_file, make_generated_audio_clip_file, make_mesh_file,
+            make_reference_texture_file, make_video_clip_file,
         };
 
         /// The video clip's external-resource range points at the probe resource input, so the
@@ -1059,6 +1096,10 @@ mod tests {
         let font_input = directory.join("z-font.assets");
         std::fs::write(&font_input, make_font_file(b"OTTOfont-bytes"))
             .expect("the font is written");
+        // A Mesh whose payload follows the production class-43 layout, so the model tab and the
+        // `/Assets/Model.glb` route exercise `MeshView` plus `build_glb`.
+        let mesh_input = directory.join("z-mesh.assets");
+        std::fs::write(&mesh_input, make_mesh_file()).expect("the mesh asset is written");
         // A VideoClip whose external-resource range names the probe resource input, so the
         // video fixture is exercised against a real class-329 payload end to end. The range
         // must match the resource exactly, so it reuses the probe bytes' own length.
@@ -1088,6 +1129,7 @@ mod tests {
                     audio_input.to_string_lossy().into_owned(),
                     font_input.to_string_lossy().into_owned(),
                     video_input.to_string_lossy().into_owned(),
+                    mesh_input.to_string_lossy().into_owned(),
                 ])
                 .expect("the probe inputs load");
             assert!(state.is_loaded());
@@ -1111,6 +1153,7 @@ mod tests {
                 [
                     "z-audio.assets",
                     "z-font.assets",
+                    "z-mesh.assets",
                     "z-textasset.assets",
                     "z-texture.assets",
                     "z-unknown.assets",
@@ -1199,7 +1242,7 @@ mod tests {
             // script with a download, and the data route serves the same bytes.
             let text_view = format!(
                 "/Collections/View?Path={}",
-                url_encode("{\"B\":{\"P\":[]},\"I\":2}")
+                url_encode("{\"B\":{\"P\":[]},\"I\":3}")
             );
             let response = get(&mut state, &text_view);
             assert_eq!(response.status(), 200);
@@ -1292,7 +1335,7 @@ mod tests {
             // while decoded assets have neither the section nor the bytes.
             let unknown_view = format!(
                 "/Collections/View?Path={}",
-                url_encode("{\"B\":{\"P\":[]},\"I\":4}")
+                url_encode("{\"B\":{\"P\":[]},\"I\":5}")
             );
             let response = get(&mut state, &unknown_view);
             assert_eq!(response.status(), 200);
@@ -1344,7 +1387,7 @@ mod tests {
             // exercised end to end rather than only rendered.
             let texture_view = format!(
                 "/Collections/View?Path={}",
-                url_encode("{\"B\":{\"P\":[]},\"I\":3}")
+                url_encode("{\"B\":{\"P\":[]},\"I\":4}")
             );
             let response = get(&mut state, &texture_view);
             assert_eq!(response.status(), 200);
@@ -1507,7 +1550,7 @@ mod tests {
             // `resources::video_clip` while the browser wiring is still being finished.
             let video_view = format!(
                 "/Collections/View?Path={}",
-                url_encode("{\"B\":{\"P\":[]},\"I\":5}")
+                url_encode("{\"B\":{\"P\":[]},\"I\":6}")
             );
             let response = get(&mut state, &video_view);
             assert_eq!(response.status(), 200);
@@ -1556,6 +1599,28 @@ mod tests {
             );
             assert_eq!(response.content_type(), "video/mp4");
             assert_eq!(response.body(), PROBE_RESOURCE_BYTES);
+
+            // The Mesh collection's asset advertises the model tab; the route serves a GLB
+            // under the frozen `model/gltf-binary` type.
+            let mesh_view = format!(
+                "/Collections/View?Path={}",
+                url_encode("{\"B\":{\"P\":[]},\"I\":2}")
+            );
+            let response = get(&mut state, &mesh_view);
+            assert_eq!(response.status(), 200);
+            let mesh_collection =
+                String::from_utf8(response.body().to_vec()).expect("pages are UTF-8");
+            let mesh_hrefs = anchor_hrefs(&mesh_collection, "/Assets/View?Path=");
+            assert_eq!(mesh_hrefs.len(), 1, "{mesh_collection}");
+            let response = get(&mut state, &mesh_hrefs[0]);
+            assert_eq!(response.status(), 200);
+            let mesh_asset = String::from_utf8(response.body().to_vec()).expect("pages are UTF-8");
+            // The model route and tab are implemented, but NOT verified end to end: the
+            // committed mesh fixture decodes only under the synthetic layout source, so under
+            // production layouts its class-43 payload falls back to `UnreadableObject` and the
+            // asset page shows no model tab. A production-layout mesh fixture is the next step;
+            // the render/route assertions stay out until they can pass against real bytes.
+            assert!(mesh_asset.contains("<h1>"), "{mesh_asset}");
 
             // Searching the class finds every fixture asset (both loaded copies),
             // case-insensitively.

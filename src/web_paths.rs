@@ -475,6 +475,13 @@ pub fn asset_yaml_url(path: &AssetPath) -> String {
     format!("/Assets/Yaml?Path={}", url_encode(&path.to_json()))
 }
 
+/// The model URL the frozen `AssetAPI.GetModelUrl` builds for `path`.
+///
+/// The frozen constant is `Base + "/Model.glb"`, so the route path carries the extension.
+pub fn asset_model_url(path: &AssetPath) -> String {
+    format!("/Assets/Model.glb?Path={}", url_encode(&path.to_json()))
+}
+
 /// The video URL the frozen `AssetAPI.GetVideoUrl` builds for `path`.
 pub fn asset_video_url(path: &AssetPath) -> String {
     format!("/Assets/Video?Path={}", url_encode(&path.to_json()))

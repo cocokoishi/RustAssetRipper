@@ -371,7 +371,7 @@
 
     /// A class-43 `Mesh` whose vertex data is a single Float32 position channel and whose index
     /// buffer holds one 16-bit triangle.
-    fn make_mesh_file() -> Vec<u8> {
+    pub(super) fn make_mesh_file() -> Vec<u8> {
         let mut strings = Vec::new();
         let mesh_type = push_type_tree_string(&mut strings, "Mesh");
         let empty_name = push_type_tree_string(&mut strings, "");

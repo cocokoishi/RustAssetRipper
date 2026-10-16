@@ -62,6 +62,25 @@ pub struct WebState {
     static_content: Vec<(String, Vec<u8>)>,
 }
 
+/// The mesh's `m_Name`, matching the CLI exporter's name rule.
+///
+/// The CLI helper is `pub(super)` inside the binary root, so the web layer mirrors its two-line
+/// behaviour rather than widening that helper's visibility for one caller.
+fn mesh_name(root: &assetripper::serialized_file::object::SerializedValue) -> Option<String> {
+    use assetripper::serialized_file::object::SerializedValue;
+
+    root.unique_field_in_base_chain("m_Name")
+        .ok()
+        .flatten()
+        .and_then(|value| match value {
+            SerializedValue::StringBytes(bytes) | SerializedValue::Bytes(bytes) => {
+                std::str::from_utf8(bytes).ok().map(str::to_owned)
+            }
+            _ => None,
+        })
+        .filter(|name| !name.is_empty())
+}
+
 /// A video clip's streamed content with the extension taken from its original path.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VideoData {
@@ -314,6 +333,74 @@ impl WebState {
             assetripper::resource::StreamedResourceContentResolution::Missing { .. }
             | assetripper::resource::StreamedResourceContentResolution::Unset => None,
         })
+    }
+
+    /// Render one mesh asset as GLB bytes.
+    ///
+    /// Mirrors `AssetAPI.GetModelData`: `GlbMeshBuilder.Build` reads the mesh, then
+    /// `GlbWriter.TryWrite` serializes it. The frozen route answers `model/gltf-binary` with the
+    /// download name `model.glb` regardless of the asset's own name.
+    ///
+    /// A mesh that cannot be read or built reports the failure rather than serving a partial
+    /// file, matching the frozen route's `404 Model data could not be decoded.`
+    pub fn render_asset_model(
+        &self,
+        file_index: usize,
+        object_index: usize,
+    ) -> Result<Option<Vec<u8>>, String> {
+        use assetripper::resources::glb::build_glb;
+        use assetripper::resources::mesh::MeshView;
+        use assetripper::resources::packed_bit_vector::PackedBitVectorLimits;
+
+        let game = self
+            .loaded
+            .as_ref()
+            .ok_or_else(|| "no game is loaded".to_owned())?;
+        let object = game
+            .objects
+            .get(file_index, object_index)
+            .ok_or_else(|| "the snapshot row has no workspace object".to_owned())?;
+        let Ok(payload) = object.payload.as_ref() else {
+            return Ok(None);
+        };
+        let file = game
+            .workspace
+            .files()
+            .get(file_index)
+            .ok_or_else(|| "the snapshot row has no workspace file".to_owned())?;
+        let version = file
+            .metadata
+            .prefix
+            .unity_version_text
+            .as_deref()
+            .and_then(assetripper::resources::vertex_data_blob::UnityVersion::parse)
+            .unwrap_or(assetripper::resources::vertex_data_blob::UnityVersion {
+                major: 5,
+                minor: 0,
+                patch: 0,
+            });
+        let endian = match file.header.data_endian {
+            Some(assetripper::io::binary::Endian::Big) => {
+                assetripper::resources::vertex_data_blob::EndianType::Big
+            }
+            _ => assetripper::resources::vertex_data_blob::EndianType::Little,
+        };
+        let view = match MeshView::from_value(&payload.root, version, endian) {
+            Ok(view) => view,
+            // A payload that is not a readable mesh is "no model data", not a server error.
+            Err(_) => return Ok(None),
+        };
+        let Some(mesh_data) = view
+            .read_mesh_data(PackedBitVectorLimits::default())
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(None);
+        };
+        let name = mesh_name(&payload.root).unwrap_or_else(|| object.factory.name.clone());
+        match build_glb(&name, &mesh_data) {
+            Ok(exported) => Ok(Some(exported.bytes)),
+            Err(error) => Err(error.to_string()),
+        }
     }
 
     /// Read one video clip's streamed content with the extension the frozen route reports.

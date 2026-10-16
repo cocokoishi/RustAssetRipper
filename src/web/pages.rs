@@ -847,6 +847,23 @@ pub fn asset_page(
         inner.raw("</div>");
     }
 
+    if asset.has_model {
+        // The frozen model tab is a Babylon canvas whose `glb-data-path` attribute the page
+        // script reads. The port keeps that contract: the attribute names the route, so the
+        // same client script (or any consumer of the attribute) loads the GLB.
+        use super::html::escape;
+        use assetripper::web_paths::asset_model_url;
+
+        inner.element("h2", &[], &t(state, "asset_tab_model"));
+        let model_url = asset_model_url(path);
+        inner.raw("<table width=\"100%\" height=\"100%\"><tbody><tr><td align=\"center\" valign=\"middle\">");
+        inner.raw(&format!(
+            "<canvas id=\"babylonRenderCanvas\" style=\"width: 100%; height: 100vh;\" glb-data-path=\"{}\"></canvas>",
+            escape(&model_url)
+        ));
+        inner.raw("</td></tr></tbody></table>");
+    }
+
     if asset.has_video {
         // The frozen video tab renders a `<video>` whose single source points at the route,
         // then a save button beneath it. The served MIME is `video/<extension>` taken from the
@@ -1576,6 +1593,7 @@ mod tests {
                             has_audio: false,
                             has_font: false,
                             has_video: false,
+                            has_model: false,
                             dependencies: Vec::new(),
                         },
                     }],

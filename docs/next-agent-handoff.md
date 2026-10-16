@@ -1,5 +1,33 @@
 # RustAssetRipper hand-off — 2026-10-16
 
+## Latest current checkpoint - 2026-10-16 (model tab implemented; blocked on a mesh fixture)
+
+- **Start here.** `render_asset_model`, `/Assets/Model.glb` and the model tab are implemented and
+  build cleanly, but are **not verified** and have no 已验证 parity row. The blocker is a
+  *fixture*, not product code: the committed `make_mesh_file` is a ten-node class-43 sketch that
+  decodes only under the synthetic layout source. Under production layouts it fails with
+  `Mesh.m_Shapes.vertices array count 6 requires at least 240 bytes (40 per element), but only 80
+  remain`, falls back to `UnreadableObject`, and the route answers 404.
+- **Concrete next step:** write a production-layout class-43 fixture (dump the tree from
+  `reference_class_layouts().tpk_trees(43, &version)` first). It needs `m_Name`, `m_SubMeshes`,
+  `m_Shapes`, `m_IndexBuffer`, `m_IndexFormat`, `m_VertexData` with `m_VertexCount`, `m_Channels`
+  and `m_Streams`, and `m_DataSize`. Then restore the route assertions: `model/gltf-binary`, and
+  a GLB header whose magic is `glTF`, version is 2, and declared length equals the body length.
+  Those assertions are written out in this round's git history if useful.
+- Implementation notes kept: `MeshView::from_value` + `read_mesh_data` feed `build_glb`;
+  `EndianType` is in `resources::vertex_data_blob` while the header endian is
+  `io::binary::Endian`; `UnityVersion` has no `Default`, so a missing version string needs an
+  explicit fallback. `has_model` is the type test alone, unlike the font and video gates.
+- **Fixture trap, fifth time** (texture, audio, font, video, mesh): always dump the production
+  tree and mirror it. The e2e fixture set is now nine inputs with root collections ordering
+  `z-audio(0), z-font(1), z-mesh(2), z-textasset(3), z-texture(4), z-unknown(5), z-video(6)`.
+- Parity ledger: 402 rows, 377 verified, 25 non-verified, gate OPEN.
+- **After the model tab:** align the port's asset tab order with the frozen `ViewPage` order
+  (Information, Audio, Image, Model, Text, Font, Video, Yaml, Json, Hex, Dependencies,
+  Development), then `/Scenes/View` extras, `/FailedFiles/Stack`, `/Export/PrimaryContent`.
+- Do not run rustfmt on `src/main_tests_01.rs` or `src/main_tests_03.rs`.
+- Verified: 1834 library + 198 bin tests, 0 failed; warnings-denied Clippy exit 0.
+
 ## Latest current checkpoint - 2026-10-16 (video tab + route verified)
 
 - `PRODUCT-ASSET-VIDEO-TAB-001` is 已验证. `/Assets/Video` applies both frozen gates
