@@ -1,5 +1,44 @@
 # Validation log
 
+## 2026-10-16 - Scene GLB export entry, and a root-selection divergence found and fixed
+
+- Outcome: `src/export/scene_glb.rs` implements the port of `GlbModelExporter`, the scene-level
+  GLB export entry, and adapts a `MaterializedSceneCollection` to the plan the walk consumes.
+  Nine tests in the new module. New parity row `EXP-GLB-SCENE-001`, 已实现但未验证.
+- **A test failure exposed a real divergence in MY implementation of root selection, not just a
+  wrong expectation.** I had treated "the Transform's father" as an ordinary hierarchy link, so a
+  Transform whose father has no GameObject was unreachable. Re-reading
+  `GameObjectExtensions.GetRoot` settled it:
+  ```csharp
+  ITransform? parent = root.Father_C4P;
+  if (parent is null || parent.GameObject_C4P is null) { break; }
+  ```
+  The climb stops when the parent **has no GameObject**, so such a Transform **is itself a
+  hierarchy root**. That matters because the GameObject-less father emits nothing -
+  `AddGameObjectToScene` returns before its child loop - so without this rule the whole subtree
+  below it is never reached. `build_scene_plan` now reproduces the climb, bounded by the
+  collection length so a father cycle cannot hang the walk.
+- **This is the second time on this feature that the reference corrected me**, and both were
+  about the same walk. Worth stating plainly: reading a traversal's *entry condition* is not the
+  same as reading its *recursion*, and I had read only the latter.
+- A second correction: a Transform with no resolved values reads back as the **identity**, not as
+  "no transform", because `transform.ToTransformation()` reads generated properties whose unset
+  values are the zero vector, identity rotation and unit scale. The adapter now reports that, and
+  a fixture graph with no values at all still produces transform-less nodes, so both shapes are
+  covered.
+- Fixture lesson, and my own error: a Transform's `m_Father` names the parent **Transform**, not
+  the parent's GameObject. My first fixture passed GameObject indexes, every father edge failed to
+  resolve, and the export emitted four root nodes with no transforms. The test output made that
+  obvious; had I only checked "the export succeeded" it would have looked fine.
+- **Status is honestly 已实现但未验证.** The walk matches the reference node-for-node against the
+  committed `glb_level_fixture.txt` and the document reproduces those rows, but no real-file
+  export has run and geometry attachment is exercised only with synthetic meshes. Geometry
+  selection is caller-supplied, because the reference reaches a mesh through
+  `BuildParameters.TryGetOrMakeMeshData`, which needs the mesh pipeline.
+- Evidence: `cargo test --locked --workspace` - **1858** library (up from 1849) + 199 bin tests,
+  0 failed, 1 ignored. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+  Parity: TOTAL=406, RECOGNIZED=406, NONVERIFIED=25, DUPES=0, MALFORMED=0, GATE=OPEN.
+
 ## 2026-10-16 - Scene plan adapter, and the subtree-pruning rule it pinned
 
 - Outcome: `build_scene_plan` adapts a materialized scene collection to a `GlbLevelPlan`. This is

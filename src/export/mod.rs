@@ -44,6 +44,7 @@ pub mod registration;
 pub mod res_wiring;
 pub mod resource_extensions;
 pub mod scene_collection;
+pub mod scene_glb;
 pub mod scene_helpers;
 pub mod scene_member_order;
 pub mod scene_wiring;

@@ -369,7 +369,7 @@ pub fn build_scene_plan_with_limits<G: SceneCollectionGraph>(
     let mut visited = vec![false; collection.len()];
     let mut plan = GlbLevelPlan::default();
     for index in 0..collection.len() {
-        if visited[index] || collection.father(index).is_some() {
+        if visited[index] || !is_hierarchy_root(collection, index) {
             continue;
         }
         visit_transform(
@@ -383,6 +383,36 @@ pub fn build_scene_plan_with_limits<G: SceneCollectionGraph>(
         )?;
     }
     Ok(plan)
+}
+
+/// `GameObjectExtensions.GetRoot` decides whether walking up from this Transform stops here.
+///
+/// The source climbs while `parent.Father_C4P` is non-null **and** `parent.GameObject_C4P` is
+/// non-null, and returns the last Transform that satisfied that. So a Transform whose father has
+/// no GameObject is itself a hierarchy root: the climb stops one step below it even though the
+/// father pointer still names a Transform. Treating such a Transform as an ordinary child instead
+/// would leave its own subtree unreachable, because the null-GameObject father emits nothing and
+/// never descends.
+fn is_hierarchy_root<G: SceneCollectionGraph>(collection: &G, index: usize) -> bool {
+    let mut current = index;
+    // The climb is over untrusted input, so it is bounded rather than trusted to terminate: a
+    // father cycle that never reaches a root must not hang the walk.
+    for _ in 0..collection.len() {
+        let Some(father) = collection.father(current) else {
+            return true;
+        };
+        if father == current {
+            // A self-edge cannot be climbed past; treat it as a root rather than looping.
+            return true;
+        }
+        if !collection.has_game_object(father) {
+            // The climb stops at `current`, which is therefore the root when we started there.
+            return current == index;
+        }
+        current = father;
+    }
+    // A cycle with no root: report the starting Transform as a root so it is still visited once.
+    current == index
 }
 
 /// The read-only view of a materialized scene collection this walk needs.
@@ -593,21 +623,24 @@ mod tests {
         assert!(bare.nodes.iter().all(|node| node.local_transform.is_none()));
     }
 
-    /// A Transform with no GameObject emits no node and ends the walk there.
+    /// A Transform whose father has no GameObject is itself a hierarchy root.
     ///
-    /// The source returns from `AddGameObjectToScene` before its child loop, so a null GameObject
-    /// **prunes the whole subtree** rather than merely skipping that node. That is easy to get
-    /// backwards: descending anyway would emit a subtree the reference never visits.
+    /// `GameObjectExtensions.GetRoot` climbs while the parent has a GameObject, so the climb stops
+    /// one step **below** a GameObject-less father. Child's GameObject is null here, which makes
+    /// Grandchild its own root - and Child itself emits nothing, because `AddGameObjectToScene`
+    /// returns before its child loop. Getting this wrong leaves Grandchild's subtree unreachable,
+    /// since the GameObject-less father never descends.
     #[test]
-    fn scene_plan_adapter_skips_a_transform_without_a_game_object() {
+    fn scene_plan_adapter_treats_a_child_of_a_gameobject_less_father_as_a_root() {
         let mut graph = FixtureGraph::new();
         graph.has_go = vec![true, false, true, true];
         let plan = build_scene_plan(&graph, true).expect("the plan builds");
         let names: Vec<&str> = plan.nodes.iter().map(|node| node.name.as_str()).collect();
-        // Root and Second survive; Child prunes itself and Grandchild along with it.
-        assert_eq!(names, ["Root", "Second"], "the subtree is pruned");
+        // Child emits nothing and does not descend, but Grandchild is its own root.
+        assert_eq!(names, ["Root", "Grandchild", "Second"]);
         assert_eq!(plan.nodes[0].parent, None);
         assert_eq!(plan.nodes[1].parent, None);
+        assert_eq!(plan.nodes[2].parent, None);
     }
 
     /// The adapter's node bound is enforced like the direct path's.

@@ -1,6 +1,44 @@
 # RustAssetRipper hand-off — 2026-10-16
 
-## Latest current checkpoint - 2026-10-16 (scene plan adapter; subtree-pruning rule pinned)
+## Latest current checkpoint - 2026-10-16 (scene GLB export entry; root-selection bug fixed)
+
+- `src/export/scene_glb.rs` is the port of `GlbModelExporter`, the scene-level GLB export entry,
+  with the `MaterializedSceneCollection` -> `GlbLevelPlan` adapter. Nine tests. New parity row
+  `EXP-GLB-SCENE-001`, **已实现但未验证** (no real-file export has run).
+- **I had a real bug in root selection and the reference corrected me.** I treated a Transform's
+  father as an ordinary hierarchy link. `GameObjectExtensions.GetRoot` actually climbs while the
+  parent **has a GameObject**:
+  ```csharp
+  ITransform? parent = root.Father_C4P;
+  if (parent is null || parent.GameObject_C4P is null) { break; }
+  ```
+  So a Transform whose father has no GameObject **is itself a root**. This matters: the
+  GameObject-less father emits nothing (`AddGameObjectToScene` returns before its child loop), so
+  without the rule its entire subtree is unreachable. `build_scene_plan` now does the climb,
+  bounded by the collection length so a father cycle cannot hang the walk. **Twice now the walk's
+  entry condition, not its recursion, was where I was wrong - read both.**
+- A Transform with no resolved values reads back as the **identity** (`ToTransformation` reads
+  generated properties whose unset values are zero/identity/unit), not as "no transform".
+- **Fixture trap: a Transform's `m_Father` names the parent TRANSFORM, not its GameObject.** My
+  first fixture passed GameObject indexes, every edge failed to resolve, and the export silently
+  produced four root nodes. If a scene export emits all-roots with no transforms, check this
+  first.
+- **Next steps for the scene export, in order:**
+  1. Run a real-file scene export and compare against reference output - this is what would move
+     `EXP-GLB-SCENE-001` to 已验证.
+  2. Wire geometry selection. The reference gets a mesh through
+     `BuildParameters.TryGetOrMakeMeshData` (an `IMesh` -> `MeshData` build plus cache), so the
+     caller must resolve each GameObject's `MeshFilter`/`Renderer` fields and pass per-node
+     `MeshData`; `SceneCollectionGraph::mesh` is where the selection belongs.
+  3. Register the export in the project export pipeline alongside the per-asset GLB exporters.
+- **Never format `src/resources/glb_tests_01.rs`** (nor `main_tests_01.rs`/`main_tests_03.rs`).
+  `glb.rs`, `glb_level.rs`, `scene_glb.rs` and `export/mod.rs` are rustfmt-clean.
+- **A GLB is binary: decode the JSON chunk before asserting on text** (12-byte header, then the
+  chunk header); both `glb_level.rs` and `scene_glb/tests.rs` have a `json_chunk` helper.
+- Parity ledger: 406 rows, 381 verified, 25 non-verified, DUPES=0, MALFORMED=0, gate OPEN.
+- `/Scenes/View` still returns 501 (`load_game` does not run `process_workspace_scenes_and_prefabs`).
+- Corpus replays are local-only and have not run in these rounds.
+- Verified: **1858** library + 199 bin tests, 0 failed; warnings-denied Clippy exit 0.
 
 - `build_scene_plan` in `src/resources/glb_level.rs` adapts a materialized scene collection to a
   `GlbLevelPlan`, reading through a small `SceneCollectionGraph` trait so the walk is testable
