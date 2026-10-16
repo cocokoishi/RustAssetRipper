@@ -809,6 +809,18 @@ pub fn asset_page(
         inner.raw("</div>");
     }
 
+    if asset.has_binary {
+        // The frozen hex tab is only a download button; the port keeps that shape
+        // with no inline content.
+        use assetripper::web_paths::asset_binary_url;
+
+        inner.element("h2", &[], &t(state, "asset_tab_hex"));
+        let file_name = format!("{}.dat", asset.best_name);
+        inner.raw("<div class=\"text-center\">");
+        save_button(&mut inner, state, &asset_binary_url(path), &file_name);
+        inner.raw("</div>");
+    }
+
     Some(layout(state, &asset.best_name, inner.as_str()))
 }
 
@@ -1416,6 +1428,7 @@ mod tests {
                             file_index: 0,
                             object_index: 0,
                             has_text: false,
+                            has_binary: false,
                             dependencies: Vec::new(),
                         },
                     }],

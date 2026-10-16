@@ -1,5 +1,22 @@
 # RustAssetRipper hand-off — 2026-10-16
 
+## Latest current checkpoint - 2026-10-16 (asset raw bytes served, hex section)
+
+- Worktree: `main-work` detached; HEAD == origin/main before this slice. Snapshot rows
+  carry a binary flag for undecodable payloads with a raw range; `GET /Assets/Binary`
+  serves the exact bytes as octet-stream (empty 200 otherwise) and the asset page shows
+  the frozen download-only hex section.
+- Verification evidence: fixture end-to-end adds the synthetic unknown-class file
+  (class 7, `Unknown7_3FCA88C5`, raw `01..08`) plus decoded-asset negatives; full
+  `cargo test --locked --workspace` **1822 lib + 194 bin, 0 failed**, 1 ignored; Clippy
+  `-D warnings` exit 0; per-file rustfmt and `git diff --check` clean. Full evidence in
+  `docs/validation-log.md`.
+- Privacy: no sample content/paths/names in code, tests, docs or commit text. Mapping table
+  stays outside the repo; history untouched.
+- Next move: shader/MonoScript texts, eight remaining asset tabs plus the other
+  `/Assets/*` data routes, `/FailedFiles/*`, `/Scenes/View`, `/Export/PrimaryContent`;
+  then continue down the ledger.
+
 ## Latest current checkpoint - 2026-10-16 (asset text served from TextAssets)
 
 - Worktree: `main-work` detached; HEAD == origin/main before this slice. Snapshot rows

@@ -194,6 +194,43 @@ impl WebState {
         text_asset_script_bytes(payload).map_err(|error| error.to_string())
     }
 
+    /// Read one asset's raw payload bytes.
+    ///
+    /// Undecodable objects serve their raw range, mirroring the frozen `RawDataObject`
+    /// bytes; anything else reads as no bytes, matching the frozen route's empty reply
+    /// for assets without binary data.
+    pub fn read_asset_raw_bytes(
+        &self,
+        file_index: usize,
+        object_index: usize,
+    ) -> Result<Vec<u8>, String> {
+        let game = self
+            .loaded
+            .as_ref()
+            .ok_or_else(|| "no game is loaded".to_owned())?;
+        let object = game
+            .objects
+            .get(file_index, object_index)
+            .ok_or_else(|| "the snapshot row has no workspace object".to_owned())?;
+        if object.payload.is_ok() {
+            return Ok(Vec::new());
+        }
+        let file = game
+            .workspace
+            .files()
+            .get(file_index)
+            .ok_or_else(|| "the snapshot row has no workspace file".to_owned())?;
+        let bytes = self.read_resource_bytes(&file.virtual_path)?;
+        let start = usize::try_from(object.raw_payload_range.start)
+            .map_err(|_| "the raw payload offset does not fit the host address space".to_owned())?;
+        let end = usize::try_from(object.raw_payload_range.end)
+            .map_err(|_| "the raw payload end does not fit the host address space".to_owned())?;
+        bytes
+            .get(start..end)
+            .map(<[u8]>::to_vec)
+            .ok_or_else(|| "the raw payload range is outside the file bytes".to_owned())
+    }
+
     /// The loaded game, when one is present.
     pub fn loaded(&self) -> Option<&LoadedGame> {
         self.loaded.as_ref()

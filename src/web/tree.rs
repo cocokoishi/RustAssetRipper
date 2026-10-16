@@ -103,6 +103,10 @@ pub struct TreeAsset {
     /// Whether the asset serves text, mirroring `AssetAPI.HasText` for the ported
     /// TextAsset case (non-empty script bytes).
     pub has_text: bool,
+    /// Whether the asset serves raw bytes, mirroring `AssetAPI.HasBinaryData` for the
+    /// port's undecodable objects (a failed payload with a non-empty raw range, the
+    /// frozen `RawDataObject` family).
+    pub has_binary: bool,
     /// The non-null reference edges in field traversal order.
     pub dependencies: Vec<TreeDependency>,
 }
@@ -546,6 +550,7 @@ fn asset_row(
             file_index,
             object_index,
             has_text: false,
+            has_binary: false,
             dependencies: Vec::new(),
         };
     };
@@ -570,6 +575,9 @@ fn asset_row(
                     .is_some_and(|script| !script.is_empty())
             })
             .unwrap_or(false);
+    // Raw bytes back every undecodable payload with a range to read, mirroring the
+    // frozen `RawDataObject` family (`UnknownObject` and `UnreadableObject` alike).
+    let has_binary = payload.is_none() && !object.raw_payload_range.is_empty();
     TreeAsset {
         path_id,
         class_id,
@@ -578,6 +586,7 @@ fn asset_row(
         file_index,
         object_index,
         has_text,
+        has_binary,
         dependencies: Vec::new(),
     }
 }

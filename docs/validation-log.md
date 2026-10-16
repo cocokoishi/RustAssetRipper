@@ -6357,3 +6357,26 @@ These results do not pass the first-phase gate. The reference .NET solution buil
   the other `/Assets/*` data routes, `/FailedFiles/View` + `/StackTrace`, `/Scenes/View`,
   `/Export/PrimaryContent`. Unity Editor import/runtime and UABEA remain blocked
   (license/tooling), unchanged by this increment.
+## 2026-10-16 - Asset raw bytes served from undecodable objects (`/Assets/Binary`)
+
+- Scope: snapshot rows carry a binary flag (failed payload with a non-empty raw range,
+  the frozen `RawDataObject` family covering `UnknownObject` and `UnreadableObject`
+  alike); `GET /Assets/Binary` serves the raw range bytes as octet-stream (empty 200
+  otherwise, matching the frozen route), and the asset page shows the frozen
+  download-only hex section. No export-path behavior changes; no sample content touched.
+- Frozen reference: `Pages/Assets/` (`AssetAPI.GetBinaryUrl/GetBinaryData/HasBinaryData`,
+  `HexTab` with its save button), `Import/AssetCreation/` (`RawDataObject`,
+  `UnknownObject`, `UnreadableObject`).
+- Commands run (worktree `main-work`, detached, HEAD == origin/main before this change):
+  1. The fixture end-to-end adds the committed synthetic unknown-class file (class 7,
+     `Unknown7_3FCA88C5`, raw bytes `01..08`): root listing, asset row, hex section with
+     `Unknown7_3FCA88C5.dat` download, byte-exact binary route, plus decoded-asset
+     negatives (no section, empty binary).
+  2. `cargo test --locked --workspace` - 1822 library + 194 bin tests, 0 failed, 1 ignored.
+  3. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+  4. `rustfmt --edition 2021 --check` on each touched file - clean; `git diff --check` -
+     exit 0.
+- Open after this increment: shader/MonoScript texts, eight remaining asset tabs plus
+  the other `/Assets/*` data routes, `/FailedFiles/View` + `/StackTrace`, `/Scenes/View`,
+  `/Export/PrimaryContent`. Unity Editor import/runtime and UABEA remain blocked
+  (license/tooling), unchanged by this increment.

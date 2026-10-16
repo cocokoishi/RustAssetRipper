@@ -68,6 +68,7 @@ fn get(state: &mut WebState, request: &Request) -> Response {
         "/Collections/Count" => collections_count(state, request),
         "/Assets/View" => assets_view(state, request),
         "/Assets/Text" => assets_text(state, request),
+        "/Assets/Binary" => assets_binary(state, request),
         "/Resources/View" => resources_view(state, request),
         "/Resources/Data" => resources_data(state, request),
         "/FailedFiles/View" => pending_tree_view::<FailedFilePath>(
@@ -334,6 +335,44 @@ fn assets_text(state: &mut WebState, request: &Request) -> Response {
                 .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
                 .unwrap_or_default(),
         ),
+        Err(diagnostic) => Response::internal_error(diagnostic),
+    }
+}
+
+/// `GET /Assets/Binary`: serve the resolved asset's raw bytes.
+///
+/// Only undecodable objects serve bytes; every other asset reads as no bytes, matching
+/// the frozen route's empty reply for assets without binary data.
+fn assets_binary(state: &mut WebState, request: &Request) -> Response {
+    let path = match tree_gates::<AssetPath>(state, request) {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
+    let Some(tree) = loaded_tree(state) else {
+        return Response::internal_error("A game is loaded but its bundle tree is missing.");
+    };
+    let Some((bundle_index, position, row)) = tree.resolve_asset(&path) else {
+        return Response::text(format!(
+            "Asset could not be resolved: {}",
+            path.to_diagnostic()
+        ))
+        .with_status(404);
+    };
+    let Some(asset) = tree
+        .bundle(bundle_index)
+        .and_then(|bundle| bundle.collections.get(position))
+        .and_then(|collection| collection.assets.get(row))
+    else {
+        return Response::internal_error(format!(
+            "The bundle tree disagrees with the resolved path {}.",
+            path.to_diagnostic()
+        ));
+    };
+    if !asset.has_binary {
+        return Response::bytes("application/octet-stream", Vec::new());
+    }
+    match state.read_asset_raw_bytes(asset.file_index, asset.object_index) {
+        Ok(raw) => Response::bytes("application/octet-stream", raw),
         Err(diagnostic) => Response::internal_error(diagnostic),
     }
 }
@@ -728,20 +767,28 @@ mod tests {
             .expect("the probe resource is written");
         // A synthetic TextAsset file proves the text routes; the committed
         // source-factory fixture carries the complete 2019.4 no-TypeTree file.
-        let text_hex = assetripper::processing::asset_factory::PROBE_FIXTURE
-            .lines()
-            .find_map(|line| line.strip_prefix("SF_HEX|textasset_notree|"))
-            .expect("the source-factory fixture includes the no-TypeTree TextAsset");
-        let text_bytes = text_hex
-            .as_bytes()
-            .chunks_exact(2)
-            .map(|pair| {
-                u8::from_str_radix(std::str::from_utf8(pair).expect("hex is ASCII"), 16)
-                    .expect("hex is valid")
-            })
-            .collect::<Vec<_>>();
+        // An unknown-class file proves the binary route the same way.
+        let fixture_hex = |case: &str| {
+            assetripper::processing::asset_factory::PROBE_FIXTURE
+                .lines()
+                .find_map(|line| line.strip_prefix(&format!("SF_HEX|{case}|")))
+                .unwrap_or_else(|| panic!("the source-factory fixture includes {case}"))
+        };
+        let decode_hex = |hex: &str| {
+            hex.as_bytes()
+                .chunks_exact(2)
+                .map(|pair| {
+                    u8::from_str_radix(std::str::from_utf8(pair).expect("hex is ASCII"), 16)
+                        .expect("hex is valid")
+                })
+                .collect::<Vec<_>>()
+        };
         let text_input = directory.join("z-textasset.assets");
-        std::fs::write(&text_input, &text_bytes).expect("the probe text asset is written");
+        std::fs::write(&text_input, decode_hex(fixture_hex("textasset_notree")))
+            .expect("the probe text asset is written");
+        let unknown_input = directory.join("z-unknown.assets");
+        std::fs::write(&unknown_input, decode_hex(fixture_hex("unknown_class")))
+            .expect("the probe unknown asset is written");
         let load_and_browse = || {
             // Production layouts: the test binary otherwise substitutes synthetic
             // TypeTrees that cannot decode the no-TypeTree TextAsset.
@@ -753,6 +800,7 @@ mod tests {
                     early_input.to_string_lossy().into_owned(),
                     probe_resource.to_string_lossy().into_owned(),
                     text_input.to_string_lossy().into_owned(),
+                    unknown_input.to_string_lossy().into_owned(),
                 ])
                 .expect("the probe inputs load");
             assert!(state.is_loaded());
@@ -770,10 +818,10 @@ mod tests {
                 anchor_texts(&root, "/Bundles/View?Path="),
                 ["a-workspace.bundle", "workspace.bundle"]
             );
-            // The bare TextAsset file lists as a root collection.
+            // The bare synthetic files list as root collections, by name.
             assert_eq!(
                 anchor_texts(&root, "/Collections/View?Path="),
-                ["z-textasset.assets"]
+                ["z-textasset.assets", "z-unknown.assets"]
             );
 
             // The outer container names its bundle after the input file, links back
@@ -943,6 +991,47 @@ mod tests {
             assert!(!asset.contains("print(1)"), "{asset}");
             let mute_data = asset_hrefs[0].replacen("/Assets/View?Path=", "/Assets/Text?Path=", 1);
             let response = get(&mut state, &mute_data);
+            assert_eq!(response.status(), 200);
+            assert!(response.body().is_empty());
+
+            // The unknown-class object serves its raw bytes with a download,
+            // while decoded assets have neither the section nor the bytes.
+            let unknown_view = format!(
+                "/Collections/View?Path={}",
+                url_encode("{\"B\":{\"P\":[]},\"I\":1}")
+            );
+            let response = get(&mut state, &unknown_view);
+            assert_eq!(response.status(), 200);
+            let unknown_collection =
+                String::from_utf8(response.body().to_vec()).expect("pages are UTF-8");
+            assert!(
+                unknown_collection.contains("Unknown7_3FCA88C5"),
+                "{unknown_collection}"
+            );
+            let unknown_hrefs = anchor_hrefs(&unknown_collection, "/Assets/View?Path=");
+            assert_eq!(unknown_hrefs.len(), 1);
+            let response = get(&mut state, &unknown_hrefs[0]);
+            assert_eq!(response.status(), 200);
+            let unknown_asset =
+                String::from_utf8(response.body().to_vec()).expect("pages are UTF-8");
+            assert!(
+                unknown_asset.contains("download=\"Unknown7_3FCA88C5.dat\""),
+                "{unknown_asset}"
+            );
+            let unknown_data =
+                unknown_hrefs[0].replacen("/Assets/View?Path=", "/Assets/Binary?Path=", 1);
+            let response = get(&mut state, &unknown_data);
+            assert_eq!(response.status(), 200);
+            assert_eq!(response.content_type(), "application/octet-stream");
+            assert_eq!(
+                response.body(),
+                b"\x01\x02\x03\x04\x05\x06\x07\x08".as_slice()
+            );
+            assert!(!asset.contains("/Assets/Binary?Path="), "{asset}");
+            assert!(!text_asset.contains("/Assets/Binary?Path="), "{text_asset}");
+            let mute_binary =
+                asset_hrefs[0].replacen("/Assets/View?Path=", "/Assets/Binary?Path=", 1);
+            let response = get(&mut state, &mute_binary);
             assert_eq!(response.status(), 200);
             assert!(response.body().is_empty());
             let missing_asset = format!(
