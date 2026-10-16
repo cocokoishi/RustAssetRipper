@@ -22,6 +22,7 @@ use super::settings_form::{
     PREMIUM_NOTICE_KEY,
 };
 use super::state::WebState;
+use assetripper::web_paths::{bundle_view_url, BundlePath};
 
 /// The localization key of the class id of the shader asset class.
 const SHADER_CLASS_ID: i16 = 48;
@@ -91,25 +92,14 @@ fn t<'a>(state: &'a WebState, key: &str) -> Cow<'a, str> {
     state.messages().text(state.language(), key)
 }
 
-/// Percent-encode a query value the way `WebUtility.UrlEncode` does for the characters the
-/// product's paths contain.
-pub fn url_encode(text: &str) -> String {
-    let mut encoded = String::with_capacity(text.len());
-    for byte in text.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
-            encoded.push(char::from(byte));
-        } else {
-            encoded.push('%');
-            encoded.push_str(&format!("{byte:02X}"));
-        }
-    }
-    encoded
-}
+/// Percent-encode a query value; the single encoder lives in
+/// [`assetripper::web_paths`].
+pub use assetripper::web_paths::url_encode;
 
 /// The root bundle's view URL, matching `BundleAPI.GetViewUrl` for an empty `BundlePath`
 /// (`{"P":[]}`).
 pub fn root_bundle_url() -> String {
-    format!("/Bundles/View?Path={}", url_encode("{\"P\":[]}"))
+    bundle_view_url(&BundlePath::root())
 }
 
 /// The home page.

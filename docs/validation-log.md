@@ -6086,3 +6086,40 @@ These results do not pass the first-phase gate. The reference .NET solution buil
 - Exit 0. Output: Public repository policy passed: tracked Git metadata contains no private input paths or oversized blobs.
 - 979 tracked objects scanned; no files > 25 MiB and no forbidden private suffixes or rtifacts paths; managed_reference_project_fixture/*.bundle allowed under the documented exception.
 - CI status unchanged: HEAD=origin/main; no private-path failures in Public repository hygiene job.
+## 2026-10-16 - Bundle-tree path values land in the library (`src/web_paths.rs`)
+
+- Scope: new library module `src/web_paths.rs` (six `Paths/` structs, strict documents on the
+  shared `crate::json` reader, six `*API.GetViewUrl` builders, the shared `TryGet*FromQuery`
+  gate as generic `view_gate`); binary wiring in `src/web/routes.rs` (`GET /Bundles/View`,
+  `/Collections/View`, `/Assets/View`, `/Resources/View`, `/FailedFiles/View`, `/Scenes/View`
+  run the frozen missing-path/malformed-JSON/not-loaded gates with the baseline's 404 messages
+  and keep the explicit pending page only for a well-formed loaded path); `src/web/pages.rs`
+  reuses the single `url_encode`/`bundle_view_url` from the library. No export-path behavior
+  changes; no sample, oracle or third-party code touched.
+- Frozen reference: `AssetRipper/Source/AssetRipper.GUI.Web/Paths/` (`BundlePath`,
+  `CollectionPath`, `AssetPath`, `ResourcePath`, `FailedFilePath`, `ScenePath`, `IPath`,
+  `PathExtensions`, `PathLinking`, `PathSerializerContext`), the six `Pages/*/*API.cs`
+  `GetViewUrl`/`TryGet*FromQuery` sequences (all share the first three 404 gates; only the
+  tree-backed fourth gate differs per kind), `AssetRipper.Web/Extensions/
+  HttpResponseExtensions.cs` (404 with a plain-text message), and the per-page parent links
+  (`ViewPage.cs` files) that the still-open tree projection will navigate with.
+- Shape notes (recorded in the module docs): `{"P":[]}` root, `{"B":{...},"I":n}`,
+  `{"C":{...},"D":n}`, `{"C":{...}}`; exact key sets in any order (unknown/missing/duplicated
+  keys rejected); integral-only numbers with `i32` range checks; `"P":null` reads as the root
+  like the frozen missing backing array; bounded strings/nesting from the shared reader.
+- Commands run (worktree `main-work`, detached, HEAD == origin/main before this change):
+  1. `cargo test --locked --lib web_paths` - 6 passed, 0 failed.
+  2. `cargo test --locked --bin assetripper-rs web::` - 55 passed, 0 failed.
+  3. `cargo test --locked --workspace` - 1821 library + 188 bin tests, 0 failed, 1 ignored.
+  4. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+  5. `rustfmt --edition 2021 --check` on each touched file - clean (whole-tree `cargo fmt`
+     still reports only the five documented pre-existing drift files, untouched by this
+     change; a bare-rustfmt-on-`src/lib.rs` accident briefly reformatted four of them and
+     was reverted, so the committed diff is exactly the five intended paths).
+  6. `git diff --check` - exit 0.
+- Open after this increment: the bundle-tree projection (`Bundle`/`Collection`/`Asset`/
+  `Resource`/`FailedFile`/`Scene` model behind `WebState::loaded`) that turns a `Ready`
+  path into the real view pages; `/Collections/Count`, `/FailedFiles/StackTrace`,
+  `/Resources/Data`, `/Assets/*` data routes, `/Search/View` and `/Export/PrimaryContent`
+  keep their explicit pending pages. Unity Editor import/runtime and UABEA remain blocked
+  (license/tooling), unchanged by this increment.

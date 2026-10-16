@@ -26,6 +26,10 @@ use super::pages;
 use super::server::utc_timestamp_text;
 use super::settings_form::apply_form;
 use super::state::{ExportDecision, WebState};
+use assetripper::web_paths::{
+    view_gate, AssetPath, BundlePath, CollectionPath, FailedFilePath, PathDocument, ResourcePath,
+    ScenePath, ViewGate,
+};
 
 /// The methods every known path answers, used by `405` responses.
 const ALLOWED_METHODS: &str = "GET, POST";
@@ -59,6 +63,16 @@ fn get(state: &mut WebState, request: &Request) -> Response {
         // without one.
         "/Dialogs/SaveFile" | "/Dialogs/OpenFile" | "/Dialogs/OpenFolder" => Response::json("\"\""),
         "/Dialogs/OpenFiles" | "/Dialogs/OpenFolders" => Response::json("[]"),
+        "/Bundles/View" => bundle_tree_view::<BundlePath>(state, request, "/Bundles/View"),
+        "/Collections/View" => {
+            bundle_tree_view::<CollectionPath>(state, request, "/Collections/View")
+        }
+        "/Assets/View" => bundle_tree_view::<AssetPath>(state, request, "/Assets/View"),
+        "/Resources/View" => bundle_tree_view::<ResourcePath>(state, request, "/Resources/View"),
+        "/FailedFiles/View" => {
+            bundle_tree_view::<FailedFilePath>(state, request, "/FailedFiles/View")
+        }
+        "/Scenes/View" => bundle_tree_view::<ScenePath>(state, request, "/Scenes/View"),
         "/IO/File/Exists" => probe(request, |path| Path::new(path).is_file()),
         "/IO/Directory/Exists" => probe(request, |path| Path::new(path).is_dir()),
         "/IO/Directory/Empty" => probe(request, |path| !is_non_empty_directory(Path::new(path))),
@@ -162,6 +176,28 @@ fn export(state: &mut WebState, request: &Request) -> Response {
             }
             Response::redirect("/")
         }
+    }
+}
+
+/// One `GET /X/View` bundle-tree page: run the frozen `TryGet*FromQuery` gate sequence.
+///
+/// A missing or malformed `Path` and an unloaded game each answer `404` with the baseline's
+/// message. A well-formed loaded path needs the bundle-tree projection, which is still open,
+/// so it keeps the explicit pending page instead of inventing bundle content.
+fn bundle_tree_view<T: PathDocument>(
+    state: &mut WebState,
+    request: &Request,
+    route: &'static str,
+) -> Response {
+    match view_gate::<T>(request.query_value("Path"), state.is_loaded()) {
+        ViewGate::MissingPath => {
+            Response::text("The path must be included in the request.").with_status(404)
+        }
+        ViewGate::InvalidPath(diagnostic) => Response::text(diagnostic).with_status(404),
+        ViewGate::NotLoaded => Response::text("No files loaded.").with_status(404),
+        ViewGate::Ready(_) => Response::html(pages::pending_page(state, "GET", route))
+            .with_status(501)
+            .with_content_type("text/html; charset=utf-8"),
     }
 }
 
@@ -295,10 +331,75 @@ mod tests {
     }
 
     #[test]
+    fn every_tree_view_follows_the_frozen_query_gates() {
+        use assetripper::web_paths::{
+            asset_view_url, bundle_view_url, collection_view_url, failed_file_view_url,
+            resource_view_url, scene_view_url, AssetPath, BundlePath, CollectionPath,
+            FailedFilePath, ResourcePath, ScenePath,
+        };
+
+        let root_collection = CollectionPath {
+            bundle: BundlePath::root(),
+            index: 0,
+        };
+        let views = [
+            (
+                "/Bundles/View",
+                bundle_view_url(&BundlePath::root().child(1)),
+            ),
+            ("/Collections/View", collection_view_url(&root_collection)),
+            (
+                "/Assets/View",
+                asset_view_url(&AssetPath {
+                    collection: root_collection.clone(),
+                    path_id: 7,
+                }),
+            ),
+            (
+                "/Resources/View",
+                resource_view_url(&ResourcePath {
+                    bundle: BundlePath::root(),
+                    index: 1,
+                }),
+            ),
+            (
+                "/FailedFiles/View",
+                failed_file_view_url(&FailedFilePath {
+                    bundle: BundlePath::root(),
+                    index: 1,
+                }),
+            ),
+            (
+                "/Scenes/View",
+                scene_view_url(&ScenePath::from(root_collection)),
+            ),
+        ];
+        for (route, valid_url) in views {
+            let mut state = state();
+            // No Path: the baseline reports the missing path, not an unwired route.
+            let response = dispatch(&mut state, &request("GET", route));
+            assert_eq!(response.status(), 404, "{route}");
+            assert_eq!(
+                response.body(),
+                b"The path must be included in the request.",
+                "{route}"
+            );
+            // A malformed Path is a 404 carrying the parse diagnostic.
+            let target = format!("{route}?Path=%7B");
+            let response = dispatch(&mut state, &request("GET", &target));
+            assert_eq!(response.status(), 404, "{route}");
+            assert!(!response.body().is_empty(), "{route}");
+            // A well-formed Path with nothing loaded reports the empty game.
+            let response = dispatch(&mut state, &request("GET", &valid_url));
+            assert_eq!(response.status(), 404, "{route}");
+            assert_eq!(response.body(), b"No files loaded.", "{route}");
+        }
+    }
+
+    #[test]
     fn an_unwired_baseline_route_reports_not_implemented_and_an_unknown_one_404() {
         let mut state = state();
-        assert_eq!(status(&mut state, "GET", "/Bundles/View"), 501);
-        assert_eq!(status(&mut state, "GET", "/Assets/View"), 501);
+        assert_eq!(status(&mut state, "GET", "/Search/View"), 501);
         assert_eq!(status(&mut state, "POST", "/Export/PrimaryContent"), 501);
         assert_eq!(status(&mut state, "GET", "/nope"), 404);
         // The same path with the other method is a method error, not a missing route.

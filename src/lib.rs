@@ -20,3 +20,4 @@ pub mod scheme;
 pub mod serialized_file;
 #[cfg(test)]
 mod test_support;
+pub mod web_paths;

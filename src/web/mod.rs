@@ -15,6 +15,9 @@
 //! * [`settings_form`] - the settings form model and the `POST /Settings/Update` semantics.
 //! * [`pages`] - one renderer per baseline page.
 //! * [`routes`] - request dispatch over the baseline route table.
+//!
+//! The bundle-tree path values and their view URLs live in the library as
+//! [`assetripper::web_paths`], beside the shared JSON reader they are built on.
 //! * [`server`] - binding, logging, the banner and the connection loop.
 //! * [`state`] - the loaded game, the settings record and the log tail.
 

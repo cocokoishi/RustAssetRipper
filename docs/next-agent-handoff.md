@@ -1,5 +1,36 @@
 # RustAssetRipper hand-off — 2026-10-16
 
+## Latest current checkpoint - 2026-10-16 (bundle-tree path values landed; tree projection is next)
+
+- Worktree: `main-work` detached; HEAD == origin/main before this slice, working tree holds only
+  the five intended paths (`src/web_paths.rs` new; `src/lib.rs`, `src/web/{mod,pages,routes}.rs`
+  edited). No bundles, reference outputs or user data touched. Formatted per-file with
+  `rustfmt --edition 2021 --check` (never bare-rustfmt `src/lib.rs` — it follows the module
+  tree and rewrites unrelated drift files; one such accident was reverted).
+- **New deliverable — `src/web_paths.rs` library module** (beside `product.rs`/`json.rs`, the
+  precedent for product-surface code in the lib): all six frozen `Paths/` structs with exact
+  `ToJson` shapes parsed through the shared `crate::json` reader (exact key sets any order,
+  integral-only numbers, `i32` range checks, `"P":null` ≡ root), the tree operations
+  (`parent`/`child`/`collection`/`failed_file`/`resource`/`asset`), all six `*API.GetViewUrl`
+  builders, and the shared `TryGet*FromQuery` gates as generic `view_gate`. Six routes
+  (`/Bundles|/Collections|/Assets|/Resources|/FailedFiles|/Scenes` + `/View`) run the frozen
+  missing-path/malformed-JSON/not-loaded 404 gates and keep the explicit pending page only for
+  a well-formed loaded path. No dead code: the lib placement keeps every builder/operation
+  alive for the coming pages (a bin-side module tripped `-D warnings` dead-code and was
+  removed in favor of the lib module).
+- Verification evidence: `cargo test --locked --lib web_paths` 6/6; `--bin assetripper-rs
+  web::` 55/55; full `cargo test --locked --workspace` **1821 lib + 188 bin, 0 failed**,
+  1 ignored; `cargo clippy --workspace --all-targets --locked -- -D warnings` exit 0;
+  per-file rustfmt clean; `git diff --check` exit 0. Full evidence in `docs/validation-log.md`.
+- Privacy: no sample content/paths/names in code, tests, docs or commit text; only class IDs,
+  counts and field names. Mapping table stays outside the repo; history untouched.
+- Next move: build the bundle-tree projection (`Bundle`/`Collection`/`Asset`/`Resource`/
+  `FailedFile`/`Scene` model over `WebState::loaded`, following frozen `PathExtensions`
+  resolve + per-page `ViewPage` rendering with `PathLinking` up/down links) to turn `Ready`
+  paths into real pages; then `/Collections/Count`, `/FailedFiles/StackTrace`,
+  `/Resources/Data`, `/Assets/*` data routes, `/Search/View`, `/Export/PrimaryContent`.
+  Then re-run the Phase-1 gap rules (9 `实现中` + 1 blocked + 16 `已实现但未验证`).
+
 ## Latest current checkpoint - 2026-10-16 (pure-Rust web surface landed as `src/web/`)
 
 - Worktree: `main-work` detached, clean except uncommitted working tree `src/web/` and the launcher edits; HEAD `5ea8de13f655aa25aea17d0f495ff601a2f8552a` == origin/main. No original bundles, reference outputs or user data were touched. Honest state: derived surface is verified at the seam level plus one end-to-end smoke test; the remaining work lands the bundle-tree/asset pages and PrimaryContent export driver.
