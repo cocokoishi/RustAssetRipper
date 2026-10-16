@@ -9,6 +9,7 @@ pub mod compression;
 pub mod container;
 pub mod export;
 pub mod io;
+pub mod json;
 pub mod localization;
 pub mod numerics;
 pub mod processing;

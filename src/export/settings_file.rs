@@ -35,6 +35,7 @@ use super::settings::{
     LightmapTextureExportFormat, ProcessingDefaults, ScriptContentLevel, ScriptExportMode,
     ScriptLanguageVersion, ShaderExportMode, SpriteExportMode, StreamingAssetsMode, TextExportMode,
 };
+use crate::json::{parse_json, JsonError, JsonLimits, JsonValue};
 
 /// The settings file name beside the executable (`SerializedSettings.DefaultFileName`).
 pub const SETTINGS_FILE_NAME: &str = "AssetRipper.Settings.json";
@@ -590,27 +591,21 @@ pub fn parse_settings_file(
             limit: limits.max_file_bytes,
         });
     }
-    let mut parser = JsonParser {
-        bytes: text.as_bytes(),
-        position: 0,
-        depth: 0,
-        limits,
-    };
-    let value = parser.parse_value("$")?;
-    parser.skip_whitespace();
-    if parser.position != parser.bytes.len() {
-        return Err(SettingsFileError::InvalidJson {
-            path: "$".to_owned(),
-            reason: "trailing content after the root value",
-        });
-    }
-    let root = value.as_object("$")?;
-    let import = map_import(lookup(root, "Import", "$")?.as_object("$.Import")?, limits)?;
+    let value = parse_json(
+        text,
+        JsonLimits {
+            max_string_bytes: limits.max_string_bytes,
+            max_nesting_depth: limits.max_nesting_depth,
+        },
+    )
+    .map_err(map_json_error)?;
+    let root = as_object(&value, "$")?;
+    let import = map_import(as_object(lookup(root, "Import", "$")?, "$.Import")?, limits)?;
     let processing = map_processing(
-        lookup(root, "Processing", "$")?.as_object("$.Processing")?,
+        as_object(lookup(root, "Processing", "$")?, "$.Processing")?,
         limits,
     )?;
-    let export = map_export(lookup(root, "Export", "$")?.as_object("$.Export")?, limits)?;
+    let export = map_export(as_object(lookup(root, "Export", "$")?, "$.Export")?, limits)?;
     Ok(SerializedSettingsFile {
         import,
         processing,
@@ -623,6 +618,30 @@ pub fn parse_settings_file(
 /// keep their normal string handling on both sides.
 fn strip_leading_bom(text: &str) -> &str {
     text.strip_prefix('\u{FEFF}').unwrap_or(text)
+}
+
+/// Map the shared JSON reader's errors onto the settings-file error surface so callers
+/// keep a single error type. `StringTooLong` is a bound failure, not a syntax failure.
+fn map_json_error(error: JsonError) -> SettingsFileError {
+    match error {
+        JsonError::InvalidJson { path, reason } => SettingsFileError::InvalidJson { path, reason },
+        JsonError::StringTooLong { byte_count, limit } => {
+            SettingsFileError::InputTooLong { byte_count, limit }
+        }
+    }
+}
+
+/// Object accessor that keeps the settings-file error type.
+fn as_object<'a>(
+    value: &'a JsonValue,
+    path: &str,
+) -> Result<&'a [(String, JsonValue)], SettingsFileError> {
+    value.as_object(path).map_err(map_json_error)
+}
+
+/// Boolean accessor that keeps the settings-file error type.
+fn as_bool(value: &JsonValue, path: &str) -> Result<bool, SettingsFileError> {
+    value.as_bool(path).map_err(map_json_error)
 }
 
 fn map_import(
@@ -660,22 +679,22 @@ fn map_processing(
     let _ = limits;
     let mut settings = ProcessingSettingsFile::from(ProcessingDefaults::default());
     if let Some(value) = find_member(members, "EnablePrefabOutlining") {
-        settings.enable_prefab_outlining = value.as_bool("$.Processing.EnablePrefabOutlining")?;
+        settings.enable_prefab_outlining = as_bool(value, "$.Processing.EnablePrefabOutlining")?;
     }
     if let Some(value) = find_member(members, "EnableStaticMeshSeparation") {
         settings.enable_static_mesh_separation =
-            value.as_bool("$.Processing.EnableStaticMeshSeparation")?;
+            as_bool(value, "$.Processing.EnableStaticMeshSeparation")?;
     }
     if let Some(value) = find_member(members, "EnableAssetDeduplication") {
         settings.enable_asset_deduplication =
-            value.as_bool("$.Processing.EnableAssetDeduplication")?;
+            as_bool(value, "$.Processing.EnableAssetDeduplication")?;
     }
     if let Some(value) = find_member(members, "RemoveNullableAttributes") {
         settings.remove_nullable_attributes =
-            value.as_bool("$.Processing.RemoveNullableAttributes")?;
+            as_bool(value, "$.Processing.RemoveNullableAttributes")?;
     }
     if let Some(value) = find_member(members, "PublicizeAssemblies") {
-        settings.publicize_assemblies = value.as_bool("$.Processing.PublicizeAssemblies")?;
+        settings.publicize_assemblies = as_bool(value, "$.Processing.PublicizeAssemblies")?;
     }
     if let Some(value) = find_member(members, "BundledAssetsExportMode") {
         settings.bundled_assets_export_mode = map_enum(
@@ -731,7 +750,7 @@ fn map_export(
     }
     if let Some(value) = find_member(members, "ScriptTypesFullyQualified") {
         settings.script_types_fully_qualified =
-            value.as_bool("$.Export.ScriptTypesFullyQualified")?;
+            as_bool(value, "$.Export.ScriptTypesFullyQualified")?;
     }
     if let Some(value) = find_member(members, "ShaderExportMode") {
         settings.shader_export_mode = map_enum(
@@ -755,14 +774,14 @@ fn map_export(
         )?;
     }
     if let Some(value) = find_member(members, "ExportUnreadableAssets") {
-        settings.export_unreadable_assets = value.as_bool("$.Export.ExportUnreadableAssets")?;
+        settings.export_unreadable_assets = as_bool(value, "$.Export.ExportUnreadableAssets")?;
     }
     if let Some(value) = find_member(members, "PreferOriginalTextureExtension") {
         settings.prefer_original_texture_extension =
-            value.as_bool("$.Export.PreferOriginalTextureExtension")?;
+            as_bool(value, "$.Export.PreferOriginalTextureExtension")?;
     }
     if let Some(value) = find_member(members, "SaveSettingsToDisk") {
-        settings.save_settings_to_disk = value.as_bool("$.Export.SaveSettingsToDisk")?;
+        settings.save_settings_to_disk = as_bool(value, "$.Export.SaveSettingsToDisk")?;
     }
     if let Some(value) = find_member(members, "LanguageCode") {
         settings.language_code = match value {
@@ -819,20 +838,6 @@ fn enum_discriminant(number: i64, path: &str) -> Result<i32, SettingsFileError> 
     })
 }
 
-/// Checked decoded-string bound over caller facts: strings accumulate
-/// attacker-controlled bytes, so the closing-quote and per-character checks share one
-/// decision point against `max_string_bytes`. The overflow arms are unreachable in
-/// realistic files, so the kernel keeps them provable.
-fn check_string_bound(len: usize, max_string_bytes: usize) -> Result<(), SettingsFileError> {
-    if len > max_string_bytes {
-        return Err(SettingsFileError::InputTooLong {
-            byte_count: len,
-            limit: max_string_bytes,
-        });
-    }
-    Ok(())
-}
-
 fn map_version(
     value: &JsonValue,
     path: &str,
@@ -871,321 +876,6 @@ fn lookup<'a>(
         path: parent.to_owned(),
         reason: "missing settings section",
     })
-}
-
-/// A minimal JSON value model for the fixed settings schema.
-#[derive(Clone, Debug, PartialEq)]
-enum JsonValue {
-    Null,
-    Bool(bool),
-    Integer(i64),
-    Str(String),
-    Object(Vec<(String, JsonValue)>),
-    /// Only traversed to skip unknown properties; the schema itself has no arrays.
-    Array(Vec<JsonValue>),
-}
-
-impl JsonValue {
-    fn as_object(&self, path: &str) -> Result<&[(String, JsonValue)], SettingsFileError> {
-        match self {
-            Self::Object(members) => Ok(members),
-            _ => Err(SettingsFileError::InvalidJson {
-                path: path.to_owned(),
-                reason: "expected an object",
-            }),
-        }
-    }
-
-    fn as_bool(&self, path: &str) -> Result<bool, SettingsFileError> {
-        match self {
-            Self::Bool(flag) => Ok(*flag),
-            _ => Err(SettingsFileError::InvalidJson {
-                path: path.to_owned(),
-                reason: "expected true or false",
-            }),
-        }
-    }
-}
-
-struct JsonParser<'a> {
-    bytes: &'a [u8],
-    position: usize,
-    depth: usize,
-    limits: SettingsFileLimits,
-}
-
-impl<'a> JsonParser<'a> {
-    /// One nesting level for objects and arrays against the depth bound, so both
-    /// containers share a single decision point.
-    fn enter_nesting(&mut self, path: &str) -> Result<(), SettingsFileError> {
-        self.depth += 1;
-        if self.depth > self.limits.max_nesting_depth {
-            return Err(self.error(path, "nesting depth exceeds the limit"));
-        }
-        Ok(())
-    }
-
-    fn parse_value(&mut self, path: &str) -> Result<JsonValue, SettingsFileError> {
-        self.skip_whitespace();
-        match self.bytes.get(self.position) {
-            Some(b'{') => self.parse_object(path),
-            Some(b'[') => self.parse_array(path),
-            Some(b'"') => Ok(JsonValue::Str(self.parse_string(path)?)),
-            Some(b't') => self.parse_literal(path, "true", JsonValue::Bool(true)),
-            Some(b'f') => self.parse_literal(path, "false", JsonValue::Bool(false)),
-            Some(b'n') => self.parse_literal(path, "null", JsonValue::Null),
-            Some(b'-' | b'0'..=b'9') => Ok(JsonValue::Integer(self.parse_integer(path)?)),
-            _ => Err(self.error(path, "expected a JSON value")),
-        }
-    }
-
-    fn parse_object(&mut self, path: &str) -> Result<JsonValue, SettingsFileError> {
-        self.enter_nesting(path)?;
-        // `position` is at `{`.
-        self.position += 1;
-        let mut members = Vec::new();
-        self.skip_whitespace();
-        if self.bytes.get(self.position) == Some(&b'}') {
-            self.position += 1;
-            self.depth -= 1;
-            return Ok(JsonValue::Object(members));
-        }
-        loop {
-            self.skip_whitespace();
-            if self.bytes.get(self.position) != Some(&b'"') {
-                return Err(self.error(path, "expected a member name"));
-            }
-            let name = self.parse_string(path)?;
-            self.skip_whitespace();
-            if self.bytes.get(self.position) != Some(&b':') {
-                return Err(self.error(path, "expected a colon"));
-            }
-            self.position += 1;
-            let value = self.parse_value(path)?;
-            members.push((name, value));
-            self.skip_whitespace();
-            match self.bytes.get(self.position) {
-                Some(b',') => {
-                    self.position += 1;
-                }
-                Some(b'}') => {
-                    self.position += 1;
-                    self.depth -= 1;
-                    return Ok(JsonValue::Object(members));
-                }
-                _ => return Err(self.error(path, "expected a comma or closing brace")),
-            }
-        }
-    }
-
-    fn parse_array(&mut self, path: &str) -> Result<JsonValue, SettingsFileError> {
-        self.enter_nesting(path)?;
-        // `position` is at `[`.
-        self.position += 1;
-        let mut items = Vec::new();
-        self.skip_whitespace();
-        if self.bytes.get(self.position) == Some(&b']') {
-            self.position += 1;
-            self.depth -= 1;
-            return Ok(JsonValue::Array(items));
-        }
-        loop {
-            let value = self.parse_value(path)?;
-            items.push(value);
-            self.skip_whitespace();
-            match self.bytes.get(self.position) {
-                Some(b',') => {
-                    self.position += 1;
-                }
-                Some(b']') => {
-                    self.position += 1;
-                    self.depth -= 1;
-                    return Ok(JsonValue::Array(items));
-                }
-                _ => return Err(self.error(path, "expected a comma or closing bracket")),
-            }
-        }
-    }
-
-    fn parse_string(&mut self, path: &str) -> Result<String, SettingsFileError> {
-        // `position` is at the opening quote.
-        self.position += 1;
-        let mut output = String::new();
-        loop {
-            let byte =
-                *self
-                    .bytes
-                    .get(self.position)
-                    .ok_or_else(|| SettingsFileError::InvalidJson {
-                        path: path.to_owned(),
-                        reason: "unterminated string",
-                    })?;
-            match byte {
-                b'"' => {
-                    self.position += 1;
-                    check_string_bound(output.len(), self.limits.max_string_bytes)?;
-                    return Ok(output);
-                }
-                b'\\' => {
-                    self.position += 1;
-                    let escaped = *self.bytes.get(self.position).ok_or_else(|| {
-                        SettingsFileError::InvalidJson {
-                            path: path.to_owned(),
-                            reason: "unterminated escape",
-                        }
-                    })?;
-                    self.position += 1;
-                    match escaped {
-                        b'"' => output.push('"'),
-                        b'\\' => output.push('\\'),
-                        b'/' => output.push('/'),
-                        b'b' => output.push('\u{08}'),
-                        b'f' => output.push('\u{0C}'),
-                        b'n' => output.push('\n'),
-                        b'r' => output.push('\r'),
-                        b't' => output.push('\t'),
-                        b'u' => {
-                            let unit = self.parse_hex4(path)?;
-                            if (0xD800..0xDC00).contains(&unit) {
-                                if self.bytes.get(self.position) == Some(&b'\\')
-                                    && self.bytes.get(self.position + 1) == Some(&b'u')
-                                {
-                                    self.position += 2;
-                                    let low = self.parse_hex4(path)?;
-                                    if (0xDC00..0xE000).contains(&low) {
-                                        let scalar = 0x10000
-                                            + ((u32::from(unit) - 0xD800) << 10)
-                                            + (u32::from(low) - 0xDC00);
-                                        output.push(char::from_u32(scalar).ok_or_else(|| {
-                                            SettingsFileError::InvalidJson {
-                                                path: path.to_owned(),
-                                                reason: "invalid surrogate pair",
-                                            }
-                                        })?);
-                                    } else {
-                                        return Err(self.error(path, "lone leading surrogate"));
-                                    }
-                                } else {
-                                    return Err(self.error(path, "lone leading surrogate"));
-                                }
-                            } else if (0xDC00..0xE000).contains(&unit) {
-                                return Err(self.error(path, "lone trailing surrogate"));
-                            } else {
-                                output.push(char::from_u32(u32::from(unit)).ok_or_else(|| {
-                                    SettingsFileError::InvalidJson {
-                                        path: path.to_owned(),
-                                        reason: "invalid escape unit",
-                                    }
-                                })?);
-                            }
-                        }
-                        _ => {
-                            return Err(self.error(path, "unknown escape"));
-                        }
-                    }
-                }
-                0x00..=0x1F => {
-                    return Err(self.error(path, "unescaped control character"));
-                }
-                _ => {
-                    let rest = &self.bytes[self.position..];
-                    let text =
-                        core::str::from_utf8(rest).map_err(|_| SettingsFileError::InvalidJson {
-                            path: path.to_owned(),
-                            reason: "invalid UTF-8",
-                        })?;
-                    let character =
-                        text.chars()
-                            .next()
-                            .ok_or_else(|| SettingsFileError::InvalidJson {
-                                path: path.to_owned(),
-                                reason: "unterminated string",
-                            })?;
-                    output.push(character);
-                    self.position += character.len_utf8();
-                }
-            }
-            check_string_bound(output.len(), self.limits.max_string_bytes)?;
-        }
-    }
-
-    fn parse_hex4(&mut self, path: &str) -> Result<u16, SettingsFileError> {
-        if self.position + 4 > self.bytes.len() {
-            return Err(self.error(path, "truncated escape"));
-        }
-        let mut unit: u16 = 0;
-        for byte in &self.bytes[self.position..self.position + 4] {
-            unit = unit.wrapping_mul(16).wrapping_add(match byte {
-                b'0'..=b'9' => (byte - b'0') as u16,
-                b'a'..=b'f' => (byte - b'a' + 10) as u16,
-                b'A'..=b'F' => (byte - b'A' + 10) as u16,
-                _ => return Err(self.error(path, "invalid escape unit")),
-            });
-        }
-        self.position += 4;
-        Ok(unit)
-    }
-
-    fn parse_literal(
-        &mut self,
-        path: &str,
-        literal: &str,
-        value: JsonValue,
-    ) -> Result<JsonValue, SettingsFileError> {
-        if self.bytes.len() - self.position < literal.len()
-            || &self.bytes[self.position..self.position + literal.len()] != literal.as_bytes()
-        {
-            return Err(self.error(path, "invalid literal"));
-        }
-        self.position += literal.len();
-        Ok(value)
-    }
-
-    /// Strict JSON integers: optional minus, no leading zeros, no fractions or exponents.
-    /// Non-integral numbers are rejected exactly as the source deserializer rejects them.
-    fn parse_integer(&mut self, path: &str) -> Result<i64, SettingsFileError> {
-        let start = self.position;
-        if self.bytes.get(self.position) == Some(&b'-') {
-            self.position += 1;
-        }
-        let digits = self.position;
-        while matches!(self.bytes.get(self.position), Some(b'0'..=b'9')) {
-            self.position += 1;
-        }
-        if self.position == digits {
-            return Err(self.error(path, "expected digits"));
-        }
-        if self.bytes[digits] == b'0' && self.position - digits > 1 {
-            return Err(self.error(path, "leading zeros are not valid JSON"));
-        }
-        if matches!(self.bytes.get(self.position), Some(b'.' | b'e' | b'E')) {
-            return Err(self.error(path, "fractional numbers are not valid here"));
-        }
-        let text = core::str::from_utf8(&self.bytes[start..self.position]).map_err(|_| {
-            SettingsFileError::InvalidJson {
-                path: path.to_owned(),
-                reason: "invalid number",
-            }
-        })?;
-        text.parse::<i64>()
-            .map_err(|_| self.error(path, "integer out of range"))
-    }
-
-    fn skip_whitespace(&mut self) {
-        while matches!(
-            self.bytes.get(self.position),
-            Some(b' ' | b'\t' | b'\n' | b'\r')
-        ) {
-            self.position += 1;
-        }
-    }
-
-    fn error(&self, path: &str, reason: &'static str) -> SettingsFileError {
-        SettingsFileError::InvalidJson {
-            path: path.to_owned(),
-            reason,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1490,14 +1180,17 @@ mod tests {
 
     #[test]
     fn decoded_strings_respect_the_byte_bound() {
-        assert!(super::check_string_bound(0, 8).is_ok());
-        assert!(super::check_string_bound(8, 8).is_ok());
+        // The decoded-string bound kernel now lives in the shared JSON reader; the
+        // settings path maps its bound failure onto `InputTooLong`.
         assert!(matches!(
-            super::check_string_bound(9, 8),
-            Err(SettingsFileError::InputTooLong {
+            super::map_json_error(crate::json::JsonError::StringTooLong {
                 byte_count: 9,
                 limit: 8
-            })
+            }),
+            SettingsFileError::InputTooLong {
+                byte_count: 9,
+                limit: 8
+            }
         ));
         // The production path enforces the same bound: a code exactly at the limit
         // parses, one byte more fails while scanning.
