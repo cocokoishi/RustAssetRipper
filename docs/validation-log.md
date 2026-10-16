@@ -1,5 +1,12 @@
 # Validation log
 
+## 2026-10-15 Predefined Mesh redirect verified on the fourth world
+
+- Fresh replay of the affected world with the mesh-redirect binary (release exe mtime 2026-10-15 17:42:58 post-dates commit 33dd484 at 17:37:11, so the fix is exercised). `export-project` exited 0: 2 SerializedFiles, 427064 objects, 4835 asset files, 379582640 bytes, project version 2022. Three objects were reported as non-exportable baseline collections (class 150, class 142, class 687078895) where the reference writes nothing.
+- Direct outcome of DIFF-ENGINE-MESH-CACHE-001: the affected world now exports 4924 mesh asset files on both sides with zero only-reference and zero only-port mesh names and all 4924 names identical. The two Rust-only Cube assets are no longer written and every later shared-name suffix realigns, so the class 33/43/64 mesh-identity cluster is resolved.
+- Process note: a duplicate export was inadvertently launched into the same output directory while the first was still running; the stalled duplicate was stopped before its write stage and the first run's exit-0 output (9679 files, 365 MB) is the one audited.
+- Not run: the semantic document audit of this replay (in progress), Unity Editor import/runtime, UABEA.
+
 ## 2026-10-15 CI oversized-source check no longer depends on ripgrep
 
 - Problem: the `ledger` job's "Report oversized source files" step ran `tools/check-source-file-lengths.ps1`, which listed files with `rg --files`. The GitHub-hosted runner images do not ship ripgrep, so on every run the script threw `The term 'rg' is not recognized` and exited 2. The step carries `continue-on-error: true`, so the run stayed green while the check silently never ran.
