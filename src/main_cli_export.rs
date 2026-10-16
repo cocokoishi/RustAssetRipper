@@ -1082,13 +1082,31 @@ pub(super) fn export_project_to<W: io::Write>(
     )
 }
 
-pub(super) fn export_project_to_with_serialized_settings<W: io::Write>(
+/// A fully loaded game structure that can be exported repeatedly.
+///
+/// The product web surface loads once per `/LoadFile` or `/LoadFolder` command and then
+/// exports on demand, so the load and export halves of the CLI command are separate here.
+/// The resource provider is rebuilt per export because it borrows the loaded platform
+/// structure, mixed data paths and original StreamingAssets filesystem.
+pub(super) struct LoadedGame {
+    pub(super) filesystem: VirtualFileSystem,
+    pub(super) root_catalog: RootResourceFileCatalog,
+    pub(super) platform: Option<assetripper::io::platform_structure::PlatformStructure>,
+    pub(super) data_paths: Vec<String>,
+    pub(super) original_streaming_assets: Option<VirtualFileSystem>,
+    pub(super) workspace: SerializedFileWorkspace,
+    pub(super) objects: ObjectWorkspace,
+    pub(super) managed_assemblies: ManagedAssemblyCatalog,
+    pub(super) mono_manager_initialized: bool,
+    pub(super) mount_report: BatchMountReport,
+}
+
+/// Mount, identify and decode every input, mirroring `GameFileLoader.LoadAndProcess`.
+pub(super) fn load_game<W: io::Write>(
     input_paths: &[PathBuf],
-    output_root: &Path,
-    delete_existing: bool,
     full_settings: &assetripper::export::settings_file::SerializedSettingsFile,
     status_output: &mut W,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<LoadedGame, Box<dyn Error>> {
     let (mut filesystem, selected_paths, mut mount_report) = mount_project_inputs(input_paths)?;
     ensure_no_batch_container_failures(&mount_report)?;
     let mixed = MixedGameStructure::from_vfs_paths(
@@ -1313,24 +1331,56 @@ pub(super) fn export_project_to_with_serialized_settings<W: io::Write>(
             "Scripting backend is IL2CPP; its assembly recovery path is not wired into this project exporter."
         )?;
     }
-    let reference_graph = workspace.reference_graph(MultiFileReferenceGraphLimits::default())?;
-    let mut provider =
-        PlatformResourceProvider::with_mixed_data_paths(platform.as_ref(), Some(&mixed.data_paths));
-    if let Some(source) = &original_streaming_assets {
+    Ok(LoadedGame {
+        filesystem,
+        root_catalog,
+        platform,
+        data_paths: mixed.data_paths,
+        original_streaming_assets,
+        workspace,
+        objects,
+        managed_assemblies,
+        mono_manager_initialized,
+        mount_report,
+    })
+}
+
+/// Export a loaded game as a Unity project.
+///
+/// The resource provider is rebuilt per export because it borrows the loaded platform
+/// structure, mixed data paths and original StreamingAssets filesystem.
+pub(super) fn export_loaded_game<W: io::Write>(
+    game: &LoadedGame,
+    output_root: &Path,
+    delete_existing: bool,
+    full_settings: &assetripper::export::settings_file::SerializedSettingsFile,
+    status_output: &mut W,
+) -> Result<(), Box<dyn Error>> {
+    // The graph borrows the loaded workspace, so it is rebuilt per export rather than
+    // stored beside it.
+    let reference_graph = game
+        .workspace
+        .reference_graph(MultiFileReferenceGraphLimits::default())?;
+    let mut provider = PlatformResourceProvider::with_mixed_data_paths(
+        game.platform.as_ref(),
+        Some(&game.data_paths),
+    );
+    if let Some(source) = &game.original_streaming_assets {
         provider = provider.with_streaming_assets_filesystem(source);
     }
     let report = export_workspace_yaml_project_with_serialized_settings(
         output_root,
         delete_existing,
-        &filesystem,
-        &root_catalog,
+        &game.filesystem,
+        &game.root_catalog,
         &provider,
-        &workspace,
-        &objects,
+        &game.workspace,
+        &game.objects,
         &reference_graph,
         full_settings,
-        mono_manager_initialized,
-        mono_manager_initialized.then_some(&managed_assemblies),
+        game.mono_manager_initialized,
+        game.mono_manager_initialized
+            .then_some(&game.managed_assemblies),
         WorkspaceProjectExportLimits::default(),
     )?;
     writeln!(
@@ -1399,10 +1449,28 @@ pub(super) fn export_project_to_with_serialized_settings<W: io::Write>(
     writeln!(
         status_output,
         "Mounted {} logical inputs ({} bytes). Processed Scene collections and modern/legacy Prefab collection routes are wired; remaining class-specific exporters are incomplete.",
-        mount_report.discovered_inputs,
-        mount_report.discovered_source_bytes
+        game.mount_report.discovered_inputs,
+        game.mount_report.discovered_source_bytes
     )?;
     Ok(())
+}
+
+/// `export-project`: load the inputs, then export the loaded game once.
+pub(super) fn export_project_to_with_serialized_settings<W: io::Write>(
+    input_paths: &[PathBuf],
+    output_root: &Path,
+    delete_existing: bool,
+    full_settings: &assetripper::export::settings_file::SerializedSettingsFile,
+    status_output: &mut W,
+) -> Result<(), Box<dyn Error>> {
+    let game = load_game(input_paths, full_settings, status_output)?;
+    export_loaded_game(
+        &game,
+        output_root,
+        delete_existing,
+        full_settings,
+        status_output,
+    )
 }
 
 /// Retain physical StreamingAssets independently of the expanded processing VFS.

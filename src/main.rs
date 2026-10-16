@@ -417,12 +417,14 @@ fn main() {
 /// The baseline product surface is the GUI/Web UI rather than a command line, so these
 /// command names are this CLI's own contract; the classifier pins the exact accepted
 /// spellings (including `-h`/`help` and `-V`) so dispatch and usage cannot drift apart
-/// silently. Servant commands needing a web server stay out of scope: there is no
-/// `serve` arm because no server ships in this binary.
+/// silently. `serve` selects the baseline's own entry (the browser interface); a bare
+/// invocation and a leading unrecognized option select the same entry, so the product's
+/// launch behaviour matches the frozen application.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CliCommand {
     Help,
     Version,
+    Serve,
     ExportObjectYaml,
     ExportFileYaml,
     ExportTexture,
@@ -443,6 +445,7 @@ fn classify_cli_command(name: &str) -> CliCommand {
     match name {
         "--help" | "-h" | "help" => CliCommand::Help,
         "--version" | "-V" => CliCommand::Version,
+        "serve" => CliCommand::Serve,
         "export-object-yaml" => CliCommand::ExportObjectYaml,
         "export-file-yaml" => CliCommand::ExportFileYaml,
         "export-texture" => CliCommand::ExportTexture,
@@ -458,15 +461,43 @@ fn classify_cli_command(name: &str) -> CliCommand {
     }
 }
 
+/// Whether the first command-line word selects the baseline's browser entry.
+///
+/// No word at all, the port's `serve` spelling, and any leading option the CLI does not define
+/// (`--port 5000`, `--headless`, `-?`) all start the server, which is how the frozen
+/// application behaves. The CLI's own `--help`/`--version` spellings keep their CLI meaning, so
+/// `serve --help` and `serve --version` reach the browser entry's help and version text.
+fn selects_web_entry(first: Option<&str>) -> bool {
+    let Some(text) = first else {
+        return true;
+    };
+    match classify_cli_command(text) {
+        CliCommand::Serve => true,
+        CliCommand::Help | CliCommand::Version => false,
+        _ => text.starts_with('-'),
+    }
+}
+
 fn run(arguments: impl Iterator<Item = OsString>) -> Result<(), Box<dyn Error>> {
     let mut arguments = arguments;
-    let Some(command) = arguments.next() else {
-        print_usage();
-        return Err(invalid_input("a command is required"));
+    let first = arguments.next();
+    let first_text = match &first {
+        Some(word) => Some(
+            word.to_str()
+                .ok_or_else(|| invalid_input("the command name must be valid UTF-8"))?
+                .to_owned(),
+        ),
+        None => None,
     };
-    let command = command
-        .into_string()
-        .map_err(|_| invalid_input("the command name must be valid UTF-8"))?;
+    if selects_web_entry(first_text.as_deref()) {
+        let mut launch_arguments: Vec<OsString> = Vec::new();
+        if let Some(word) = first_text.filter(|word| word != "serve") {
+            launch_arguments.push(OsString::from(word));
+        }
+        launch_arguments.extend(arguments);
+        return web::run(&launch_arguments);
+    }
+    let command = first_text.expect("a first word was classified above");
     match classify_cli_command(&command) {
         CliCommand::Help => {
             print_usage();
@@ -475,6 +506,10 @@ fn run(arguments: impl Iterator<Item = OsString>) -> Result<(), Box<dyn Error>> 
         CliCommand::Version => {
             println!("assetripper-rs {}", env!("CARGO_PKG_VERSION"));
             Ok(())
+        }
+        CliCommand::Serve => {
+            let launch_arguments: Vec<OsString> = arguments.collect();
+            web::run(&launch_arguments)
         }
         CliCommand::ExportObjectYaml => export_object_yaml_from_arguments(arguments),
         CliCommand::ExportFileYaml => export_file_yaml_from_arguments(arguments),
@@ -524,6 +559,8 @@ use inspection::*;
 #[path = "main_cli_summary.rs"]
 mod summary;
 use summary::*;
+#[path = "web/mod.rs"]
+mod web;
 
 #[cfg(test)]
 #[path = "main_tests.rs"]

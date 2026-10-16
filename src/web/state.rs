@@ -1,0 +1,453 @@
+//! Product web-surface state: the loaded game, the settings record and the log tail.
+//!
+//! The frozen product keeps a single `GameData` value plus one `FullConfiguration` in
+//! `GameFileLoader`. The port keeps the same two pieces of state in [`WebState`]: the settings
+//! record loaded from the default path beside the executable, and an optional [`LoadedGame`]
+//! produced by the shared `load_game` pipeline that the CLI export commands already use.
+//!
+//! Every workflow here mirrors the baseline gate sequence: a load resets first, an export
+//! applies `IsValidExportDirectory` and the non-empty-directory deletion consent, and settings
+//! are written back only when `SaveSettingsToDisk` is set.
+
+use std::error::Error;
+use std::path::{Path, PathBuf};
+
+use assetripper::export::settings::{ExportDefaults, ImportDefaults, ProcessingDefaults};
+use assetripper::export::settings_file::{
+    decide_settings_persistence, SerializedSettingsFile, SettingsPersistenceAction,
+};
+use assetripper::localization::{decide_load_language, LoadLanguageOutcome};
+use assetripper::product::{
+    deletion_consent, is_valid_export_directory, maybe_append_timestamped_subfolder,
+    resolve_export_flow, ExportFlow,
+};
+use assetripper::resources::vertex_data_blob::UnityVersion;
+
+use crate::export_commands::{
+    delete_serialized_settings_in_dir, executable_directory, export_loaded_game,
+    load_default_serialized_settings_from_dir, load_game, save_serialized_settings_to_dir,
+    LoadedGame,
+};
+
+use super::localization::{Messages, FALLBACK_LANGUAGE};
+
+/// What the export routes should do for one submitted path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExportDecision {
+    /// No game is loaded, or the submitted path is empty: the baseline does nothing.
+    Skip,
+    /// The path is a protected system directory: the baseline logs an error and stops.
+    InvalidDirectory,
+    /// The directory holds files and the user has not confirmed deletion yet.
+    NeedsConfirmation,
+    /// Run the export, deleting the existing directory first when it is non-empty.
+    Proceed { delete_existing: bool },
+}
+
+/// The loaded state plus everything else a page needs.
+pub struct WebState {
+    messages: Messages,
+    settings: SerializedSettingsFile,
+    executable_directory: PathBuf,
+    headless: bool,
+    language: String,
+    loaded: Option<LoadedGame>,
+    log: Vec<String>,
+    static_content: Vec<(String, Vec<u8>)>,
+}
+
+impl WebState {
+    /// Load the settings record and the message tables the way the baseline launcher does.
+    ///
+    /// `LoadFromDefaultPath` keeps the class defaults when no file exists, and writes nothing at
+    /// startup, so a missing file is not an error.
+    pub fn new(headless: bool) -> Result<Self, Box<dyn Error>> {
+        let messages = Messages::load()?;
+        let directory = executable_directory()?;
+        let settings =
+            load_default_serialized_settings_from_dir(&directory)?.unwrap_or_else(|| {
+                SerializedSettingsFile::from_defaults(
+                    ImportDefaults::default(),
+                    ProcessingDefaults::default(),
+                    ExportDefaults::default(),
+                )
+            });
+        Self::with_settings(messages, settings, directory, headless)
+    }
+
+    /// Build state from an explicit settings record, executable directory and headless flag.
+    pub fn with_settings(
+        messages: Messages,
+        settings: SerializedSettingsFile,
+        executable_directory: PathBuf,
+        headless: bool,
+    ) -> Result<Self, Box<dyn Error>> {
+        let language =
+            match decide_load_language(FALLBACK_LANGUAGE, settings.export.language_code.as_deref())
+            {
+                LoadLanguageOutcome::Switched { code } => code,
+                LoadLanguageOutcome::Unchanged => FALLBACK_LANGUAGE.to_owned(),
+            };
+        Ok(Self {
+            messages,
+            settings,
+            executable_directory,
+            headless,
+            language,
+            loaded: None,
+            log: Vec::new(),
+            static_content: Vec::new(),
+        })
+    }
+
+    /// The message tables.
+    pub fn messages(&self) -> &Messages {
+        &self.messages
+    }
+
+    /// The current language code.
+    pub fn language(&self) -> &str {
+        &self.language
+    }
+
+    /// Whether a browser window is suppressed; headless exports consent to directory deletion.
+    ///
+    /// The export gate reads the stored flag; only the tests read it directly.
+    #[cfg(test)]
+    pub fn headless(&self) -> bool {
+        self.headless
+    }
+
+    /// The loaded settings record.
+    pub fn settings(&self) -> &SerializedSettingsFile {
+        &self.settings
+    }
+
+    /// The settings record for a form handler to update.
+    pub fn settings_mut(&mut self) -> &mut SerializedSettingsFile {
+        &mut self.settings
+    }
+
+    /// Register the `--local-web-file` overrides as URL path to content.
+    pub fn set_static_content(&mut self, entries: Vec<(String, Vec<u8>)>) {
+        self.static_content = entries;
+    }
+
+    /// The override registered for a URL path, when one is present.
+    pub fn static_content(&self, path: &str) -> Option<&[u8]> {
+        self.static_content
+            .iter()
+            .find(|(candidate, _)| candidate == path)
+            .map(|(_, content)| content.as_slice())
+    }
+
+    /// Whether a game is loaded.
+    pub fn is_loaded(&self) -> bool {
+        self.loaded.is_some()
+    }
+
+    /// The loaded game, when one is present.
+    pub fn loaded(&self) -> Option<&LoadedGame> {
+        self.loaded.as_ref()
+    }
+
+    /// The maximum Unity version text over the loaded files, matching
+    /// `GameBundle.GetMaxUnityVersion` as far as the port's version type reaches.
+    pub fn max_unity_version_text(&self) -> Option<String> {
+        let game = self.loaded.as_ref()?;
+        let mut best: Option<(UnityVersion, String)> = None;
+        for file in game.workspace.files() {
+            let Some(text) = file.metadata.prefix.unity_version_text.as_deref() else {
+                continue;
+            };
+            let Some(version) = UnityVersion::parse(text) else {
+                continue;
+            };
+            if best.as_ref().is_none_or(|(current, _)| version > *current) {
+                best = Some((version, text.to_owned()));
+            }
+        }
+        best.map(|(_, text)| text)
+    }
+
+    /// Log lines produced since the last [`WebState::take_log`].
+    pub fn take_log(&mut self) -> Vec<String> {
+        core::mem::take(&mut self.log)
+    }
+
+    /// Switch language like `Localization.LoadLanguage`, returning whether it changed.
+    pub fn set_language(&mut self, requested: Option<&str>) -> bool {
+        match decide_load_language(&self.language, requested) {
+            LoadLanguageOutcome::Switched { code } => {
+                self.language = code;
+                true
+            }
+            LoadLanguageOutcome::Unchanged => false,
+        }
+    }
+
+    /// Persist or delete the settings file according to `SaveSettingsToDisk`.
+    pub fn apply_settings_persistence(&mut self) -> Result<SettingsPersistenceAction, String> {
+        match decide_settings_persistence(self.settings.export.save_settings_to_disk) {
+            SettingsPersistenceAction::SaveToDefaultPath => {
+                save_serialized_settings_to_dir(&self.settings, &self.executable_directory)
+                    .map_err(|error| error.to_string())?;
+                Ok(SettingsPersistenceAction::SaveToDefaultPath)
+            }
+            SettingsPersistenceAction::DeleteDefaultPath => {
+                let deleted = delete_serialized_settings_in_dir(&self.executable_directory)
+                    .map_err(|error| error.to_string())?;
+                if deleted {
+                    self.log
+                        .push("Deleted the stored settings file.".to_owned());
+                }
+                Ok(SettingsPersistenceAction::DeleteDefaultPath)
+            }
+            SettingsPersistenceAction::LeaveStoredFile => {
+                Ok(SettingsPersistenceAction::LeaveStoredFile)
+            }
+        }
+    }
+
+    /// Record a failure the way the baseline's error middleware reports one.
+    pub fn log_error(&mut self, message: &str) {
+        self.log.push(message.to_owned());
+    }
+
+    /// `MaybeSaveToDefaultPath`: write the settings file only when `SaveSettingsToDisk` is set.
+    pub fn maybe_save_settings(&mut self) -> Result<(), String> {
+        if !self.settings.export.save_settings_to_disk {
+            return Ok(());
+        }
+        save_serialized_settings_to_dir(&self.settings, &self.executable_directory)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    /// `GameFileLoader.LoadAndProcess`: reset, then mount and decode every submitted path.
+    pub fn load(&mut self, paths: &[String]) -> Result<(), String> {
+        self.reset();
+        if paths.is_empty() {
+            return Err("no input path was provided".to_owned());
+        }
+        let path_bufs: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+        let mut status = Vec::new();
+        let game = load_game(&path_bufs, &self.settings, &mut status)
+            .map_err(|error| error.to_string())?;
+        self.push_status(&status);
+        self.log
+            .push(format!("Loaded {} input path(s).", paths.len()));
+        self.loaded = Some(game);
+        Ok(())
+    }
+
+    /// `GameFileLoader.Reset`: drop the loaded game, logging only when one was present.
+    pub fn reset(&mut self) -> bool {
+        let had_data = self.loaded.take().is_some();
+        if had_data {
+            self.log.push("Data was reset.".to_owned());
+        }
+        had_data
+    }
+
+    /// The export gate for one submitted path, with the browser confirmation result.
+    pub fn plan_export(&self, path: &str, confirmed: bool) -> ExportDecision {
+        if path.is_empty() {
+            return ExportDecision::Skip;
+        }
+        let directory_valid = is_valid_export_directory(path);
+        let non_empty = assetripper::export::export_root::is_non_empty_directory(Path::new(path));
+        let consent = deletion_consent(self.headless, if confirmed { Some(true) } else { None });
+        match resolve_export_flow(self.loaded.is_some(), directory_valid, non_empty, consent) {
+            ExportFlow::AbortedNotLoaded => ExportDecision::Skip,
+            ExportFlow::AbortedInvalidDirectory => ExportDecision::InvalidDirectory,
+            ExportFlow::AbortedDeclined => ExportDecision::NeedsConfirmation,
+            ExportFlow::ProceedDeleteFirst => ExportDecision::Proceed {
+                delete_existing: true,
+            },
+            ExportFlow::ProceedCreateOnly => ExportDecision::Proceed {
+                delete_existing: false,
+            },
+        }
+    }
+
+    /// Apply `CreateSubfolder` to a submitted export path.
+    pub fn resolve_export_path(
+        &self,
+        path: &str,
+        create_subfolder: bool,
+        timestamp: &str,
+    ) -> String {
+        maybe_append_timestamped_subfolder(path, create_subfolder, timestamp)
+    }
+
+    /// Export the loaded game as a Unity project.
+    pub fn export_unity_project(
+        &mut self,
+        path: &str,
+        delete_existing: bool,
+    ) -> Result<(), String> {
+        let game = self
+            .loaded
+            .as_ref()
+            .ok_or_else(|| "no game is loaded".to_owned())?;
+        let mut status = Vec::new();
+        export_loaded_game(
+            game,
+            Path::new(path),
+            delete_existing,
+            &self.settings,
+            &mut status,
+        )
+        .map_err(|error| error.to_string())?;
+        self.push_status(&status);
+        Ok(())
+    }
+
+    fn push_status(&mut self, status: &[u8]) {
+        let text = String::from_utf8_lossy(status);
+        for line in text.lines().filter(|line| !line.is_empty()) {
+            self.log.push(line.to_owned());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::localization::{Messages, FALLBACK_LANGUAGE};
+    use super::{ExportDecision, SerializedSettingsFile, WebState};
+    use assetripper::export::settings::{ExportDefaults, ImportDefaults, ProcessingDefaults};
+    use std::path::PathBuf;
+
+    fn state(headless: bool) -> WebState {
+        let settings = SerializedSettingsFile::from_defaults(
+            ImportDefaults::default(),
+            ProcessingDefaults::default(),
+            ExportDefaults::default(),
+        );
+        WebState::with_settings(
+            Messages::load().expect("tables load"),
+            settings,
+            PathBuf::from("/tmp/assetripper-test"),
+            headless,
+        )
+        .expect("state builds")
+    }
+
+    #[test]
+    fn startup_state_matches_the_launcher_defaults() {
+        let state = state(false);
+        assert!(!state.is_loaded());
+        assert!(!state.headless());
+        assert_eq!(state.language(), FALLBACK_LANGUAGE);
+        assert!(!state.settings().export.save_settings_to_disk);
+        assert!(state.loaded().is_none());
+    }
+
+    #[test]
+    fn language_switching_follows_the_load_language_rules() {
+        let mut state = state(false);
+        assert!(!state.set_language(None));
+        assert!(!state.set_language(Some(FALLBACK_LANGUAGE)));
+        assert!(!state.set_language(Some("xx-YY")));
+        assert!(state.set_language(Some("de")));
+        assert_eq!(state.language(), "de");
+        // The underscored file stem is normalized before the switch.
+        assert!(state.set_language(Some("zh_Hans")));
+        assert_eq!(state.language(), "zh-Hans");
+        assert!(!state.set_language(Some("zh-Hans")));
+    }
+
+    #[test]
+    fn reset_reports_whether_data_was_present() {
+        let mut state = state(false);
+        assert!(!state.reset());
+        assert!(state.take_log().is_empty());
+    }
+
+    #[test]
+    fn loading_without_paths_is_rejected_without_touching_state() {
+        let mut state = state(false);
+        let error = state.load(&[]).unwrap_err();
+        assert_eq!(error, "no input path was provided");
+        assert!(!state.is_loaded());
+    }
+
+    #[test]
+    fn export_gates_mirror_the_baseline_flow() {
+        let state_without_game = state(false);
+        assert_eq!(
+            state_without_game.plan_export("/tmp/export", true),
+            ExportDecision::Skip
+        );
+        // The empty path short-circuits before any directory check.
+        assert_eq!(
+            state_without_game.plan_export("", false),
+            ExportDecision::Skip
+        );
+    }
+
+    #[test]
+    fn subfolder_timestamp_uses_the_shared_helper() {
+        let state = state(false);
+        assert_eq!(
+            state.resolve_export_path("/tmp/out", false, "20260101_000000"),
+            "/tmp/out"
+        );
+        assert_eq!(
+            state.resolve_export_path("/tmp/out", true, "20260101_000000"),
+            "/tmp/out/AssetRipper_export_20260101_000000"
+        );
+    }
+
+    /// A writable directory beside the test binary, unique to `name`.
+    fn test_directory(name: &str) -> PathBuf {
+        let mut directory = std::env::current_exe().expect("test executable path");
+        directory.pop();
+        directory.push(format!("web-{name}-test"));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("test directory");
+        directory
+    }
+
+    #[test]
+    fn settings_persistence_writes_and_deletes_the_default_path() {
+        let directory = test_directory("settings");
+        let settings = SerializedSettingsFile::from_defaults(
+            ImportDefaults::default(),
+            ProcessingDefaults::default(),
+            ExportDefaults::default(),
+        );
+        let mut state = WebState::with_settings(
+            Messages::load().expect("tables load"),
+            settings,
+            directory.clone(),
+            false,
+        )
+        .expect("state builds");
+        state.settings_mut().export.save_settings_to_disk = true;
+        state.apply_settings_persistence().expect("save");
+        let written = directory.join("AssetRipper.Settings.json");
+        assert!(written.exists(), "{} should exist", written.display());
+        state.settings_mut().export.save_settings_to_disk = false;
+        state.apply_settings_persistence().expect("delete");
+        assert!(!written.exists());
+        // `MaybeSaveToDefaultPath` writes only when the flag is set and never deletes.
+        state.maybe_save_settings().expect("no-op");
+        assert!(!written.exists());
+        state.settings_mut().export.save_settings_to_disk = true;
+        state.maybe_save_settings().expect("save");
+        assert!(written.exists());
+        state.settings_mut().export.save_settings_to_disk = false;
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn static_content_overrides_are_keyed_by_url_path() {
+        let mut state = state(false);
+        assert!(state.static_content("/css/site.css").is_none());
+        state.set_static_content(vec![("/css/site.css".to_owned(), b"x".to_vec())]);
+        assert_eq!(state.static_content("/css/site.css"), Some(b"x".as_slice()));
+        assert!(state.static_content("/js/site.js").is_none());
+    }
+}

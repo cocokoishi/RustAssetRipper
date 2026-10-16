@@ -6024,3 +6024,56 @@ These results do not pass the first-phase gate. The reference .NET solution buil
 - GitHub Actions run `38485280724` (https://github.com/cocokoishi/RustAssetRipper/actions/runs/38485280724) for `b991f74` completed successfully on Ubuntu and Windows. `cargo test --workspace --locked`: Ubuntu 1,744 library tests and 128 CLI tests passed (1 library test ignored); Windows 1,746 library tests and 128 CLI tests passed (1 library test ignored). Warnings-denied Clippy, release builds, changed-line formatting, and public-repository hygiene passed on both platforms.
 - Local validation: `git diff --check` passed. No local Cargo test, Clippy, or build was run; the machine performance constraint is being honored.
 - Not run: production table-backed FSB5 decode, Unity import/runtime, UABEA, project export, `tools/audit-project-documents.ps1`, and `tools/check-project-references.ps1`. No user input was read; Phase 1 remains open and Phase 2 remains locked.
+
+## 2026-10-16 - Pure-Rust web surface landing (`src/web/`) and launch parser parity
+
+### Scope
+- New source: `src/web/{arguments,http,server,state,pages,routes,settings_form,localization}.rs`, `src/web/site.css`, plus the vendored `src/web/localizations/` (23 locale JSON files, the licence text, the README, and the generated `language_names.json`; 25 files / 301,450 bytes).
+- Refactor, no behaviour change in the export path: `src/main_cli_export.rs` exposes `LoadedGame`/`load_game`/`export_loaded_game` as `pub(super)` so the web server reuses the existing load/export commands.
+- `src/main.rs`, `src/main_cli_summary.rs`, `src/main_tests_08.rs` (launch classifier, no-arg browser entry, the `serve` word, two-surface usage text).
+
+### Launch parser parity against the shipped `AssetRipper.GUI.Free.exe`
+- Probes captured in `target/ref-args.txt`: attached-only boolean values; diagnostics exact wording; `--help false` short-circuits and prints help; `--version=false --port=8080` prints version; `--port 1 --port 2` reports `The argument 'port' was supplied more than once`; `help` (bare word) reports `Too many arguments were supplied.`; `--version=maybe` reports the boolean conversion error; `--port=65536` is rejected client-side (reference instead crashes in the .NET runtime).
+- Rust behaviour verified by `web::arguments` module tests plus the smoke run.
+
+### Commands run
+1. `cargo fmt --all -- --check` (full tree reported only the five documented pre-existing drift files; all newly edited files are already clean after `rustfmt`).
+2. `cargo check --locked --all-targets` - exit 0, warnings strictly 0 (before documenting, all warnings wired to `cfg(test)` markers).
+3. `cargo test --locked --workspace` - 1,815 library + 187 bin tests, 0 failed, 1 ignored (19.83 + 38.88 s). New: 54 `web::*` tests, all passing.
+4. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+5. `cargo build --locked` (dev) - exit 0, 27 s.
+6. End-to-end smoke test, `target/debug/assetripper-rs.exe serve --headless --port 0 --log`, working directory `target/web-smoke-run/`:
+   - Banner: `Now listening on: http://127.0.0.1:50128`; the log file rotates to the current 5-newest set.
+   - `GET /` -> `HTTP/1.1 200 OK` (5975 bytes, self-contained HTML, `charset=utf-8`).
+   - `GET /Settings/Edit` -> 200 (14836 bytes) for the 10-dropdown language-neutral page.
+   - `GET /Commands` -> 200 (5408 bytes).
+   - `GET /css/site.css` -> `200 OK...text/css` (4568 bytes, no online dependency).
+   - `GET /Licenses` -> 200 (111 666 bytes) reproducing all five retained licence texts under <h2> headings.
+   - `GET /openapi.json` -> `200 OK...application/json` (4648 bytes, OpenAPI 3.0.1, title `AssetRipper API` v2.0.0, 46 routes).
+   - `GET /IO/Directory/Empty?Path=<encoded temporary dir>` -> `200 OK` body `true`.
+   - `POST /Settings/Update` with a form body -> `302 Found` `Location: /Settings/Edit`. (303 bug fixed to 302 before running the server.)
+   - `GET /NonExistent` -> `404 Not Found`; `HEAD /` -> `405 Method Not Allowed` (matches the baseline's `MapGet`/`MapPost` registration, no `MapHead`).
+- Smoke evidence recorded in `target/web-smoke-run/` (`server.log` containing the working-directory banner and the `Now listening on:` line); no sample documents are involved.
+
+### Measured evidence (verification)
+- Branch: `main-work` detached at `5ea8de13f655...`; HEAD == `origin/main`.
+- All seven previously documented drift files are untouched (grep against `git diff --stat`).
+- Unit-level tests added/verified:
+  - `web::arguments`: 5 tests, including `boolean_options_accept_an_optional_attached_value_only`, `diagnostics_match_the_reference_parser`, `help_and_version_short_circuit_the_launch`.
+  - `web::http`: 8 tests (GET with query decoding, non-UTF request head rejection, oversized input, save/redirect status).
+  - `web::pages`: 12 tests (all 23 languages across every page, disabled-checkbox free-edition invariant).
+  - `web::routes`: 5 tests (static pages, export gating with confirmation).
+  - `web::settings_form`: 7 tests (dropdown key coverage, zero-value fallback, persistence).
+  - `web::state`: 6 tests.
+  - `web::server`: 2 tests (civil-day conversion epoch boundary).
+- Total workspace: 1,815 + 187 = 2,002 green, 1 ignored, zero failures.
+
+### Known unfinished work remaining in this workstream
+1. `src/web` renders bundle-tree (`/Assets/*`, `/Bundles/View`, `/Collections/*`, `/FailedFiles/*`, `/Resources/View`, `/Resources/Data`, `/Scenes/View`, `/Search/View`) and `/Export/PrimaryContent` as `501 Not Implemented`; the collection-model port (`BundlePath`/`CollectionPath`/`AssetPath`/`ResourcePath`) stays open.
+2. `/PremiumFeatures` reports `not_implemented_yet` by design (shader-platform detection, combined-mesh grouping).
+3. `/ConfigurationFiles` and `/Localization` data-set UI need `AssetRipper.Configuration`'s DataStorage subsystem (assessed as a gap; no false "already ported" claim will be made).
+4. Unity Editor import/runtime and UABEA checks remain physically blocked (license, and no installed UABEA on the workspace).
+5. Phase-1 ledger rows 9 `实现中` + 1 blocked + 14 `已实现但未验证` still await independent verification; the deliverable here is the web-load / settings / export-gate path that `PRODUCT-GUI-001` tracks.
+
+### Nothing else locally audited this session
+- No VRChat bundle, no oracle output, and no third-party library code was changed or read in violation of the stage-1 gate.
