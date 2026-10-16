@@ -62,6 +62,15 @@ pub struct WebState {
     static_content: Vec<(String, Vec<u8>)>,
 }
 
+/// A video clip's streamed content with the extension taken from its original path.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VideoData {
+    /// The `m_ExternalResources` range bytes.
+    pub bytes: Vec<u8>,
+    /// The container extension named by the clip's `m_OriginalPath`.
+    pub extension: String,
+}
+
 /// A font asset's binary data with the extension and MIME the frozen route reports.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FontData {
@@ -305,6 +314,78 @@ impl WebState {
             assetripper::resource::StreamedResourceContentResolution::Missing { .. }
             | assetripper::resource::StreamedResourceContentResolution::Unset => None,
         })
+    }
+
+    /// Read one video clip's streamed content with the extension the frozen route reports.
+    ///
+    /// Mirrors `AssetAPI.GetVideoData`: `VideoClipExtensions.TryGetExtensionFromPath` names the
+    /// container from the clip's `m_OriginalPath`, and `TryGetContent` reads the
+    /// `m_ExternalResources` range. Both must succeed, so a clip without a path extension or
+    /// without readable content reports no video rather than serving bytes under a guess.
+    pub fn read_asset_video(
+        &self,
+        file_index: usize,
+        object_index: usize,
+    ) -> Result<Option<VideoData>, String> {
+        use assetripper::resources::video_clip::VideoClipView;
+
+        let game = self
+            .loaded
+            .as_ref()
+            .ok_or_else(|| "no game is loaded".to_owned())?;
+        let object = game
+            .objects
+            .get(file_index, object_index)
+            .ok_or_else(|| "the snapshot row has no workspace object".to_owned())?;
+        let Ok(payload) = object.payload.as_ref() else {
+            return Ok(None);
+        };
+        let Ok(view) = VideoClipView::from_value(&payload.root) else {
+            return Ok(None);
+        };
+        // `TryGetExtensionFromPath` is one of the two gates the frozen route requires.
+        let Some(extension) = view.try_get_extension_from_path() else {
+            return Ok(None);
+        };
+        let extension = extension.to_owned();
+        let Some(info) = view
+            .external_resources
+            .as_ref()
+            .filter(|info| info.is_set())
+        else {
+            return Ok(None);
+        };
+        let file = game
+            .workspace
+            .files()
+            .get(file_index)
+            .ok_or_else(|| "the snapshot row has no workspace file".to_owned())?;
+        use assetripper::io::platform_structure::PlatformResourceProvider;
+        let provider =
+            PlatformResourceProvider::with_mixed_data_paths(None, Some(&game.data_paths));
+        let resolution = assetripper::resource::resolve_and_read_streamed_resource_range(
+            &game.filesystem,
+            &game.workspace,
+            file.container_bundle_index,
+            assetripper::resource::StreamedResourceRange {
+                path: &info.path,
+                offset: info.offset,
+                size: u64::from(info.size),
+            },
+            &game.root_catalog,
+            &provider,
+            assetripper::resource::StreamedResourceContentLimits::default(),
+        )
+        .map_err(|error| error.to_string())?;
+        match resolution {
+            assetripper::resource::StreamedResourceContentResolution::Resolved {
+                bytes, ..
+            } => Ok(Some(VideoData {
+                bytes: bytes.to_vec(),
+                extension,
+            })),
+            _ => Ok(None),
+        }
     }
 
     /// Read one font asset's binary data with the extension and MIME the frozen route reports.

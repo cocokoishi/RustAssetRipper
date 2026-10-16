@@ -1461,6 +1461,178 @@
         finish_single_object_file(version, 83, &nodes, &strings, &payload, 42)
     }
 
+    /// Build a `VideoClip` file for the video route and tab, matching the **production**
+    /// class-329 layout at 3.5.0f1.
+    ///
+    /// That record is `m_Name`, `m_OriginalPath`, `m_ProxyWidth`, `m_ProxyHeight`, `Width`,
+    /// `Height`, a `double` `m_FrameRate`, a `UInt64` `m_FrameCount`, `m_Format`, three empty
+    /// audio vectors, a `StreamedResource` `m_ExternalResources` (whose fields are `m_Source`,
+    /// `m_Offset`, `m_Size`, not the `StreamingInfo` spelling), and a trailing `m_HasSplitAlpha`
+    /// bool. A fixture that writes only the two strings and a `StreamingInfo` fails at
+    /// `m_FrameCount`.
+    pub(super) fn make_video_clip_file(
+        original_path: &str,
+        resource_path: &str,
+        size: u32,
+    ) -> Vec<u8> {
+        let mut strings = Vec::new();
+        let clip_type = push_type_tree_string(&mut strings, "VideoClip");
+        let empty_name = push_type_tree_string(&mut strings, "");
+        let string_type = push_type_tree_string(&mut strings, "string");
+        let name_field = push_type_tree_string(&mut strings, "m_Name");
+        let array_type = push_type_tree_string(&mut strings, "Array");
+        let int_type = push_type_tree_string(&mut strings, "int");
+        let size_field = push_type_tree_string(&mut strings, "size");
+        let char_type = push_type_tree_string(&mut strings, "char");
+        let unsigned_int_type = push_type_tree_string(&mut strings, "unsigned int");
+        let double_type = push_type_tree_string(&mut strings, "double");
+        let uint64_type = push_type_tree_string(&mut strings, "UInt64");
+        let uint32_type = push_type_tree_string(&mut strings, "UInt32");
+        let uint16_type = push_type_tree_string(&mut strings, "UInt16");
+        let bool_type = push_type_tree_string(&mut strings, "bool");
+        let vector_type = push_type_tree_string(&mut strings, "vector");
+
+        let original_path_field = push_type_tree_string(&mut strings, "m_OriginalPath");
+        let proxy_width_field = push_type_tree_string(&mut strings, "m_ProxyWidth");
+        let proxy_height_field = push_type_tree_string(&mut strings, "m_ProxyHeight");
+        let width_field = push_type_tree_string(&mut strings, "Width");
+        let height_field = push_type_tree_string(&mut strings, "Height");
+        let frame_rate_field = push_type_tree_string(&mut strings, "m_FrameRate");
+        let frame_count_field = push_type_tree_string(&mut strings, "m_FrameCount");
+        let format_field = push_type_tree_string(&mut strings, "m_Format");
+        let channel_count_field = push_type_tree_string(&mut strings, "m_AudioChannelCount");
+        let sample_rate_field = push_type_tree_string(&mut strings, "m_AudioSampleRate");
+        let language_field = push_type_tree_string(&mut strings, "m_AudioLanguage");
+        let streamed_type = push_type_tree_string(&mut strings, "StreamedResource");
+        let external_field = push_type_tree_string(&mut strings, "m_ExternalResources");
+        let source_field = push_type_tree_string(&mut strings, "m_Source");
+        let offset_field = push_type_tree_string(&mut strings, "m_Offset");
+        let resource_size_field = push_type_tree_string(&mut strings, "m_Size");
+        let split_alpha_field = push_type_tree_string(&mut strings, "m_HasSplitAlpha");
+
+        let mut nodes = Vec::new();
+        nodes.push((0, clip_type, empty_name, -1));
+        let table = StringTreeTable {
+            string_type,
+            array_type,
+            int_type,
+            size_field,
+            char_type,
+            data_field: push_type_tree_string(&mut strings, "data"),
+        };
+        string_tree_nodes(&mut nodes, 1, &table, name_field);
+        string_tree_nodes(&mut nodes, 1, &table, original_path_field);
+        nodes.push((1, unsigned_int_type, proxy_width_field, 4));
+        nodes.push((1, unsigned_int_type, proxy_height_field, 4));
+        nodes.push((1, unsigned_int_type, width_field, 4));
+        nodes.push((1, unsigned_int_type, height_field, 4));
+        nodes.push((1, double_type, frame_rate_field, 8));
+        nodes.push((1, uint64_type, frame_count_field, 8));
+        nodes.push((1, int_type, format_field, 4));
+        // Three empty vectors: a single `Array` child each, with no elements.
+        nodes.push((1, vector_type, channel_count_field, -1));
+        nodes.push((2, array_type, empty_name, -1));
+        nodes.push((3, int_type, size_field, 4));
+        nodes.push((1, vector_type, sample_rate_field, -1));
+        nodes.push((2, array_type, empty_name, -1));
+        nodes.push((3, int_type, size_field, 4));
+        nodes.push((1, vector_type, language_field, -1));
+        nodes.push((2, array_type, empty_name, -1));
+        nodes.push((3, int_type, size_field, 4));
+        // The streamed descriptor uses the `StreamedResource` spelling of its three fields.
+        nodes.push((1, streamed_type, external_field, -1));
+        string_tree_nodes(&mut nodes, 2, &table, source_field);
+        nodes.push((2, uint64_type, offset_field, 8));
+        nodes.push((2, uint64_type, resource_size_field, 8));
+        nodes.push((1, bool_type, split_alpha_field, 1));
+
+        let mut payload = Vec::new();
+        put_typetree_string_value(&mut payload, "TestVideo");
+        put_typetree_string_value(&mut payload, original_path);
+        put_u32_le(&mut payload, 0); // m_ProxyWidth
+        put_u32_le(&mut payload, 0); // m_ProxyHeight
+        put_u32_le(&mut payload, 0); // Width
+        put_u32_le(&mut payload, 0); // Height
+        payload.extend_from_slice(&0f64.to_le_bytes()); // m_FrameRate
+        payload.extend_from_slice(&0u64.to_le_bytes()); // m_FrameCount
+        put_i32_le(&mut payload, 0); // m_Format
+        put_i32_le(&mut payload, 0); // m_AudioChannelCount (empty)
+        put_i32_le(&mut payload, 0); // m_AudioSampleRate (empty)
+        put_i32_le(&mut payload, 0); // m_AudioLanguage (empty)
+        put_typetree_string_value(&mut payload, resource_path); // m_Source
+        payload.extend_from_slice(&0u64.to_le_bytes()); // m_Offset
+        payload.extend_from_slice(&u64::from(size).to_le_bytes()); // m_Size
+        payload.push(0); // m_HasSplitAlpha
+        let padding = (4 - payload.len() % 4) % 4;
+        payload.resize(payload.len() + padding, 0);
+        // The `UInt16`/`UInt32`/`string` data leaves are declared for completeness; no vector
+        // has elements, so only the count words above appear.
+        let _ = (uint16_type, uint32_type);
+        finish_single_object_file(b"3.5.0f1\0", 329, &nodes, &strings, &payload, 42)
+    }
+
+    #[test]
+    fn generated_video_clip_layout_decodes_under_production_layouts() {
+        use crate::{load_object_workspace, load_workspace_from_vfs};
+        use assetripper::io::dependency::DependencyFilePath;
+        use assetripper::io::filesystem::VirtualFileSystem;
+        use assetripper::serialized_file::object_workspace::ObjectWorkspaceLimits;
+        use assetripper::serialized_file::workspace::SerializedFileWorkspaceLimits;
+
+        let _production = crate::SourceFactoryLayoutGuard::use_source_factory();
+        let bytes = make_video_clip_file("Assets/movie.mp4", "probe.resS", 30);
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem.create_directory(Some("/game")).unwrap();
+        filesystem
+            .write_all_bytes("/game/video.assets", &bytes)
+            .unwrap();
+        let input = DependencyFilePath {
+            file_name: "video.assets".to_owned(),
+            virtual_path: "/game/video.assets".to_owned(),
+        };
+        let workspace = load_workspace_from_vfs(
+            &filesystem,
+            &[input],
+            SerializedFileWorkspaceLimits::default(),
+        )
+        .expect("the workspace loads");
+        let objects =
+            load_object_workspace(&filesystem, &workspace, ObjectWorkspaceLimits::default())
+                .expect("the object workspace loads");
+        let object = objects.get(0, 0).expect("the clip exists");
+        if std::env::var("VIDEO_TREE_DEBUG").is_ok() {
+            use assetripper::processing::asset_factory::{
+                ClassLayoutSource, FactoryUnityVersion,
+            };
+            let layouts = assetripper::processing::asset_factory::reference_class_layouts();
+            let version = FactoryUnityVersion::parse("3.5.0f1").expect("version");
+            if let Ok(Some((release, _))) = layouts.tpk_trees(329, &version) {
+                for node in &release.nodes {
+                    eprintln!(
+                        "VIDEOTREE|{}|{}|{}|{}",
+                        node.level,
+                        node.type_name.as_deref().unwrap_or(""),
+                        node.name.as_deref().unwrap_or(""),
+                        node.byte_size
+                    );
+                }
+            }
+        }
+        let payload = object
+            .payload
+            .as_ref()
+            .unwrap_or_else(|error| panic!("the clip must decode: {error}"));
+        let view =
+            assetripper::resources::video_clip::VideoClipView::from_value(&payload.root)
+                .expect("the clip exposes route fields");
+        assert_eq!(view.try_get_extension_from_path(), Some("mp4"));
+        assert!(view.check_integrity());
+        let info = view.external_resources.as_ref().expect("resources are present");
+        assert_eq!(info.path, "probe.resS");
+        assert_eq!(info.offset, 0);
+        assert_eq!(info.size, 30);
+    }
+
     /// Build a `Font` file for the font route and tab.
     ///
     /// The TypeTree and payload follow the **production** class-128 layout at 3.5.0f1, which the

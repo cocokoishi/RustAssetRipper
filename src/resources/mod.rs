@@ -80,3 +80,4 @@ pub mod vector;
 pub mod vector_extensions;
 pub mod vertex_data_blob;
 pub mod vertex_data_extensions;
+pub mod video_clip;

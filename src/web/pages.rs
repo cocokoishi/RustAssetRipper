@@ -847,6 +847,29 @@ pub fn asset_page(
         inner.raw("</div>");
     }
 
+    if asset.has_video {
+        // The frozen video tab renders a `<video>` whose single source points at the route,
+        // then a save button beneath it. The served MIME is `video/<extension>` taken from the
+        // clip's original path, so the source type comes from the same read as the bytes.
+        use super::html::escape;
+        use assetripper::web_paths::asset_video_url;
+
+        let Ok(Some(video)) = state.read_asset_video(asset.file_index, asset.object_index) else {
+            return Some(layout(state, &asset.best_name, inner.as_str()));
+        };
+        inner.element("h2", &[], &t(state, "asset_tab_video"));
+        let video_url = asset_video_url(path);
+        inner.raw("<div class=\"text-center\">");
+        inner.raw(&format!(
+            "<video controls=\"\" style=\"width:100%; height:100%\"><source src=\"{}\" type=\"video/{}\"></video>",
+            escape(&video_url),
+            escape(&video.extension)
+        ));
+        let file_name = format!("{}.{}", asset.best_name, video.extension);
+        save_button(&mut inner, state, &video_url, &file_name);
+        inner.raw("</div>");
+    }
+
     if asset.has_font {
         // The frozen font tab previews the typeface with a heading styled by the font family
         // and a save button. The port keeps that shape and adds the linked preview so the
@@ -1552,6 +1575,7 @@ mod tests {
                             has_image: false,
                             has_audio: false,
                             has_font: false,
+                            has_video: false,
                             dependencies: Vec::new(),
                         },
                     }],

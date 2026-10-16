@@ -79,6 +79,9 @@ const AUDIO_CLIP_CLASS_ID: i32 = 83;
 /// The Unity class ID of `Font`, whose binary data the font tab serves.
 const FONT_CLASS_ID: i32 = 128;
 
+/// The Unity class ID of `VideoClip`, whose streamed content the video tab serves.
+const VIDEO_CLIP_CLASS_ID: i32 = 329;
+
 /// The display name when a container bundle carries neither a fixed name nor a scope.
 pub const NAMELESS_BUNDLE_NAME: &str = "Bundle";
 
@@ -124,6 +127,9 @@ pub struct TreeAsset {
     /// Whether the asset serves font binary data, mirroring `AssetAPI.HasFontData` (`asset is
     /// IFont` *and* its `m_FontData` identifies as a font).
     pub has_font: bool,
+    /// Whether the asset serves video content, mirroring `AssetAPI.HasVideoData` (`asset is
+    /// IVideoClip` *and* its external resources pass `CheckIntegrity`).
+    pub has_video: bool,
     /// The non-null reference edges in field traversal order.
     pub dependencies: Vec<TreeDependency>,
 }
@@ -571,6 +577,7 @@ fn asset_row(
             has_image: false,
             has_audio: false,
             has_font: false,
+            has_video: false,
             dependencies: Vec::new(),
         };
     };
@@ -605,6 +612,12 @@ fn asset_row(
     // The frozen `HasAudioData` is a type test, so every class-83 asset advertises the tab even
     // when its audio later refuses to decode; the route reports that refusal.
     let has_audio = class_id == AUDIO_CLIP_CLASS_ID;
+    // `HasVideoData` is the type test plus `CheckIntegrity` over the clip's external resources.
+    let has_video = class_id == VIDEO_CLIP_CLASS_ID
+        && payload.is_some_and(|value| {
+            assetripper::resources::video_clip::VideoClipView::from_value(&value.root)
+                .is_ok_and(|view| view.check_integrity())
+        });
     // `HasFontData` is the type test *and* a successful read, so a Font whose `m_FontData` is
     // absent, too short to identify, or malformed advertises no font tab.
     let has_font = class_id == FONT_CLASS_ID
@@ -629,6 +642,7 @@ fn asset_row(
         has_image,
         has_audio,
         has_font,
+        has_video,
         dependencies: Vec::new(),
     }
 }

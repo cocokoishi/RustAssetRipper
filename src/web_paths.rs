@@ -475,6 +475,11 @@ pub fn asset_yaml_url(path: &AssetPath) -> String {
     format!("/Assets/Yaml?Path={}", url_encode(&path.to_json()))
 }
 
+/// The video URL the frozen `AssetAPI.GetVideoUrl` builds for `path`.
+pub fn asset_video_url(path: &AssetPath) -> String {
+    format!("/Assets/Video?Path={}", url_encode(&path.to_json()))
+}
+
 /// The font URL the frozen `AssetAPI.GetFontUrl` builds for `path`.
 pub fn asset_font_url(path: &AssetPath) -> String {
     format!("/Assets/Font?Path={}", url_encode(&path.to_json()))

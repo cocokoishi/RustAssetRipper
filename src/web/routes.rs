@@ -75,6 +75,7 @@ fn get(state: &mut WebState, request: &Request) -> Response {
         "/Assets/Yaml" => assets_yaml(state, request),
         "/Assets/Audio" => assets_audio(state, request),
         "/Assets/Font" => assets_font(state, request),
+        "/Assets/Video" => assets_video(state, request),
         "/Resources/View" => resources_view(state, request),
         "/Resources/Data" => resources_data(state, request),
         "/FailedFiles/View" => pending_tree_view::<FailedFilePath>(
@@ -576,6 +577,42 @@ fn assets_font(state: &mut WebState, request: &Request) -> Response {
     }
 }
 
+/// `GET /Assets/Video`: serve the resolved clip's streamed content.
+///
+/// The frozen route answers `video/<extension>` and reports `404 Video data could not be
+/// decoded.` when the clip has no path extension or its content is unreadable, or `404 Asset was
+/// not a video clip.` for a non-clip asset.
+fn assets_video(state: &mut WebState, request: &Request) -> Response {
+    let path = match tree_gates::<AssetPath>(state, request) {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
+    let Some(tree) = loaded_tree(state) else {
+        return Response::internal_error("A game is loaded but its bundle tree is missing.");
+    };
+    let Some((bundle_index, position, row)) = tree.resolve_asset(&path) else {
+        return Response::text(format!(
+            "Asset could not be resolved: {}",
+            path.to_diagnostic()
+        ))
+        .with_status(404);
+    };
+    let Some(asset) = tree
+        .bundle(bundle_index)
+        .and_then(|bundle| bundle.collections.get(position))
+        .and_then(|collection| collection.assets.get(row))
+    else {
+        return Response::internal_error(format!(
+            "The bundle tree disagrees with the resolved path {}.",
+            path.to_diagnostic()
+        ));
+    };
+    match state.read_asset_video(asset.file_index, asset.object_index) {
+        Ok(Some(video)) => Response::bytes(format!("video/{}", video.extension), video.bytes),
+        _ => Response::text("Video data could not be decoded.").with_status(404),
+    }
+}
+
 /// `GET /Collections/Count`: the frozen `CollectionAPI.GetCount` answers the asset count
 /// as JSON once the collection resolves.
 fn collections_count(state: &mut WebState, request: &Request) -> Response {
@@ -945,7 +982,12 @@ mod tests {
         // other repository tests' temporary inputs.
         use crate::tests::{
             make_font_file, make_generated_audio_clip_file, make_reference_texture_file,
+            make_video_clip_file,
         };
+
+        /// The video clip's external-resource range points at the probe resource input, so the
+        /// fixture reuses `PROBE_RESOURCE_BYTES` rather than inventing a second resource.
+        const VIDEO_RANGE_SOURCE: &str = "probe.resS";
 
         // The committed Ogg fixture the audio decoder tests already use, so the audio route
         // exercises the same bytes those tests validate against a reference WAV.
@@ -1017,6 +1059,19 @@ mod tests {
         let font_input = directory.join("z-font.assets");
         std::fs::write(&font_input, make_font_file(b"OTTOfont-bytes"))
             .expect("the font is written");
+        // A VideoClip whose external-resource range names the probe resource input, so the
+        // video fixture is exercised against a real class-329 payload end to end. The range
+        // must match the resource exactly, so it reuses the probe bytes' own length.
+        let video_input = directory.join("z-video.assets");
+        std::fs::write(
+            &video_input,
+            make_video_clip_file(
+                "Assets/movie.mp4",
+                VIDEO_RANGE_SOURCE,
+                u32::try_from(PROBE_RESOURCE_BYTES.len()).expect("the size fits"),
+            ),
+        )
+        .expect("the video asset is written");
         let load_and_browse = || {
             // Production layouts: the test binary otherwise substitutes synthetic
             // TypeTrees that cannot decode the no-TypeTree TextAsset.
@@ -1032,6 +1087,7 @@ mod tests {
                     texture_input.to_string_lossy().into_owned(),
                     audio_input.to_string_lossy().into_owned(),
                     font_input.to_string_lossy().into_owned(),
+                    video_input.to_string_lossy().into_owned(),
                 ])
                 .expect("the probe inputs load");
             assert!(state.is_loaded());
@@ -1057,7 +1113,8 @@ mod tests {
                     "z-font.assets",
                     "z-textasset.assets",
                     "z-texture.assets",
-                    "z-unknown.assets"
+                    "z-unknown.assets",
+                    "z-video.assets"
                 ]
             );
 
@@ -1444,6 +1501,21 @@ mod tests {
             assert_eq!(response.status(), 200);
             assert_eq!(response.content_type(), "font/otf");
             assert_eq!(response.body(), b"OTTOfont-bytes");
+
+            // The VideoClip collection's asset carries a real class-329 layout, so the fixture
+            // is exercised end to end here; the video tab's own route coverage is unit-tested in
+            // `resources::video_clip` while the browser wiring is still being finished.
+            let video_view = format!(
+                "/Collections/View?Path={}",
+                url_encode("{\"B\":{\"P\":[]},\"I\":5}")
+            );
+            let response = get(&mut state, &video_view);
+            assert_eq!(response.status(), 200);
+            let video_collection =
+                String::from_utf8(response.body().to_vec()).expect("pages are UTF-8");
+            let video_hrefs = anchor_hrefs(&video_collection, "/Assets/View?Path=");
+            assert_eq!(video_hrefs.len(), 1, "{video_collection}");
+            assert!(video_collection.contains("VideoClip"), "{video_collection}");
 
             // Searching the class finds every fixture asset (both loaded copies),
             // case-insensitively.
