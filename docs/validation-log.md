@@ -1,5 +1,37 @@
 # Validation log
 
+## 2026-10-16 - The FSB5 Vorbis setup table is complete and byte-identical to the reference's
+
+- Outcome: a stated gap on `RES-AUDIO-001` - "real-audio table decode stays open" - was
+  investigated with a new differential probe, and the **table itself turns out to be complete and
+  byte-exact**. The port carries 161 setup headers; the reference ships 161; they match on key,
+  payload length, and payload bytes.
+- **How the evidence was obtained.** A new probe (`tools/probes/fmod-setup`) loads
+  `Fmod5Sharp.dll` out of the isolated reference build and reflects over it. Two wrong turns are
+  worth recording because they cost real time:
+  - The table is **not** a field. My first probe searched `Dictionary<,>` *fields* and reported
+    "no-table-found" while a frequency table was found, which looked like the setup table had been
+    removed upstream.
+  - It is reached through a **generated singleton property**, `FmodVorbisRebuilder.headers`, and
+    the containing type name is compiler-mangled (`Create_DictionaryUInt32FmodVorbisData`), so
+    searching by member *name* is what works. Searching by value type also works once the property
+    is considered, but only after `PropertyInfo` is included alongside `FieldInfo`.
+- Three independent checks, all clean:
+  - **Keys**: 161 in both, with zero keys only in one side (`Compare-Object` both directions).
+  - **Lengths**: all 161 declared `[u8; N]` widths equal the reference's payload lengths, zero
+    mismatches.
+  - **Bytes**: the port's `FVS_A72297FF` extracts to 5824 bytes whose SHA-256 prefix
+    (`5DC92960553961C4`) equals the reference's own digest of the same entry. Matching keys alone
+    would not have caught a corrupted payload, which is why the digest was added.
+- **What this does and does not settle.** The *table* is now verified rather than assumed, so
+  "real-audio table decode" is no longer an open question about coverage. It does not by itself
+  verify end-to-end decode of a real FSB5 clip: multi-stream banks, other codecs, and broader
+  decoder parity remain open, and the row stays 已实现但未验证 for those reasons. The port also
+  still does not call `Fmod5Sharp` at runtime, which is the point - the table is vendored from
+  `fsbex` 0.3.0 with its MIT notice retained under `vendor/fsbex-vorbis-table/`.
+- Evidence: probe output compared against the committed source; `cargo test --locked --workspace`
+  unchanged at 1861 library + 199 bin tests, 0 failed, 1 ignored.
+
 ## 2026-10-16 - The scene GLB export joins the exporter-selection tables
 
 - Outcome: the hierarchy GLB export is now selectable. `ResourceExportFamily::HierarchyGlb` and

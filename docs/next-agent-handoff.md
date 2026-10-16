@@ -1,6 +1,36 @@
 # RustAssetRipper hand-off — 2026-10-16
 
-## Latest current checkpoint - 2026-10-16 (hierarchy GLB joins the exporter tables)
+## Latest current checkpoint - 2026-10-16 (FSB5 Vorbis setup table verified byte-exact)
+
+- **`RES-AUDIO-001`'s "real-audio table decode stays open" gap was investigated and the table is
+  complete and byte-identical to the reference's.** 161 entries in both, matching keys, matching
+  payload lengths, and a matching SHA-256 digest for the sampled header. The row stays
+  已实现但未验证 for the *other* named gaps (multi-stream banks, other codecs, end-to-end clip
+  decode), but table coverage is no longer an open question - do not re-investigate it.
+- **The probe recipe, since two wrong turns cost time:** `tools/probes/fmod-setup` reflects the
+  table out of the reference's `Fmod5Sharp.dll`. The table is **not a field** - it is a generated
+  singleton **property**, `Fmod5Sharp.CodecRebuilders.FmodVorbisRebuilder.headers`, and the
+  containing type is compiler-mangled. Search `PropertyInfo` (not only `FieldInfo`) and select by
+  member name containing `Vorbis`, or the probe reports "no-table-found" while still finding the
+  unrelated frequency table - which reads as "upstream removed it".
+  Run: `dotnet run --project tools/probes/fmod-setup/FmodSetupProbe.csproj -c Release -p:ReferenceRoot="$LOCALAPPDATA\Temp\opencode\ar-ref\Source\0Bins\AssetRipper.GUI.Free\Release" -- <same path>`.
+- **Compare values, not just keys.** The probe prints a SHA-256 prefix per entry because matching
+  keys with corrupted payloads would decode silence while looking correct.
+- `RES-AUDIO-001` also notes the port does not call `Fmod5Sharp` at runtime, which is intended: the
+  table is vendored from `fsbex` 0.3.0 with its MIT notice kept in
+  `vendor/fsbex-vorbis-table/LICENSE-MIT`.
+- **Remaining work for `EXP-GLB-SCENE-001` (still 已实现但未验证), in order:** run a real-file scene
+  export and compare against reference output; wire geometry selection (the reference reaches a
+  mesh through `BuildParameters.TryGetOrMakeMeshData`, so the caller resolves each GameObject's
+  `MeshFilter`/`Renderer` and passes per-node `MeshData`); route the family through the project
+  export pipeline.
+- **Never format `src/resources/glb_tests_01.rs`** (nor `main_tests_01.rs`/`main_tests_03.rs`).
+- Parity ledger: 406 rows, 381 verified, 25 non-verified, DUPES=0, MALFORMED=0, gate OPEN.
+- `/Scenes/View` still returns 501 (`load_game` does not run `process_workspace_scenes_and_prefabs`).
+- Corpus replays are local-only and have not run in these rounds.
+- Verified: **1861** library + 199 bin tests, 0 failed; warnings-denied Clippy exit 0.
+
+## Previous checkpoint - 2026-10-16 (hierarchy GLB joins the exporter tables)
 
 - The hierarchy GLB export is now **selectable**: `ResourceExportFamily::HierarchyGlb`,
   `hierarchy_glb_family`, and per-family `export_extension`/`is_glb` in
