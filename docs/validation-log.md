@@ -1,5 +1,32 @@
 # Validation log
 
+## 2026-10-16 - Video tab and route verified; the previous round's "gap" was my own error
+
+- Outcome: `PRODUCT-ASSET-VIDEO-TAB-001` is 已验证. The `/Assets/Video` route and the video tab
+  work end to end.
+- **Correction, recorded deliberately.** The previous round reported that `TreeAsset.has_video`
+  came out false for the video fixture while the unit-tested view reported true, and left the
+  route unverified on that basis. That was wrong, and the error was mine: my diagnostic printed
+  the payload of `state.objects.get(0, 0)` - the MonoBehaviour bundle object - instead of the
+  clip at `(file 9, object 0)`. It printed `has_video=false` because it was inspecting an
+  unrelated asset, and I read that as a disagreement in the gate.
+- The decisive evidence this round enumerated the workspace for class-329 objects and the tree's
+  own rows side by side: the payload reads `ext=Some("mp4") integrity=true res=path "probe.resS"`,
+  and the tree row is `ci=5 class=329 file=9 obj=0 has_video=true`. Both agree, and they always
+  did. The lesson is to print the object the code under test actually resolves, not a
+  convenient index.
+- Restored and kept the full e2e assertions: the asset page links the route with
+  `type="video/mp4"` and a `download="TestVideo.mp4"` button, and the route answers `200` with
+  `video/mp4` and exactly the streamed range's bytes.
+- The two general findings from the previous round stand and are what made this work:
+  class 329 spells `m_ExternalResources` as a `StreamedResource` with `m_Source`/`m_Offset`/
+  `m_Size` rather than `StreamingInfo`'s `path`/`offset`/`size`, and its `m_Size` is `UInt64`
+  where `StreamingInfo.size` is `UInt32`, so the normalizer narrows only when the value fits and
+  otherwise keeps the wide value so an out-of-range size still surfaces as an error.
+- Evidence: `cargo test --locked --workspace` - 1834 library + 198 bin tests, 0 failed, 1
+  ignored. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0. Parity:
+  new row `PRODUCT-ASSET-VIDEO-TAB-001` 已验证.
+
 ## 2026-10-16 - VideoClip support: the view, the route, the tab, and an honest status
 
 - Outcome: `VideoClipView`, the `/Assets/Video` route and the video tab are implemented.

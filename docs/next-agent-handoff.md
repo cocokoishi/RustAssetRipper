@@ -1,5 +1,31 @@
 # RustAssetRipper hand-off — 2026-10-16
 
+## Latest current checkpoint - 2026-10-16 (video tab + route verified)
+
+- `PRODUCT-ASSET-VIDEO-TAB-001` is 已验证. `/Assets/Video` applies both frozen gates
+  (`TryGetExtensionFromPath` from `m_OriginalPath`, `TryGetContent` over
+  `m_ExternalResources`) and the e2e asserts `video/mp4` plus the exact range bytes.
+- **Correction to the previous hand-off:** its "open item" about `has_video` disagreeing with
+  the unit-tested view was my own diagnostic error, not a product gap. I had printed
+  `state.objects.get(0, 0)` (a MonoBehaviour) instead of the clip at `(file 9, object 0)`.
+  Enumerating the workspace for class-329 objects showed the view and the tree agree. When
+  debugging a gate, print the object the code under test actually resolves.
+- Class-329 facts worth keeping: `m_ExternalResources` is a `StreamedResource` spelled
+  `m_Source`/`m_Offset`/`m_Size` (not `StreamingInfo`'s `path`/`offset`/`size`), and its
+  `m_Size` is `UInt64` while `StreamingInfo.size` is `UInt32`. The production preamble is
+  thirteen fields deep before that descriptor, with a trailing `m_HasSplitAlpha`.
+- Tag tabs now complete except the model tab. The frozen `ViewPage` also orders tabs as
+  Information, Audio, Image, Model, Text, Font, Video, Yaml, Json, Hex, Dependencies,
+  Development - the port's current order still differs, worth aligning in a later pass.
+- The e2e fixture set is now eight inputs; root collections order
+  `z-audio(0), z-font(1), z-textasset(2), z-texture(3), z-unknown(4), z-video(5)`.
+- Parity ledger: 402 rows, 377 verified, 25 non-verified, gate OPEN.
+- **Remaining:** model tab (`/Assets/Model.glb`, gate `asset is IMesh`, needs `GlbMeshBuilder` +
+  `GlbWriter` on the web path); then `/Scenes/View` extras, `/FailedFiles/Stack`,
+  `/Export/PrimaryContent`.
+- Do not run rustfmt on `src/main_tests_01.rs` or `src/main_tests_03.rs`.
+- Verified: 1834 library + 198 bin tests, 0 failed; warnings-denied Clippy exit 0.
+
 ## Latest current checkpoint - 2026-10-16 (VideoClip decode layer; route/tab not yet verified)
 
 - **Open item first.** `VideoClipView` (`src/resources/video_clip.rs`, 4 unit tests),

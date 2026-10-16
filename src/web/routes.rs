@@ -1516,6 +1516,46 @@ mod tests {
             let video_hrefs = anchor_hrefs(&video_collection, "/Assets/View?Path=");
             assert_eq!(video_hrefs.len(), 1, "{video_collection}");
             assert!(video_collection.contains("VideoClip"), "{video_collection}");
+            // The clip's fields are read through the production class-329 layout, so the view
+            // reports the extension from `m_OriginalPath` and an intact external range.
+            let game = state.loaded().expect("loaded");
+            let video_object = game
+                .objects
+                .objects()
+                .iter()
+                .find(|object| object.factory.class_id == 329)
+                .expect("the video clip is in the workspace");
+            let video_payload = video_object
+                .payload
+                .as_ref()
+                .unwrap_or_else(|error| panic!("the video clip must decode: {error}"));
+            let video_view =
+                assetripper::resources::video_clip::VideoClipView::from_value(&video_payload.root)
+                    .expect("the clip exposes route fields");
+            assert_eq!(video_view.try_get_extension_from_path(), Some("mp4"));
+            assert!(video_view.check_integrity());
+
+            // The asset page advertises the video tab, and the route serves the clip's
+            // external-resource range under the extension from its original path.
+            let response = get(&mut state, &video_hrefs[0]);
+            assert_eq!(response.status(), 200);
+            let video_asset = String::from_utf8(response.body().to_vec()).expect("pages are UTF-8");
+            assert!(video_asset.contains("/Assets/Video?Path="), "{video_asset}");
+            assert!(video_asset.contains("type=\"video/mp4\""), "{video_asset}");
+            assert!(
+                video_asset.contains("download=\"TestVideo.mp4\""),
+                "{video_asset}"
+            );
+            let video_path = video_hrefs[0].replacen("/Assets/View?Path=", "", 1);
+            let response = get(&mut state, &format!("/Assets/Video?Path={video_path}"));
+            assert_eq!(
+                response.status(),
+                200,
+                "video body: {}",
+                String::from_utf8_lossy(response.body())
+            );
+            assert_eq!(response.content_type(), "video/mp4");
+            assert_eq!(response.body(), PROBE_RESOURCE_BYTES);
 
             // Searching the class finds every fixture asset (both loaded copies),
             // case-insensitively.
