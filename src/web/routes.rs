@@ -79,19 +79,8 @@ fn get(state: &mut WebState, request: &Request) -> Response {
         "/Assets/Model.glb" => assets_model(state, request),
         "/Resources/View" => resources_view(state, request),
         "/Resources/Data" => resources_data(state, request),
-        "/FailedFiles/View" => pending_tree_view::<FailedFilePath>(
-            state,
-            request,
-            "/FailedFiles/View",
-            |tree, path| tree.resolve_failed(path).is_some(),
-            // The frozen `FailedFileAPI` reuses the resource message verbatim.
-            |path| {
-                format!(
-                    "Resource file could not be resolved: {}",
-                    path.to_diagnostic()
-                )
-            },
-        ),
+        "/FailedFiles/View" => failed_file_view(state, request),
+        "/FailedFiles/StackTrace" => failed_file_stack_trace(state, request),
         "/Scenes/View" => pending_tree_view::<ScenePath>(
             state,
             request,
@@ -650,6 +639,69 @@ fn assets_model(state: &mut WebState, request: &Request) -> Response {
     }
 }
 
+/// `GET /FailedFiles/View`: the frozen `FailedFiles.ViewPage`.
+///
+/// The page names the failed file, links its owning bundle when the path resolves, and shows the
+/// stack-trace route with a `error.txt` save button.
+fn failed_file_view(state: &mut WebState, request: &Request) -> Response {
+    let path = match tree_gates::<FailedFilePath>(state, request) {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
+    let Some(tree) = loaded_tree(state) else {
+        return Response::internal_error("A game is loaded but its bundle tree is missing.");
+    };
+    let Some((bundle_index, position)) = tree.resolve_failed(&path) else {
+        // The frozen `FailedFileAPI` reuses the resource message verbatim.
+        return Response::text(format!(
+            "Resource file could not be resolved: {}",
+            path.to_diagnostic()
+        ))
+        .with_status(404);
+    };
+    let Some(name) = tree
+        .bundle(bundle_index)
+        .and_then(|bundle| bundle.failed.get(position))
+        .cloned()
+    else {
+        return Response::internal_error(format!(
+            "The bundle tree disagrees with the resolved path {}.",
+            path.to_diagnostic()
+        ));
+    };
+    match state.failed_entry_stack_trace(&path) {
+        Ok(Some(_)) => Response::html(pages::failed_file_page(
+            state,
+            &name,
+            &path,
+            tree.bundle(bundle_index).map(|bundle| bundle.name.as_str()),
+        )),
+        Ok(None) => Response::text(format!(
+            "Resource file could not be resolved: {}",
+            path.to_diagnostic()
+        ))
+        .with_status(404),
+        Err(diagnostic) => Response::internal_error(diagnostic),
+    }
+}
+
+/// `GET /FailedFiles/StackTrace`: the frozen `FailedFileAPI.GetStackTrace` serves the text.
+fn failed_file_stack_trace(state: &mut WebState, request: &Request) -> Response {
+    let path = match tree_gates::<FailedFilePath>(state, request) {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
+    match state.failed_entry_stack_trace(&path) {
+        Ok(Some(text)) => Response::text(text),
+        Ok(None) => Response::text(format!(
+            "Resource file could not be resolved: {}",
+            path.to_diagnostic()
+        ))
+        .with_status(404),
+        Err(diagnostic) => Response::internal_error(diagnostic),
+    }
+}
+
 /// `GET /Collections/Count`: the frozen `CollectionAPI.GetCount` answers the asset count
 /// as JSON once the collection resolves.
 fn collections_count(state: &mut WebState, request: &Request) -> Response {
@@ -1075,6 +1127,23 @@ mod tests {
         let unknown_input = directory.join("z-unknown.assets");
         std::fs::write(&unknown_input, decode_hex(fixture_hex("unknown_class")))
             .expect("the probe unknown asset is written");
+        // A committed UnityFS fixture whose block read fails while a valid sibling is retained,
+        // so the failed-file routes have a real entry to serve.
+        let scheme_hex = |case: &str| {
+            assetripper::processing::asset_factory::PROBE_FIXTURE
+                .lines()
+                .chain(include_str!("../io/io_differential_fixture.txt").lines())
+                .find_map(|line| {
+                    line.strip_prefix(&format!("SCHEME|{case}|"))
+                        .and_then(|rest| {
+                            rest.split('|').find_map(|field| field.strip_prefix("in="))
+                        })
+                })
+                .unwrap_or_else(|| panic!("the scheme fixture includes {case}"))
+        };
+        let failed_input = directory.join("z-failed.bundle");
+        std::fs::write(&failed_input, decode_hex(scheme_hex("ufs_v6_lzham_block")))
+            .expect("the failed-entry bundle is written");
         // A Texture2D whose file TypeTree is the real 2019.4 release tree, so the image
         // route exercises the production class layout with a payload that decodes under it.
         let texture_input = directory.join("z-texture.assets");
@@ -1131,12 +1200,80 @@ mod tests {
                     font_input.to_string_lossy().into_owned(),
                     video_input.to_string_lossy().into_owned(),
                     mesh_input.to_string_lossy().into_owned(),
+                    failed_input.to_string_lossy().into_owned(),
                 ])
                 .expect("the probe inputs load");
             assert!(state.is_loaded());
 
             let get = |state: &mut WebState, target: &str| dispatch(state, &request("GET", target));
             let page = |json: &str| format!("/Bundles/View?Path={}", url_encode(json));
+
+            // A game with a failed container entry still loads, as the reference's
+            // `GameFileLoader` does, and the browser serves its failed-file pages. The entry
+            // attaches to the bundle that owns the failed container, so the test walks the
+            // bundle page that lists it rather than assuming the root.
+            let failed_bundle = {
+                let game = state.loaded().expect("loaded");
+                let entries = game.workspace.failed_container_entries();
+                assert_eq!(entries.len(), 1, "the fixture retains one failed entry");
+                entries[0].entry.container_bundle_index
+            };
+            let _ = failed_bundle;
+            let failed_json = {
+                // The failed entry attaches to the bundle that owns the failed container, so the
+                // test asks the tree for that bundle's own path rather than assuming the root.
+                let target = {
+                    let game = state.loaded().expect("loaded");
+                    game.workspace
+                        .failed_container_entries()
+                        .first()
+                        .and_then(|failed| failed.entry.container_bundle_index)
+                        .map_or(0, |index| index + 1)
+                };
+                let tree = super::loaded_tree(&state).expect("the tree is loaded");
+                let path = tree
+                    .bundle_path(target)
+                    .expect("the owning bundle path resolves");
+                path.to_json()
+            };
+            let response = get(
+                &mut state,
+                &format!("/Bundles/View?Path={}", url_encode(&failed_json)),
+            );
+            assert_eq!(response.status(), 200);
+            let failed_root = String::from_utf8(response.body().to_vec()).expect("pages are UTF-8");
+            let failed_hrefs = anchor_hrefs(&failed_root, "/FailedFiles/View?Path=");
+            assert_eq!(
+                failed_hrefs.len(),
+                1,
+                "the failed entry is listed: {failed_root}"
+            );
+            let response = get(&mut state, &failed_hrefs[0]);
+            assert_eq!(
+                response.status(),
+                200,
+                "failed view body: {}",
+                String::from_utf8_lossy(response.body())
+            );
+            let failed_page = String::from_utf8(response.body().to_vec()).expect("pages are UTF-8");
+            assert!(failed_page.contains("Stack Trace"), "{failed_page}");
+            assert!(
+                failed_page.contains("download=\"error.txt\""),
+                "{failed_page}"
+            );
+            // The stack-trace route serves the recorded failure text.
+            let failed_path = failed_hrefs[0].replacen("/FailedFiles/View?Path=", "", 1);
+            let response = get(
+                &mut state,
+                &format!("/FailedFiles/StackTrace?Path={failed_path}"),
+            );
+            assert_eq!(response.status(), 200);
+            let trace = String::from_utf8(response.body().to_vec()).expect("traces are UTF-8");
+            assert!(!trace.is_empty(), "the stack trace is served");
+            assert!(
+                failed_page.contains(trace.trim()),
+                "the page shows the same trace the route serves: {failed_page}"
+            );
 
             // The root names the game bundle and links both children by name,
             // even though the later-sorting input was loaded first.
@@ -1146,7 +1283,7 @@ mod tests {
             assert!(root.contains("<h1>GameBundle</h1>"), "{root}");
             assert_eq!(
                 anchor_texts(&root, "/Bundles/View?Path="),
-                ["a-workspace.bundle", "workspace.bundle"]
+                ["a-workspace.bundle", "workspace.bundle", "z-failed.bundle"]
             );
             // The bare synthetic files list as root collections, by name.
             assert_eq!(

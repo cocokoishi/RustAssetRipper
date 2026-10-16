@@ -22,6 +22,7 @@ use assetripper::product::{
     resolve_export_flow, ExportFlow,
 };
 use assetripper::resources::vertex_data_blob::UnityVersion;
+use assetripper::web_paths::FailedFilePath;
 
 use crate::export_commands::{
     delete_serialized_settings_in_dir, executable_directory, export_loaded_game,
@@ -333,6 +334,43 @@ impl WebState {
             assetripper::resource::StreamedResourceContentResolution::Missing { .. }
             | assetripper::resource::StreamedResourceContentResolution::Unset => None,
         })
+    }
+
+    /// The stack trace for one failed container entry, mirroring `FailedFile.StackTrace`.
+    ///
+    /// The frozen `StackTrace` is the caught exception's `ToString()`, set where the failure was
+    /// recorded. The port keeps the same failure as a `UnityFsError`, so this renders that error's
+    /// full diagnostic chain in place of a .NET stack trace.
+    pub fn failed_entry_stack_trace(
+        &self,
+        path: &FailedFilePath,
+    ) -> Result<Option<String>, String> {
+        Ok(self
+            .failed_entry(path)?
+            .map(|entry| entry.error.to_string()))
+    }
+
+    /// Resolve a failed-file path to its workspace entry.
+    fn failed_entry(
+        &self,
+        path: &FailedFilePath,
+    ) -> Result<Option<&assetripper::scheme::FailedContainerEntry>, String> {
+        let game = self
+            .loaded
+            .as_ref()
+            .ok_or_else(|| "no game is loaded".to_owned())?;
+        let tree = self
+            .tree
+            .as_ref()
+            .ok_or_else(|| "a game is loaded but its bundle tree is missing".to_owned())?;
+        let Some((_bundle, failed_index)) = tree.resolve_failed(path) else {
+            return Ok(None);
+        };
+        Ok(game
+            .workspace
+            .failed_container_entries()
+            .get(failed_index)
+            .map(|failed| &failed.entry))
     }
 
     /// Render one mesh asset as GLB bytes.

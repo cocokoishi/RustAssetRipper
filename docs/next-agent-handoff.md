@@ -1,5 +1,30 @@
 # RustAssetRipper hand-off — 2026-10-16
 
+## Latest current checkpoint - 2026-10-16 (failed-file pages, and a load-path divergence fixed)
+
+- `PRODUCT-FAILEDFILE-TAB-001` is 已验证. `/FailedFiles/View` and `/FailedFiles/StackTrace` are
+  implemented and exercised end to end against the committed `ufs_v6_lzham_block` fixture.
+- **DIFF-FAILEDFILE-LOAD-REFUSAL-001 is closed, and it was a real divergence, not a missing
+  page.** The routes had been unreachable because `load_game` applied the *export* refusal on the
+  *load* path: a game with one bad storage block could not be opened at all. `LoadFailurePolicy`
+  now separates the two - browsing tolerates a retained failure (as the reference's
+  `LoadAndProcess` does), exporting refuses. **When adding a load-time check, ask which operation
+  the reference gates, not just whether the check is defensible.**
+- The failed entry attaches to the bundle that **owns** the failed container, not the root; the
+  e2e asks the tree for that bundle's own path. Bundle paths are chains of child indexes from the
+  root, not flat workspace indexes.
+- Parity ledger: 404 rows, 379 verified, 25 non-verified, gate OPEN.
+- **Next candidates:**
+  1. `/Scenes/View` extras and `/Export/PrimaryContent`.
+  2. The 25-row non-verified queue. Most rows are `实现中` (RES-TEXTURE-001, RES-MODEL-001,
+     EXPORT-UNITY-001, PROC-ANIM-001, PROC-SCENE-001, OBJ-REF-001, SER-TT-ABSENT-001,
+     TYPE-SCRIPT-001, IO-STREAM-001) and need **implementation**, not verification - that is where
+     the remaining product risk sits.
+  3. `PRODUCT-GUI-001` can move toward 已验证 now that every frozen tab and the failed-file pages
+     are covered; audit which entry points remain.
+- Do not run rustfmt on `src/main_tests_01.rs` or `src/main_tests_03.rs`.
+- Verified: 1834 library + 199 bin tests, 0 failed; warnings-denied Clippy exit 0.
+
 ## Latest current checkpoint - 2026-10-16 (tab order aligned and pinned)
 
 - The asset tab order now matches the frozen `ViewPage` exactly: Information, Audio, Image,

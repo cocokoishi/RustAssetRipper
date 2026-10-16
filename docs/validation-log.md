@@ -1,5 +1,37 @@
 # Validation log
 
+## 2026-10-16 - Failed-file pages landed, and a real load-path divergence fixed
+
+- Outcome: `PRODUCT-FAILEDFILE-TAB-001` is 已验证. `/FailedFiles/View` and
+  `/FailedFiles/StackTrace` serve the frozen pages, and the bundle pages list failed entries.
+- **The substantive finding is DIFF-FAILEDFILE-LOAD-REFUSAL-001, a real behavioural divergence
+  rather than a missing page.** Implementing the routes exposed that they were *unreachable*: the
+  port's `load_game` called `ensure_no_batch_container_failures` and refused outright, so a game
+  with a single unreadable storage block could not be opened at all and no failed entry ever
+  reached the browser. The reference behaves differently - `GameFileLoader.LoadAndProcess` opens
+  the game, retains the `FailedFile` on its bundle, lists it under a `FailedFiles` heading, and
+  serves its view and stack trace.
+- **Root cause: the port had applied the *export* gate on the *load* path.** Refusing to export a
+  partial mount is correct - an export must not silently omit content - but the reference applies
+  that judgement at export time, not when opening a game to browse it. Two further call sites had
+  the same shape (the batch mount and the dependency-container mount), so both were affected.
+- The fix makes the distinction explicit and typed rather than incidental:
+  `LoadFailurePolicy::{TolerateRetainedFailures, RefusePartialMounts}`. `load_game` - the browse
+  entry - tolerates; `export_project_to_with_serialized_settings` passes `RefusePartialMounts`.
+  An existing test,
+  `inspection_reports_failed_bundle_entries_and_project_export_refuses_partial_mounts`, already
+  encoded exactly this split in its name, and it failed while the change was half-applied and
+  passed once both halves were in place - useful confirmation that the intended contract was the
+  one restored.
+- End-to-end evidence uses the committed `ufs_v6_lzham_block` fixture, which has one LZHAM entry
+  and one valid sibling: the game loads, the owning bundle page lists `unsupported.bin`, the view
+  page renders with the `Stack Trace` heading and the `error.txt` save button, and the stack-trace
+  route returns the same text the page shows. Note the entry attaches to the bundle that owns the
+  failed container, not to the root, so the test asks the tree for that bundle's own path.
+- Evidence: `cargo test --locked --workspace` - 1834 library + 199 bin tests, 0 failed, 1
+  ignored. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0. Parity: new
+  row `PRODUCT-FAILEDFILE-TAB-001` 已验证.
+
 ## 2026-10-16 - Asset tab order aligned with the frozen `ViewPage`, and pinned by a test
 
 - Outcome: the port now emits the asset tabs in exactly the frozen order. `ViewPage` builds them

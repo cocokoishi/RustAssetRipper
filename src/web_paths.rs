@@ -530,6 +530,16 @@ pub fn failed_file_view_url(path: &FailedFilePath) -> String {
     format!("/FailedFiles/View?Path={}", url_encode(&path.to_json()))
 }
 
+/// The stack-trace URL the frozen `FailedFileAPI.GetStackTraceUrl` builds for `path`.
+///
+/// The frozen constant is `Base + "/StackTrace"`, distinct from the `/FailedFiles/View` route.
+pub fn failed_file_stack_trace_url(path: &FailedFilePath) -> String {
+    format!(
+        "/FailedFiles/StackTrace?Path={}",
+        url_encode(&path.to_json())
+    )
+}
+
 /// The view URL the frozen `SceneAPI.GetViewUrl` builds for `path`.
 pub fn scene_view_url(path: &ScenePath) -> String {
     format!("/Scenes/View?Path={}", url_encode(&path.to_json()))

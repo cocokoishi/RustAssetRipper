@@ -1019,6 +1019,54 @@ pub fn resource_page(
     Some(layout(state, &name, inner.as_str()))
 }
 
+/// The failed-file page, matching the frozen `FailedFiles.ViewPage`.
+///
+/// The page names the failed file, links its owning bundle when one resolves, and shows the
+/// stack-trace route. The frozen page fills the `<pre>` from the route through client script;
+/// without client code the port inlines the same text the route serves, so the page shows the
+/// trace directly rather than a URL. The save button still points at the route and names the
+/// download `error.txt`, as the frozen page does.
+pub fn failed_file_page(
+    state: &WebState,
+    name: &str,
+    path: &assetripper::web_paths::FailedFilePath,
+    bundle_name: Option<&str>,
+) -> String {
+    use assetripper::web_paths::failed_file_stack_trace_url;
+
+    let mut inner = Html::new();
+    inner.element("h1", &[], name);
+
+    if let Some(bundle_name) = bundle_name {
+        inner.element("h2", &[], &t(state, "bundle"));
+        tree_link(
+            &mut inner,
+            &assetripper::web_paths::bundle_view_url(&path.bundle),
+            bundle_name,
+        );
+    }
+
+    let url = failed_file_stack_trace_url(path);
+    inner.element("h2", &[], &t(state, "stack_trace"));
+
+    // The route serves the trace as text; the page shows the same content it would serve, so the
+    // tab is readable without client code.
+    let trace = state
+        .failed_entry_stack_trace(path)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    inner.open("pre", &[("class", "bg-dark-subtle rounded-3 p-2")]);
+    inner.text(&trace);
+    inner.close("pre");
+
+    inner.raw("<div class=\"text-center\">");
+    save_button(&mut inner, state, &url, "error.txt");
+    inner.raw("</div>");
+
+    layout(state, name, inner.as_str())
+}
+
 /// A download link, matching the frozen `SaveButton` button style.
 fn save_button(html: &mut Html, state: &WebState, href: &str, file_name: &str) {
     html.open(

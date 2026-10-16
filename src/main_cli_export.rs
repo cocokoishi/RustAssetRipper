@@ -1102,13 +1102,49 @@ pub(super) struct LoadedGame {
 }
 
 /// Mount, identify and decode every input, mirroring `GameFileLoader.LoadAndProcess`.
+/// How tolerant the load is of container entries that failed while being read.
+///
+/// The reference draws this line itself: `GameFileLoader.LoadAndProcess` opens a game in the
+/// face of a `FailedFile` and lets the browser list it, while an export must not silently omit
+/// content. The port keeps the same split explicitly rather than by accident of which helper a
+/// caller happens to use.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum LoadFailurePolicy {
+    /// Opening a game for browsing: retain the failure and keep the game usable.
+    TolerateRetainedFailures,
+    /// Preparing an export: refuse, so a partial mount is never exported as if complete.
+    RefusePartialMounts,
+}
+
 pub(super) fn load_game<W: io::Write>(
     input_paths: &[PathBuf],
     full_settings: &assetripper::export::settings_file::SerializedSettingsFile,
     status_output: &mut W,
 ) -> Result<LoadedGame, Box<dyn Error>> {
+    load_game_with_policy(
+        input_paths,
+        full_settings,
+        status_output,
+        LoadFailurePolicy::TolerateRetainedFailures,
+    )
+}
+
+pub(super) fn load_game_with_policy<W: io::Write>(
+    input_paths: &[PathBuf],
+    full_settings: &assetripper::export::settings_file::SerializedSettingsFile,
+    status_output: &mut W,
+    policy: LoadFailurePolicy,
+) -> Result<LoadedGame, Box<dyn Error>> {
+    let refuse = policy == LoadFailurePolicy::RefusePartialMounts;
     let (mut filesystem, selected_paths, mut mount_report) = mount_project_inputs(input_paths)?;
-    ensure_no_batch_container_failures(&mount_report)?;
+    // Opening a game tolerates a failed container entry, as the reference's
+    // `GameFileLoader.LoadAndProcess` does: the failure is retained on its bundle and the browser
+    // lists it under `FailedFiles` and serves `/FailedFiles/View` and `/FailedFiles/StackTrace`
+    // for it. An export refuses instead, because a partial mount must not be exported as though
+    // it were complete.
+    if refuse {
+        ensure_no_batch_container_failures(&mount_report)?;
+    }
     let mixed = MixedGameStructure::from_vfs_paths(
         &filesystem,
         &selected_paths,
@@ -1219,7 +1255,11 @@ pub(super) fn load_game<W: io::Write>(
         WorkspaceLoadLimits::default(),
         &mut mount_report,
     )?;
-    ensure_no_workspace_container_failures(&workspace)?;
+    // As above, a failed dependency-container entry is retained for browsing but refused for an
+    // export.
+    if refuse {
+        ensure_no_workspace_container_failures(&workspace)?;
+    }
     let mut objects =
         load_object_workspace(&filesystem, &workspace, ObjectWorkspaceLimits::default())?;
     let empty_behaviours = objects.recover_header_only_null_script_behaviours(
@@ -1463,7 +1503,12 @@ pub(super) fn export_project_to_with_serialized_settings<W: io::Write>(
     full_settings: &assetripper::export::settings_file::SerializedSettingsFile,
     status_output: &mut W,
 ) -> Result<(), Box<dyn Error>> {
-    let game = load_game(input_paths, full_settings, status_output)?;
+    let game = load_game_with_policy(
+        input_paths,
+        full_settings,
+        status_output,
+        LoadFailurePolicy::RefusePartialMounts,
+    )?;
     export_loaded_game(
         &game,
         output_root,
