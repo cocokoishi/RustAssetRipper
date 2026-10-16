@@ -822,6 +822,29 @@ pub fn asset_page(
         inner.raw("</div>");
     }
 
+    if asset.has_image {
+        // The frozen image tab shows the texture with a download button. Without client
+        // code the port points the preview straight at the image route, so the browser
+        // fetches the same encoded bytes the download button serves.
+        use super::html::escape;
+        use assetripper::web_paths::asset_image_url;
+
+        inner.element("h2", &[], &t(state, "asset_tab_image"));
+        let file_name = format!("{}.png", asset.best_name);
+        let png_url = asset_image_url(path, Some("png"));
+        inner.raw("<div class=\"text-center\">");
+        inner.raw(&format!(
+            "<a href=\"{}\" download=\"{}\"><img src=\"{}\" style=\"object-fit:contain; width:100%; height:100%\"></a>",
+            escape(&png_url),
+            escape(&file_name),
+            escape(&png_url)
+        ));
+        inner.raw("</div>");
+        inner.raw("<div class=\"text-center\">");
+        save_button(&mut inner, state, &png_url, &file_name);
+        inner.raw("</div>");
+    }
+
     Some(layout(state, &asset.best_name, inner.as_str()))
 }
 
@@ -1430,6 +1453,7 @@ mod tests {
                             object_index: 0,
                             has_text: false,
                             has_binary: false,
+                            has_image: false,
                             dependencies: Vec::new(),
                         },
                     }],

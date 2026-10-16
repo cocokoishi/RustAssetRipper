@@ -465,6 +465,18 @@ pub fn asset_binary_url(path: &AssetPath) -> String {
     format!("/Assets/Binary?Path={}", url_encode(&path.to_json()))
 }
 
+/// The image URL the frozen `AssetAPI.GetImageUrl` builds for `path`.
+///
+/// The frozen builder appends an `Extension` parameter when the caller supplies one, and
+/// omits it entirely otherwise, so a `None` extension keeps the route's own default.
+pub fn asset_image_url(path: &AssetPath, extension: Option<&str>) -> String {
+    let base = format!("/Assets/Image?Path={}", url_encode(&path.to_json()));
+    match extension {
+        Some(extension) => format!("{base}&Extension={}", url_encode(extension)),
+        None => base,
+    }
+}
+
 /// The view URL the frozen `ResourceAPI.GetViewUrl` builds for `path`.
 pub fn resource_view_url(path: &ResourcePath) -> String {
     format!("/Resources/View?Path={}", url_encode(&path.to_json()))

@@ -36,6 +36,8 @@
 use assetripper::export::project_exporter::object_class_name;
 use assetripper::export::project_workflow::{object_asset_name, text_asset_script_bytes};
 use assetripper::io::special_names::fix_file_identifier;
+use assetripper::resources::texture::Texture2DView;
+use assetripper::serialized_file::object::ParsedObjectPayload;
 use assetripper::serialized_file::object_workspace::ObjectWorkspace;
 use assetripper::serialized_file::reference_graph::{
     MultiFilePPtrResolution, MultiFileReferenceGraphLimits,
@@ -107,6 +109,9 @@ pub struct TreeAsset {
     /// port's undecodable objects (a failed payload with a non-empty raw range, the
     /// frozen `RawDataObject` family).
     pub has_binary: bool,
+    /// Whether the asset serves a decoded texture image, mirroring `TextureAsset`'s
+    /// behaviour of exposing image bytes whose length matches the declared image size.
+    pub has_image: bool,
     /// The non-null reference edges in field traversal order.
     pub dependencies: Vec<TreeDependency>,
 }
@@ -551,6 +556,7 @@ fn asset_row(
             object_index,
             has_text: false,
             has_binary: false,
+            has_image: false,
             dependencies: Vec::new(),
         };
     };
@@ -578,6 +584,10 @@ fn asset_row(
     // Raw bytes back every undecodable payload with a range to read, mirroring the
     // frozen `RawDataObject` family (`UnknownObject` and `UnreadableObject` alike).
     let has_binary = payload.is_none() && !object.raw_payload_range.is_empty();
+    // A texture serves an image when its decoded payload carries image bytes whose length
+    // matches the declared size, the check the frozen `TextureAsset` relies on before it
+    // offers a downloadable image.
+    let has_image = payload.is_some_and(texture_has_image_data);
     TreeAsset {
         path_id,
         class_id,
@@ -587,8 +597,25 @@ fn asset_row(
         object_index,
         has_text,
         has_binary,
+        has_image,
         dependencies: Vec::new(),
     }
+}
+
+/// Whether a decoded payload holds a servable texture image.
+///
+/// The frozen `TextureAsset` only offers an image once the bytes it would return match the
+/// declared image size, so a payload whose declared size is zero or whose bytes disagree is
+/// treated as having no image rather than being served as a short or padded file.
+fn texture_has_image_data(payload: &ParsedObjectPayload) -> bool {
+    let Ok(view) = Texture2DView::from_value(&payload.root) else {
+        return false;
+    };
+    let expected = view.actual_image_size();
+    expected > 0
+        && view
+            .image_bytes(None)
+            .is_some_and(|bytes| bytes.len() == expected)
 }
 
 /// Resolve every recorded reference edge through the workspace's own joined

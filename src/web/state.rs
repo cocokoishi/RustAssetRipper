@@ -236,6 +236,107 @@ impl WebState {
         self.loaded.as_ref()
     }
 
+    /// Read one texture asset's image bytes.
+    ///
+    /// Inline payload bytes are used when present; otherwise a streamed resource is resolved
+    /// against the workspace's data paths, mirroring the export's own streamed-resource
+    /// lookup. Assets without an image read as `None`, matching the frozen route's empty
+    /// reply.
+    pub fn read_asset_image_bytes(
+        &self,
+        file_index: usize,
+        object_index: usize,
+    ) -> Result<Option<Vec<u8>>, String> {
+        use assetripper::io::platform_structure::PlatformResourceProvider;
+        use assetripper::resources::texture::Texture2DView;
+
+        let game = self
+            .loaded
+            .as_ref()
+            .ok_or_else(|| "no game is loaded".to_owned())?;
+        let object = game
+            .objects
+            .get(file_index, object_index)
+            .ok_or_else(|| "the snapshot row has no workspace object".to_owned())?;
+        let Ok(payload) = object.payload.as_ref() else {
+            return Ok(None);
+        };
+        let Ok(view) = Texture2DView::from_value(&payload.root) else {
+            return Ok(None);
+        };
+        if let Some(bytes) = view.image_bytes(None) {
+            return Ok(Some(bytes.to_vec()));
+        }
+        let Some(info) = view.stream_data.as_ref().filter(|info| info.is_set()) else {
+            return Ok(None);
+        };
+        let file = game
+            .workspace
+            .files()
+            .get(file_index)
+            .ok_or_else(|| "the snapshot row has no workspace file".to_owned())?;
+        let provider =
+            PlatformResourceProvider::with_mixed_data_paths(None, Some(&game.data_paths));
+        let resolution = assetripper::resource::resolve_and_read_streamed_resource_info(
+            &game.filesystem,
+            &game.workspace,
+            file.container_bundle_index,
+            info,
+            &game.root_catalog,
+            &provider,
+            assetripper::resource::StreamedResourceContentLimits::default(),
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(match resolution {
+            assetripper::resource::StreamedResourceContentResolution::Resolved {
+                bytes, ..
+            } => Some(bytes.to_vec()),
+            assetripper::resource::StreamedResourceContentResolution::Missing { .. }
+            | assetripper::resource::StreamedResourceContentResolution::Unset => None,
+        })
+    }
+
+    /// Render one texture asset to an encoded image.
+    ///
+    /// The requested format comes from the route's `Extension` parameter; an unrecognized
+    /// extension falls back to PNG, matching the frozen route's default.
+    pub fn render_texture_image(
+        &self,
+        file_index: usize,
+        object_index: usize,
+        format: assetripper::resources::image_export::ImageExportFormat,
+    ) -> Result<Vec<u8>, String> {
+        use assetripper::resources::texture::Texture2DView;
+
+        let game = self
+            .loaded
+            .as_ref()
+            .ok_or_else(|| "no game is loaded".to_owned())?;
+        let object = game
+            .objects
+            .get(file_index, object_index)
+            .ok_or_else(|| "the snapshot row has no workspace object".to_owned())?;
+        let payload = object.payload.as_ref().map_err(|error| error.to_string())?;
+        let view = Texture2DView::from_value(&payload.root).map_err(|error| error.to_string())?;
+        let streamed = self.read_asset_image_bytes(file_index, object_index)?;
+        let unity_version = game
+            .workspace
+            .files()
+            .get(file_index)
+            .and_then(|file| file.metadata.prefix.unity_version_text.as_deref())
+            .and_then(UnityVersion::parse);
+        assetripper::resources::texture::export_texture2d_image_with_unity_version(
+            &view,
+            streamed.as_deref(),
+            0,
+            false,
+            true,
+            unity_version,
+            format,
+        )
+        .map_err(|error| error.to_string())
+    }
+
     /// The maximum Unity version text over the loaded files, matching
     /// `GameBundle.GetMaxUnityVersion` as far as the port's version type reaches.
     pub fn max_unity_version_text(&self) -> Option<String> {

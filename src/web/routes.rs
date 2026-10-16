@@ -20,6 +20,7 @@ use std::path::Path;
 
 use assetripper::export::export_root::is_non_empty_directory;
 use assetripper::product::RouteMethod;
+use assetripper::resources::image_export::ImageExportFormat;
 
 use super::http::{Request, Response};
 use super::pages;
@@ -69,6 +70,7 @@ fn get(state: &mut WebState, request: &Request) -> Response {
         "/Assets/View" => assets_view(state, request),
         "/Assets/Text" => assets_text(state, request),
         "/Assets/Binary" => assets_binary(state, request),
+        "/Assets/Image" => assets_image(state, request),
         "/Resources/View" => resources_view(state, request),
         "/Resources/Data" => resources_data(state, request),
         "/FailedFiles/View" => pending_tree_view::<FailedFilePath>(
@@ -373,6 +375,52 @@ fn assets_binary(state: &mut WebState, request: &Request) -> Response {
     }
     match state.read_asset_raw_bytes(asset.file_index, asset.object_index) {
         Ok(raw) => Response::bytes("application/octet-stream", raw),
+        Err(diagnostic) => Response::internal_error(diagnostic),
+    }
+}
+
+/// `GET /Assets/Image`: serve the resolved texture asset as an encoded image.
+///
+/// The optional `Extension` query selects the encoding; an unrecognized or absent value
+/// falls back to PNG, matching the frozen route's default. Assets without an image read as
+/// an empty reply rather than an error, like the frozen `TextureAsset` path.
+fn assets_image(state: &mut WebState, request: &Request) -> Response {
+    let path = match tree_gates::<AssetPath>(state, request) {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
+    let format = match request.query_value("Extension").unwrap_or("") {
+        "" | "png" => ImageExportFormat::Png,
+        other => match ImageExportFormat::try_from_extension(other) {
+            Some(format) => format,
+            None => ImageExportFormat::Png,
+        },
+    };
+    let Some(tree) = loaded_tree(state) else {
+        return Response::internal_error("A game is loaded but its bundle tree is missing.");
+    };
+    let Some((bundle_index, position, row)) = tree.resolve_asset(&path) else {
+        return Response::text(format!(
+            "Asset could not be resolved: {}",
+            path.to_diagnostic()
+        ))
+        .with_status(404);
+    };
+    let Some(asset) = tree
+        .bundle(bundle_index)
+        .and_then(|bundle| bundle.collections.get(position))
+        .and_then(|collection| collection.assets.get(row))
+    else {
+        return Response::internal_error(format!(
+            "The bundle tree disagrees with the resolved path {}.",
+            path.to_diagnostic()
+        ));
+    };
+    if !asset.has_image {
+        return Response::bytes("image/png", Vec::new());
+    }
+    match state.render_texture_image(asset.file_index, asset.object_index, format) {
+        Ok(bytes) => Response::bytes("image/png", bytes),
         Err(diagnostic) => Response::internal_error(diagnostic),
     }
 }
@@ -744,6 +792,8 @@ mod tests {
 
         // The probe input lives under the ignored `target/` scratch tree, like the
         // other repository tests' temporary inputs.
+        use crate::tests::make_reference_texture_file;
+
         let directory =
             std::path::PathBuf::from("target/tree-e2e").join(std::process::id().to_string());
         std::fs::create_dir_all(&directory).expect("the probe directory is created");
@@ -789,6 +839,14 @@ mod tests {
         let unknown_input = directory.join("z-unknown.assets");
         std::fs::write(&unknown_input, decode_hex(fixture_hex("unknown_class")))
             .expect("the probe unknown asset is written");
+        // A Texture2D whose file TypeTree is the real 2019.4 release tree, so the image
+        // route exercises the production class layout with a payload that decodes under it.
+        let texture_input = directory.join("z-texture.assets");
+        std::fs::write(
+            &texture_input,
+            make_reference_texture_file(2, 1, &[10, 20, 30, 255, 40, 50, 60, 255]),
+        )
+        .expect("the texture asset is written");
         let load_and_browse = || {
             // Production layouts: the test binary otherwise substitutes synthetic
             // TypeTrees that cannot decode the no-TypeTree TextAsset.
@@ -801,6 +859,7 @@ mod tests {
                     probe_resource.to_string_lossy().into_owned(),
                     text_input.to_string_lossy().into_owned(),
                     unknown_input.to_string_lossy().into_owned(),
+                    texture_input.to_string_lossy().into_owned(),
                 ])
                 .expect("the probe inputs load");
             assert!(state.is_loaded());
@@ -821,7 +880,7 @@ mod tests {
             // The bare synthetic files list as root collections, by name.
             assert_eq!(
                 anchor_texts(&root, "/Collections/View?Path="),
-                ["z-textasset.assets", "z-unknown.assets"]
+                ["z-textasset.assets", "z-texture.assets", "z-unknown.assets"]
             );
 
             // The outer container names its bundle after the input file, links back
@@ -998,7 +1057,7 @@ mod tests {
             // while decoded assets have neither the section nor the bytes.
             let unknown_view = format!(
                 "/Collections/View?Path={}",
-                url_encode("{\"B\":{\"P\":[]},\"I\":1}")
+                url_encode("{\"B\":{\"P\":[]},\"I\":2}")
             );
             let response = get(&mut state, &unknown_view);
             assert_eq!(response.status(), 200);
@@ -1044,6 +1103,47 @@ mod tests {
                 response.body(),
                 b"Asset could not be resolved: AssetPath { CollectionPath = CollectionPath { BundlePath = {\"P\":[0]}, Index = 0 }, PathID = 999999 }"
             );
+
+            // The texture collection's single asset serves a real PNG. The asset page
+            // advertises it and the image route returns the encoded pixels, so the tab is
+            // exercised end to end rather than only rendered.
+            let texture_view = format!(
+                "/Collections/View?Path={}",
+                url_encode("{\"B\":{\"P\":[]},\"I\":1}")
+            );
+            let response = get(&mut state, &texture_view);
+            assert_eq!(response.status(), 200);
+            let texture_collection =
+                String::from_utf8(response.body().to_vec()).expect("pages are UTF-8");
+            assert!(
+                texture_collection.contains("z-texture.assets"),
+                "{texture_collection}"
+            );
+            let texture_hrefs = anchor_hrefs(&texture_collection, "/Assets/View?Path=");
+            assert_eq!(texture_hrefs.len(), 1, "{texture_collection}");
+            let response = get(&mut state, &texture_hrefs[0]);
+            assert_eq!(response.status(), 200);
+            let texture_asset =
+                String::from_utf8(response.body().to_vec()).expect("pages are UTF-8");
+            assert!(
+                texture_asset.contains("/Assets/Image?Path="),
+                "{texture_asset}"
+            );
+            let texture_image =
+                texture_hrefs[0].replacen("/Assets/View?Path=", "/Assets/Image?Path=", 1)
+                    + "&Extension=png";
+            let response = get(&mut state, &texture_image);
+            assert_eq!(response.status(), 200);
+            assert_eq!(response.content_type(), "image/png");
+            let png = response.body().to_vec();
+            assert!(
+                png.starts_with(b"\x89PNG\r\n\x1a\n"),
+                "the image route serves an encoded PNG"
+            );
+            // The port writes PNG itself, so verify the pixels by inflating the IDAT
+            // payload rather than only trusting the container header: a wrong format or a
+            // truncated payload still starts with a valid signature.
+            assert_png_pixels(&png, 2, 1, &[10, 20, 30, 255, 40, 50, 60, 255]);
 
             // Searching the class finds every fixture asset (both loaded copies),
             // case-insensitively.
@@ -1135,6 +1235,58 @@ mod tests {
             rest = after_marker.get(end..).unwrap_or("");
         }
         hrefs
+    }
+
+    use std::io::Read;
+
+    /// Assert an 8-bit RGBA PNG carries exactly `expected` pixels.
+    ///
+    /// The port writes PNG itself (filter-0 scanlines), so this reads the header and
+    /// inflates the `IDAT` payload with the same `flate2` backend the writer uses. That
+    /// keeps the image route's test independent of the encoder while still checking the
+    /// pixel values rather than only the container signature.
+    fn assert_png_pixels(png: &[u8], width: u32, height: u32, expected: &[u8]) {
+        assert!(
+            png.starts_with(b"\x89PNG\r\n\x1a\n"),
+            "the PNG signature is present"
+        );
+        let mut offset = 8;
+        let (mut seen_width, mut seen_height) = (0u32, 0u32);
+        let mut idat = Vec::new();
+        while offset + 8 <= png.len() {
+            let length = u32::from_be_bytes(png[offset..offset + 4].try_into().expect("four bytes"))
+                as usize;
+            let kind = &png[offset + 4..offset + 8];
+            let body = png
+                .get(offset + 8..offset + 8 + length)
+                .expect("the chunk body is present");
+            match kind {
+                b"IHDR" => {
+                    seen_width = u32::from_be_bytes(body[0..4].try_into().expect("four bytes"));
+                    seen_height = u32::from_be_bytes(body[4..8].try_into().expect("four bytes"));
+                }
+                b"IDAT" => idat.extend_from_slice(body),
+                b"IEND" => break,
+                _ => {}
+            }
+            offset += 12 + length;
+        }
+        assert_eq!((seen_width, seen_height), (width, height));
+        let mut raw = Vec::new();
+        flate2::read::ZlibDecoder::new(idat.as_slice())
+            .read_to_end(&mut raw)
+            .expect("the IDAT payload inflates");
+        // Filter-0 scanlines: one filter byte per row, then RGBA pixels.
+        let stride = (width as usize) * 4;
+        assert_eq!(raw.len(), (stride + 1) * height as usize);
+        for row in 0..height as usize {
+            let start = row * (stride + 1);
+            assert_eq!(raw[start], 0, "the writer emits filter-0 scanlines");
+            assert_eq!(
+                &raw[start + 1..start + 1 + stride],
+                &expected[row * stride..(row + 1) * stride]
+            );
+        }
     }
 
     fn request_with_body(target: &str, body: &str) -> Request {

@@ -1,5 +1,38 @@
 # Validation log
 
+## 2026-10-16 - The browser image route works end to end (PRODUCT-ASSET-IMAGE-ROUTE-001)
+
+- Outcome: the `/Assets/Image` tab is landed and **verified at pixel level**, closing the arc
+  that rounds 15-21 could not finish because the texture fixture was untrustworthy. The other
+  half of that arc - the fixture itself - was fixed in `d175cdd`.
+- What landed:
+  - `src/web/tree.rs`: `TreeAsset.has_image` plus `texture_has_image_data`, which requires a
+    decoded class-28 payload whose image bytes match the declared image size (the condition
+    the frozen `TextureAsset` uses before offering an image).
+  - `src/web/state.rs`: `read_asset_image_bytes` (inline bytes, else a streamed resource
+    resolved through `resource::resolve_and_read_streamed_resource_info` with the workspace's
+    own root catalog and data paths) and `render_texture_image` (calls the existing
+    `export_texture2d_image_with_unity_version`).
+  - `src/web/routes.rs`: `GET /Assets/Image`, with the optional `Extension` query selecting the
+    encoding and an absent or unrecognized value falling back to PNG.
+  - `src/web/pages.rs`: the image tab (localized heading `asset_tab_image`, linked preview, and
+    the standard save button) and `src/web_paths.rs`: `asset_image_url`.
+- Evidence: the routes end-to-end test mounts a class-28 fixture built by
+  `make_reference_texture_file` (the corrected 2019.4 record) and asserts the texture lists on
+  its collection page, the asset page advertises the image URL, and the route answers `200`
+  with `image/png`. The served PNG is then **inflated and its pixels compared** to the source
+  RGBA bytes `10 20 30 255 40 50 60 255` by parsing the chunk stream and zlib-inflating `IDAT`,
+  so the assertion covers pixel content and not just the container signature. An asset without
+  an image answers an empty body.
+- Parity: new row `PRODUCT-ASSET-IMAGE-ROUTE-001` marked 已验证. `parity-report.ps1` now reports
+  TOTAL=397, RECOGNIZED=397, NONVERIFIED=25, GATE=OPEN, DUPES=0, MALFORMED=0 (it was 396 rows;
+  the count rises because this is a newly covered capability, not a status promotion).
+- Verified: `cargo test --locked --workspace` - 1822 library + 195 bin tests, 0 failed, 1
+  ignored. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+- Scope note: this closes the image route for class 28. The other `IImageTexture` classes
+  (89/117/187/188/189) keep the texture row's open scope; the route is generic and needs no
+  change once their payloads decode.
+
 ## 2026-10-16 - Texture fixture decodes under production layouts (metaFlag was dropped)
 
 - Outcome: **solved.** The reference Texture2D fixture now decodes both through the file

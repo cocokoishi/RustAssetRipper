@@ -1,5 +1,24 @@
 # RustAssetRipper hand-off — 2026-10-16
 
+## Latest current checkpoint - 2026-10-16 (image route landed and pixel-verified)
+
+- `PRODUCT-ASSET-IMAGE-ROUTE-001` is 已验证. `GET /Assets/Image` serves a decoded class-28
+  texture, the asset page shows the image tab, and the routes e2e test **inflates the served
+  PNG and compares pixels** against the source RGBA bytes rather than only checking the magic
+  header. Touched: `src/web/{tree,state,routes,pages}.rs`, `src/web_paths.rs`.
+- The routes e2e now mounts six inputs; adding the texture collection shifted the root
+  collection indexes, so the unknown-class view is `"I":2` (was `"I":1`) and the root
+  collection assertion lists three names. Keep those in sync if more root fixtures are added.
+- Remaining web work: the other asset tabs (audio, model, font, video, YAML, JSON,
+  development), scene/OriginalPath/OverridePath/AssetBundleName/custom rows,
+  `/FailedFiles/View` + `/StackTrace`, `/Scenes/View`, `/Export/PrimaryContent`. The
+  `/Assets/Image` handler is a good template: resolve the tree path, gate on a `has_*` flag,
+  delegate to a `WebState` method.
+- Non-verified queue is 25 of 397; `PRODUCT-GUI-001` stays 已实现但未验证 until its remaining
+  tabs and entry points are covered.
+- Do not run rustfmt on `src/main_tests_01.rs` (not clean at HEAD).
+- Verified: 1822 library + 195 bin tests, 0 failed; warnings-denied Clippy exit 0.
+
 ## Latest current checkpoint - 2026-10-16 (texture fixture SOLVED; image route unblocked)
 
 - The texture fixture blocker is **closed**. It decodes through both the file TypeTree route
