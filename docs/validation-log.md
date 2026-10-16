@@ -34,6 +34,15 @@
 - **Process note:** the environment variable that points probes at the reference build names a
   temp directory, and temp cleanup had removed it. Rebuilding it is cheap and must be done before
   trusting a probe failure as a real result.
+- **Second process note, and a self-inflicted one worth recording.** `src/resources/glb_tests_01.rs`
+  is written as an indented fragment and was **not** rustfmt-clean at HEAD. Running rustfmt on it
+  reformatted all 976 lines, turning a 136-line addition into a 1008-insertion/874-deletion
+  rewrite of an unrelated file - exactly the incidental churn this project has been avoiding. It
+  was caught by reading `git show --numstat` after committing, and undone by restoring the file
+  and splicing the additions back in at the original indentation; the commit was then amended, so
+  the final diff is 136 insertions and **one** deletion - the stale expectation itself. The guard
+  is now in the hand-off alongside the same rule for `main_tests_01.rs`/`main_tests_03.rs`.
+  **Read the diffstat before pushing**, not just the test result.
 - Evidence: `cargo test --locked --workspace` - **1841** library (up from 1834) + 199 bin tests,
   0 failed, 1 ignored. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
   Parity: TOTAL=405, RECOGNIZED=405, NONVERIFIED=24, DUPES=0, MALFORMED=0, GATE=OPEN.

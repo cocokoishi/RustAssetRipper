@@ -18,6 +18,11 @@
   reference-runtime rows for the coordinate conversions (bind by reflection; the type is
   internal). Two traps: `System.Numerics` vectors/quaternions expose **fields, not properties**,
   and an internal type must be loaded explicitly before it appears in the assembly set.
+- **`src/resources/glb_tests_01.rs` is NOT rustfmt-clean at HEAD and must never be formatted
+  wholesale.** It is written as an indented fragment, like `main_tests_01.rs`. Running rustfmt on
+  it reformatted all 976 lines and turned a 136-line addition into a 1008/874 rewrite; that had
+  to be undone by splicing in the restored file with `git show HEAD~1:<path>`. **Add to it by
+  hand, at the same 4-space indentation, and never run rustfmt on it.**
 - **New this round:** `src/resources/glb_level.rs` ports `GlbLevelBuilder.Build`'s traversal as an
   explicit plan (one node per Transform in source order, parent links, the "local transform only
   for a child or a scene root" rule, dynamic-vs-static mesh choice, node bound). Five tests pass.
@@ -29,7 +34,6 @@
   `process_workspace_scenes_and_prefabs` (only the export workflow does).
 - Corpus replays are local-only and have not run in these rounds, so `acceptance-corpus.md`
   per-sample verdicts predate recent changes.
-- Do not run rustfmt on `src/main_tests_01.rs` or `src/main_tests_03.rs`.
 - Verified: **1841** library + 199 bin tests, 0 failed; warnings-denied Clippy exit 0.
 
 ## Latest current checkpoint - 2026-10-16 (`EXP-GLB-001` gap list corrected; one real gap left)
