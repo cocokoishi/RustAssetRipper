@@ -33,7 +33,10 @@
 //! * A workspace index that points outside its list is a projection error: the tree
 //!   reports it instead of dropping the entry silently.
 
+use assetripper::export::project_exporter::object_class_name;
+use assetripper::export::project_workflow::object_asset_name;
 use assetripper::io::special_names::fix_file_identifier;
+use assetripper::serialized_file::object_workspace::ObjectWorkspace;
 use assetripper::serialized_file::workspace::{SerializedFileWorkspace, WorkspaceRootResourceFile};
 use assetripper::web_paths::{AssetPath, BundlePath, CollectionPath, FailedFilePath, ResourcePath};
 
@@ -65,15 +68,26 @@ pub const ROOT_BUNDLE_NAME: &str = "GameBundle";
 /// The display name when a container bundle carries neither a fixed name nor a scope.
 pub const NAMELESS_BUNDLE_NAME: &str = "Bundle";
 
-/// One collection in the snapshot: a workspace SerializedFile with its object census.
+/// One collection in the snapshot: a workspace SerializedFile with its asset rows.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TreeCollection {
     /// The identifier-fixed file name, mirroring `AssetCollection.Name`.
     pub name: String,
     /// The number of objects in the file, mirroring `AssetCollection.Count`.
     pub asset_count: usize,
-    /// Every object path ID in file order, for asset-existence checks.
-    pub path_ids: Vec<i64>,
+    /// One row per object in file order, mirroring the collection's asset list.
+    pub assets: Vec<TreeAsset>,
+}
+
+/// One asset row: the identity the collection page's table shows.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TreeAsset {
+    /// The object path ID, mirroring `IUnityObjectBase.PathID`.
+    pub path_id: i64,
+    /// The source `ClassName` for the object.
+    pub class_name: String,
+    /// The display name, mirroring `IUnityObjectBase.GetBestName`.
+    pub best_name: String,
 }
 
 /// One bundle in the snapshot. Lists keep source order; pages sort copies for display.
@@ -101,8 +115,12 @@ pub struct BundleTree {
 
 impl BundleTree {
     /// Project the workspace inventory plus the explicit root resources.
+    ///
+    /// Asset rows read the decoded object workspace for class and display names; the
+    /// export flow's own helpers decide both, so the pages list what the export names.
     pub fn from_loaded(
         workspace: &SerializedFileWorkspace,
+        objects: &ObjectWorkspace,
         root_resources: &[WorkspaceRootResourceFile],
     ) -> Result<Self, TreeError> {
         let files = workspace.files();
@@ -191,12 +209,14 @@ impl BundleTree {
                 claimed[file_index] = true;
                 tree_bundles[snapshot_index]
                     .collections
-                    .push(collection_from_file(file));
+                    .push(collection_from_file(file_index, file, objects));
             }
         }
         for (file_index, file) in files.iter().enumerate() {
             match file.container_bundle_index {
-                None => tree_bundles[0].collections.push(collection_from_file(file)),
+                None => tree_bundles[0]
+                    .collections
+                    .push(collection_from_file(file_index, file, objects)),
                 Some(bundle_index) => {
                     if bundle_index >= bundles.len() {
                         return Err(TreeError::new(format!(
@@ -330,23 +350,73 @@ impl BundleTree {
         self.bundles
             .get(bundle)
             .and_then(|bundle| bundle.collections.get(position))
-            .is_some_and(|collection| collection.path_ids.contains(&path.path_id))
+            .is_some_and(|collection| {
+                collection
+                    .assets
+                    .iter()
+                    .any(|asset| asset.path_id == path.path_id)
+            })
     }
 }
 
 /// Build one [`TreeCollection`] from a workspace file.
 fn collection_from_file(
+    file_index: usize,
     file: &assetripper::serialized_file::workspace::LoadedSerializedFile,
+    objects: &ObjectWorkspace,
 ) -> TreeCollection {
+    let assets = file
+        .metadata
+        .objects
+        .iter()
+        .enumerate()
+        .map(|(object_index, info)| asset_row(file_index, object_index, info, objects))
+        .collect::<Vec<_>>();
     TreeCollection {
         name: fix_file_identifier(&file.file_name),
-        asset_count: file.metadata.objects.len(),
-        path_ids: file
-            .metadata
-            .objects
-            .iter()
-            .map(|info| info.path_id)
-            .collect(),
+        asset_count: assets.len(),
+        assets,
+    }
+}
+
+/// Build one asset row: the export flow's class and display names for the object.
+///
+/// A decoded payload names the object through its `m_Name`/`Name` field with the class
+/// name as the fallback, exactly like the export identity; an undecodable object falls
+/// back to the factory result, and an object absent from the object workspace falls back
+/// to the file table's own class fields.
+fn asset_row(
+    file_index: usize,
+    object_index: usize,
+    info: &assetripper::serialized_file::metadata::ObjectInfo,
+    objects: &ObjectWorkspace,
+) -> TreeAsset {
+    let path_id = info.path_id;
+    let Some(object) = objects.get(file_index, object_index) else {
+        let class_name = info.class_id.map_or_else(
+            || object_class_name(info.raw_type_id, None),
+            |class_id| object_class_name(i32::from(class_id), None),
+        );
+        return TreeAsset {
+            path_id,
+            class_name: class_name.clone(),
+            best_name: class_name,
+        };
+    };
+    let class_id = object.factory.class_id;
+    let payload = object.payload.as_ref().ok();
+    let class_name = object_class_name(class_id, payload.map(|value| value.type_name.as_str()));
+    let best_name = payload.and_then(object_asset_name).unwrap_or_else(|| {
+        if object.factory.name.is_empty() {
+            class_name.clone()
+        } else {
+            object.factory.name.clone()
+        }
+    });
+    TreeAsset {
+        path_id,
+        class_name,
+        best_name,
     }
 }
 
@@ -366,7 +436,9 @@ mod tests {
     #[test]
     fn an_empty_workspace_projects_to_a_lonely_root() {
         let workspace = SerializedFileWorkspace::default();
-        let tree = BundleTree::from_loaded(&workspace, &[]).expect("empty workspace projects");
+        let objects = ObjectWorkspace::default();
+        let tree =
+            BundleTree::from_loaded(&workspace, &objects, &[]).expect("empty workspace projects");
         let root = tree.bundle(0).expect("the root always exists");
         assert_eq!(root.name, ROOT_BUNDLE_NAME);
         assert_eq!(root.parent, None);
@@ -376,7 +448,9 @@ mod tests {
     #[test]
     fn bundle_path_resolution_rejects_negative_and_out_of_range_steps() {
         let workspace = SerializedFileWorkspace::default();
-        let tree = BundleTree::from_loaded(&workspace, &[]).expect("empty workspace projects");
+        let objects = ObjectWorkspace::default();
+        let tree =
+            BundleTree::from_loaded(&workspace, &objects, &[]).expect("empty workspace projects");
         assert_eq!(tree.resolve_bundle(&BundlePath::root()), Some(0));
         assert!(tree.resolve_bundle(&BundlePath::root().child(-1)).is_none());
         assert!(tree.resolve_bundle(&BundlePath::root().child(4)).is_none());

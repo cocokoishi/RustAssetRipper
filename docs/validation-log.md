@@ -6161,3 +6161,29 @@ These results do not pass the first-phase gate. The reference .NET solution buil
   `/Search/View`, `/Export/PrimaryContent`) still pend past resolution; root-level
   resource inputs outside the retained catalogs have no listing. Unity Editor
   import/runtime and UABEA remain blocked (license/tooling), unchanged by this increment.
+## 2026-10-16 - Collection pages list every asset (`TreeAsset` rows)
+
+- Scope: the snapshot now carries one asset row per object (path ID, source `ClassName`,
+  export-identity display name), built from the decoded object workspace at load; `GET
+  /Collections/View` renders the frozen columns (path ID, class, linked name) with the
+  bundle link; `object_asset_name` is re-exported from `project_workflow` for the shared
+  helper instead of duplicating it (a same-crate `pub(crate)` attempt failed: the web
+  binary and the library are different crates, so the helper rides the existing public
+  re-export style). The class filter, page control, client script, scene link and
+  dependencies sections have no port counterpart yet and are recorded, not silently
+  dropped. No export-path behavior changes; no sample, oracle or third-party code touched.
+- Frozen reference: `Pages/Collections/ViewPage.cs` (table, filter, pagination, script,
+  scene/dependency sections), `AssetCollection` iteration, `IUnityObjectBase.ClassName` /
+  `GetBestName`, `ExportAssetPathIdentity.best_name` for the fallback rule.
+- Commands run (worktree `main-work`, detached, HEAD == origin/main before this change):
+  1. The round-3 fixture end-to-end now asserts the collection table end to end (both
+     fixture collections render `MonoBehaviour` rows with asset links; per-collection
+     counts still sum to the 2-object census).
+  2. `cargo test --locked --workspace` - 1822 library + 191 bin tests, 0 failed, 1 ignored.
+  3. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+  4. `rustfmt --edition 2021 --check` on each touched file - clean; `git diff --check` -
+     exit 0.
+- Open after this increment: `/Assets/*` data routes, `/Resources/Data`,
+  `/FailedFiles/StackTrace`, `/Scenes/View`, `/Search/View`, `/Export/PrimaryContent`.
+  Unity Editor import/runtime and UABEA remain blocked (license/tooling), unchanged by
+  this increment.

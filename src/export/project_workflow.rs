@@ -582,6 +582,8 @@ pub use self::export::{
     export_workspace_yaml_project_with_assembly_catalog,
     export_workspace_yaml_project_with_serialized_settings,
 };
+/// The decoded display-name helper, shared with the web tree pages.
+pub use self::workspace_identity::object_asset_name;
 
 #[cfg(test)]
 #[path = "project_workflow/tests/mod.rs"]

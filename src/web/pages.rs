@@ -627,6 +627,62 @@ fn tree_link(html: &mut Html, href: &str, name: &str) {
     html.close("a");
 }
 
+/// The collection page: the collection name, its bundle, and the asset table.
+///
+/// `position` addresses the collection in the bundle at `bundle_index` and `path` is its
+/// `CollectionPath`. The table keeps the frozen columns (path ID, class, name) with one
+/// linked row per asset; the class filter, the page control and the client script have no
+/// port counterpart (the server renders every row with no client code), and the scene and
+/// dependency sections wait for their own data ports. A `None` return means the tree
+/// disagrees with the resolved position.
+pub fn collection_page(
+    state: &WebState,
+    tree: &super::tree::BundleTree,
+    bundle_index: usize,
+    position: usize,
+    path: &assetripper::web_paths::CollectionPath,
+) -> Option<String> {
+    use assetripper::web_paths::{asset_view_url, bundle_view_url};
+
+    let bundle = tree.bundle(bundle_index)?;
+    let collection = bundle.collections.get(position)?;
+    let mut inner = Html::new();
+    inner.element("h1", &[], &collection.name);
+
+    inner.element("h2", &[], &t(state, "bundle"));
+    tree_link(&mut inner, &bundle_view_url(&path.bundle), &bundle.name);
+
+    if !collection.assets.is_empty() {
+        inner.element("h2", &[], &t(state, "assets"));
+        inner.open("table", &[("class", "table")]);
+        inner.open("thead", &[]);
+        inner.open("tr", &[]);
+        inner.element("th", &[], &t(state, "path_id"));
+        inner.element("th", &[], &t(state, "class"));
+        inner.element("th", &[], &t(state, "name"));
+        inner.close("tr");
+        inner.close("thead");
+        inner.open("tbody", &[("id", "assetsTable")]);
+        for asset in &collection.assets {
+            inner.open("tr", &[("data-class", &asset.class_name)]);
+            inner.element("td", &[], &asset.path_id.to_string());
+            inner.element("td", &[], &asset.class_name);
+            inner.open("td", &[]);
+            tree_link(
+                &mut inner,
+                &asset_view_url(&path.asset(asset.path_id)),
+                &asset.best_name,
+            );
+            inner.close("td");
+            inner.close("tr");
+        }
+        inner.close("tbody");
+        inner.close("table");
+    }
+
+    Some(layout(state, &collection.name, inner.as_str()))
+}
+
 /// The OpenAPI document the development menu links to.
 ///
 /// The baseline serves a document generated from its minimal API definitions. The port
@@ -1078,6 +1134,7 @@ mod tests {
                     &BundleTree::from_loaded(
                         &assetripper::serialized_file::workspace::SerializedFileWorkspace::default(
                         ),
+                        &assetripper::serialized_file::object_workspace::ObjectWorkspace::default(),
                         &[],
                     )
                     .expect("an empty workspace projects"),

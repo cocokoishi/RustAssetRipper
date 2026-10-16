@@ -107,7 +107,8 @@ pub(super) fn build_path_id_map(
 }
 
 /// The named asset name (`INamed.Name`) of one decoded payload, if the TypeTree has one.
-pub(super) fn object_asset_name(payload: &ParsedObjectPayload) -> Option<String> {
+/// Shared with the web tree pages, which list the same display names.
+pub fn object_asset_name(payload: &ParsedObjectPayload) -> Option<String> {
     for field in ["m_Name", "Name"] {
         if let Ok(Some(crate::serialized_file::object::SerializedValue::StringBytes(bytes))) =
             payload.root.unique_field_in_base_chain(field)

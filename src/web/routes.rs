@@ -257,24 +257,29 @@ fn bundles_view(state: &mut WebState, request: &Request) -> Response {
     }
 }
 
-/// `GET /Collections/View`: the collection resolves, but its asset page needs the
-/// decoded asset model, which is still open.
+/// `GET /Collections/View`: render the resolved collection's asset table.
 fn collections_view(state: &mut WebState, request: &Request) -> Response {
     let path = match tree_gates::<CollectionPath>(state, request) {
         Ok(path) => path,
         Err(response) => return response,
     };
-    let resolved = loaded_tree(state)
-        .and_then(|tree| tree.resolve_collection(&path))
-        .is_some();
-    if resolved {
-        return pending_tree_page(state, "/Collections/View");
+    let Some(tree) = loaded_tree(state) else {
+        return Response::internal_error("A game is loaded but its bundle tree is missing.");
+    };
+    let Some((bundle_index, position)) = tree.resolve_collection(&path) else {
+        return Response::text(format!(
+            "Asset collection could not be resolved: {}",
+            path.to_diagnostic()
+        ))
+        .with_status(404);
+    };
+    match pages::collection_page(state, tree, bundle_index, position, &path) {
+        Some(page) => Response::html(page),
+        None => Response::internal_error(format!(
+            "The bundle tree disagrees with the resolved path {}.",
+            path.to_diagnostic()
+        )),
     }
-    Response::text(format!(
-        "Asset collection could not be resolved: {}",
-        path.to_diagnostic()
-    ))
-    .with_status(404)
 }
 
 /// `GET /Collections/Count`: the frozen `CollectionAPI.GetCount` answers the asset count
@@ -634,12 +639,17 @@ mod tests {
             }
             assert_eq!(total, 2);
 
-            // A resolved collection without an asset model keeps its pending page.
+            // A resolved collection renders its asset table with links.
             let view = format!(
                 "/Collections/View?Path={}",
                 url_encode("{\"B\":{\"P\":[0]},\"I\":0}")
             );
-            assert_eq!(get(&mut state, &view).status(), 501);
+            let response = get(&mut state, &view);
+            assert_eq!(response.status(), 200);
+            let collection = String::from_utf8(response.body().to_vec()).expect("pages are UTF-8");
+            assert!(collection.contains("assetsTable"), "{collection}");
+            assert!(collection.contains("/Assets/View?Path="), "{collection}");
+            assert!(collection.contains("MonoBehaviour"), "{collection}");
 
             // Unresolvable paths report the baseline's per-kind message.
             let response = get(&mut state, &page("{\"P\":[7]}"));

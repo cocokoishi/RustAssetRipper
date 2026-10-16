@@ -1,5 +1,25 @@
 # RustAssetRipper hand-off — 2026-10-16
 
+## Latest current checkpoint - 2026-10-16 (collection pages list every asset)
+
+- Worktree: `main-work` detached; HEAD == origin/main before this slice. The snapshot now
+  carries `TreeAsset` rows (path ID, source class name, export-identity display name from
+  the decoded object workspace); `GET /Collections/View` renders the frozen columns with
+  the bundle link. The class filter, page control, client script, scene link and
+  dependencies sections are recorded open, not silently dropped. `object_asset_name` is
+  re-exported from `project_workflow` (bin/lib are different crates, so same-crate
+  visibility cannot cross; the public re-export style is used).
+- Verification evidence: the fixture end-to-end asserts both `MonoBehaviour` rows with
+  asset links; full `cargo test --locked --workspace` **1822 lib + 191 bin, 0 failed**,
+  1 ignored; `cargo clippy --workspace --all-targets --locked -- -D warnings` exit 0;
+  per-file rustfmt and `git diff --check` clean. Full evidence in `docs/validation-log.md`.
+- Privacy: no sample content/paths/names in code, tests, docs or commit text. Mapping table
+  stays outside the repo; history untouched.
+- Next move: `/Assets/*` data routes, `/Resources/Data` (+ view), `/FailedFiles/StackTrace`
+  (+ view), `/Scenes/View`, `/Search/View`, `/Export/PrimaryContent`. Failed/resource test
+  data needs crafted inputs (no bundle writer exists); asset names already flow. Then
+  re-run the Phase-1 gap rules (9 `实现中` + 1 blocked + 16 `已实现但未验证`).
+
 ## Latest current checkpoint - 2026-10-16 (bundle pages render from a live snapshot)
 
 - Worktree: `main-work` detached; HEAD == origin/main before this slice. New binary module

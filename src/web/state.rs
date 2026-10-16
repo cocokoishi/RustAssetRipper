@@ -243,8 +243,9 @@ impl WebState {
         let game = load_game(&path_bufs, &self.settings, &mut status)
             .map_err(|error| error.to_string())?;
         self.push_status(&status);
-        let tree = BundleTree::from_loaded(&game.workspace, game.root_catalog.files())
-            .map_err(|error| error.to_string())?;
+        let tree =
+            BundleTree::from_loaded(&game.workspace, &game.objects, game.root_catalog.files())
+                .map_err(|error| error.to_string())?;
         self.log
             .push(format!("Loaded {} input path(s).", paths.len()));
         self.loaded = Some(game);
