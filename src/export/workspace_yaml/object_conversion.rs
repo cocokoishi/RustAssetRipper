@@ -147,6 +147,13 @@ fn should_use_scene_editor_type_tree(class_id: i32, unity_version_text: Option<&
                     // full editor base on 2022.3 (probed) but was exported
                     // release-shaped, which costs the four base fields.
                     | 167
+                    // Breadth probe (ninth world): AudioReverbFilter and
+                    // LightProbeProxyVolume carry the full editor base on 2022.3
+                    // (probed) but were exported release-shaped; the TerrainLayer
+                    // custom class id behaves the same way.
+                    | 164
+                    | 259
+                    | 1_953_259_897
                     | 1_183_024_399
                     | 1_818_360_610
             ));
@@ -4700,6 +4707,9 @@ mod tests {
             238,
             363,
             167,
+            164,
+            259,
+            1_953_259_897,
             1_183_024_399,
             1_818_360_610,
         ] {
@@ -4744,6 +4754,9 @@ mod tests {
             238,
             363,
             167,
+            164,
+            259,
+            1_953_259_897,
             1_183_024_399,
             1_818_360_610,
         ] {

@@ -1043,7 +1043,7 @@ Historical 2026-10-10 gate instruction (superseded): it prohibited reading UABEA
 - Current stage: user-authorized real-sample convergence; the full AssetRipper parity gate and final sample acceptance remain open. Repository baseline before this Mesh change was `23321a7`; preserve the two existing untracked local entries `cleanup_manifest.txt` and `tools/probes/anim-convert/packages/`.
 - Added Unity 2022.3 class-43 editor TypeTree selection and baseline `m_MeshOptimizationFlags = -1`. A fresh replay found the TPK TypelessData field shape needed Unity's `m_DataSize` byte count plus `_typelessdata`; Rust now emits that structure and preserves the blob.
 - Focused release regression passed 1/1; release CLI build and fresh 青岚雅苑` export exited 0. Of 112 same-path Mesh assets, 109 are byte-exact; the other three have only 27 decimal Float32 spellings that parse to identical Float32 bits. `云岫藏珍.asset` is exact. Root prefab audit paired 4,491/4,491 documents and found all 100 MeshRenderer and 100 MeshFilter documents exact after GUID-path normalization.
-- Evidence: `docs/validation-log.md`, `docs/differential-findings.md`, and ignored run output `target/real-acceptance-20261011-avtr青岚古境-mesh-editor-r2`.
+- Evidence: `docs/validation-log.md`, `docs/differential-findings.md`, and ignored run output `target/real-acceptance-20261011-青岚古境-mesh-editor-r2`.
 - Unity Editor runtime validation is unavailable and UABEA was not run. This targeted replay does not mean the avatar or product is accepted. The expression-menu asset path difference is already recursively reconciled; continue from the next unresolved real project export discrepancy after committing this validated Mesh change.
 
 ## Unity 2022.3 Avatar editor schema replay (2026-10-11)
@@ -1051,7 +1051,7 @@ Historical 2026-10-10 gate instruction (superseded): it prohibited reading UABEA
 - The validated Mesh change is committed and pushed as `29a7a78` (`main`); local and remote commit/tree matched. Two pre-existing untracked entries remain untouched: `cleanup_manifest.txt` and `tools/probes/anim-convert/packages/`.
 - The next real-project discrepancy was class-90 `Avatar0Avatar`: source had three null editor base PPtrs and Rust had none. Class 90 now selects the Unity 2022.3 editor TypeTree. The fresh export restores all four base fields without changing checked payloads.
 - Focused release tests passed 8/8; release CLI build and sample export exited 0. Avatar verification found matching ordered numeric streams (10,568 tokens), all 8 long hex payloads, exact TOS and HumanDescription sections, 554 pose transforms, 304 skeleton nodes, and three null PPtrs in each output. The refreshed project audit has no Avatar reference/null-pointer delta; root-prefab Animator documents match 2/2.
-- Evidence: `docs/validation-log.md`, `docs/differential-findings.md`, and ignored artifacts `target/real-acceptance-20261011-avtr青岚古境-avatar-editor-r1*`.
+- Evidence: `docs/validation-log.md`, `docs/differential-findings.md`, and ignored artifacts `target/real-acceptance-20261011-青岚古境-avatar-editor-r1*`.
 - Unity Editor and UABEA checks remain unavailable/unrun, so the sample remains unaccepted. Next: inspect a concrete non-reconciled same-identity reference difference from the refreshed whole-project report, trace it to the original object and target GUID/fileID, then apply a generic fix only if input/source evidence shows Rust lost or changed a valid reference. Keep the known AutoDresser runtime uncertainty separate from resolved serialized graph evidence.
 
 ## Unity builtin Default-ParticleSystem reference investigation (2026-10-11)
@@ -1059,7 +1059,7 @@ Historical 2026-10-10 gate instruction (superseded): it prohibited reading UABEA
 - The refreshed whole-project report flagged `_MainTex` in `Assets/青岚资源路径 Particle 青瓷凝光.mat`: source uses builtin fileID 10307; Rust uses its exported `月照琉璃.png` Texture2D.
 - Both source and Rust path maps identify input PathID `4988150354445090395` as `Default-ParticleSystem` / Texture2D. Frozen source cache code matches predefined Texture2D assets by name and dimensions, while the Rust PNG preserves the bundle object as a 64×64 image (SHA-256 `SHA256_REDACTED`).
 - The installed Unity 2022.3.22f1 builtin resource `unity_builtin_extra` was parsed directly; builtin Texture2D fileID 10307 and the bundle Texture2D PathID `4988150354445090395` each export to a 3,256-byte PNG with SHA-256 `SHA256_REDACTED`. This resolves the serialized texture-content question for this sample, with no routing change.
-- Unity Editor import/runtime validation remains blocked by the missing Editor license; UABEA remains unrun. The content comparison does not close the sample or overall product acceptance. Evidence is in `docs/differential-findings.md` under `DIFF-REAL-AVTR青岚古境-PREDEFINED-TEXTURE-CACHE-001`.
+- Unity Editor import/runtime validation remains blocked by the missing Editor license; UABEA remains unrun. The content comparison does not close the sample or overall product acceptance. Evidence is in `docs/differential-findings.md` under `DIFF-REAL-青岚古境-PREDEFINED-TEXTURE-CACHE-001`.
 
 ## 青岚山河卷 Unity 2022.3 LightProbes editor schema (2026-10-11)
 
