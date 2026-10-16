@@ -27,6 +27,10 @@
 //! parameters.IsScene` test.
 //!
 //! Fixture: `glb_level_fixture.txt` records the reference decisions for the cases below.
+//!
+//! [`build_scene_plan`] adapts a materialized scene collection to this plan, which is the step the
+//! reference performs in `GlbModelExporter.ExportModel` when it hands
+//! `SceneHierarchyObject.Assets` to `GlbLevelBuilder.Build`.
 
 use super::glb::{references_dynamic_mesh, subset_indices, GlbError, GlbLevelLimits, GlbMeshType};
 
@@ -331,9 +335,292 @@ pub fn build_scene_document(plan: &GlbLevelPlan) -> super::glb::SceneDocument {
     document
 }
 
+/// Build a plan from a materialized scene collection.
+///
+/// This is the port of the step the reference performs in `GlbModelExporter.ExportModel`: it
+/// hands `SceneHierarchyObject.Assets` to `GlbLevelBuilder.Build`, which walks each asset back to
+/// its root GameObject and emits the hierarchy. Here the caller supplies the already-materialized
+/// graph, so the walk is over workspace identities rather than over `IUnityObjectBase`s.
+///
+/// The reference reaches a root through `IGameObject.GetRoot()` - following `Father_C4P` to the
+/// top - and deduplicates by the editor extensions it exported, so a second asset belonging to an
+/// already-exported hierarchy contributes nothing. This reproduces both: only transforms with no
+/// father start a walk, and each is visited once.
+///
+/// `is_scene` is `BuildParameters.IsScene`, which decides whether a root node carries its local
+/// transform.
+///
+/// A GameObject with no name contributes an empty node name, which the reference also produces:
+/// `NodeBuilder(gameObject.Name)` with an unset name writes an empty string.
+pub fn build_scene_plan<G: SceneCollectionGraph>(
+    collection: &G,
+    is_scene: bool,
+) -> Result<GlbLevelPlan, GlbError> {
+    build_scene_plan_with_limits(collection, is_scene, GlbLevelLimits::default())
+}
+
+/// `build_scene_plan` with an explicit bound on emitted nodes.
+pub fn build_scene_plan_with_limits<G: SceneCollectionGraph>(
+    collection: &G,
+    is_scene: bool,
+    limits: GlbLevelLimits,
+) -> Result<GlbLevelPlan, GlbError> {
+    // Each Transform is visited once, matching the reference's `exportedAssets` set.
+    let mut visited = vec![false; collection.len()];
+    let mut plan = GlbLevelPlan::default();
+    for index in 0..collection.len() {
+        if visited[index] || collection.father(index).is_some() {
+            continue;
+        }
+        visit_transform(
+            collection,
+            index,
+            None,
+            is_scene,
+            limits,
+            &mut visited,
+            &mut plan,
+        )?;
+    }
+    Ok(plan)
+}
+
+/// The read-only view of a materialized scene collection this walk needs.
+///
+/// A trait keeps the walk independent of the export crate's concrete types, so it can be tested
+/// against the reference fixture without building a whole scene.
+pub trait SceneCollectionGraph {
+    /// The number of Transforms in the collection.
+    fn len(&self) -> usize;
+
+    /// Whether the collection holds no Transforms.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The GameObject name for a Transform, or `None` when it has no GameObject.
+    fn name(&self, index: usize) -> Option<&str>;
+
+    /// The father Transform index, or `None` when this is a root.
+    fn father(&self, index: usize) -> Option<usize>;
+
+    /// The child Transform indices, in source order.
+    fn children(&self, index: usize) -> &[usize];
+
+    /// The local transform values, or `None` when the Transform carries no resolved values.
+    fn local(&self, index: usize) -> Option<GlbLevelLocalTransform>;
+
+    /// The geometry this Transform's GameObject asks for, or `None` when it carries none.
+    fn mesh(&self, index: usize) -> Option<GlbLevelAttachedMesh>;
+
+    /// Whether the Transform has a GameObject at all.
+    ///
+    /// The reference returns early when `transform.GameObject_C4P` is null, so such a Transform
+    /// emits no node - but it still counts as visited.
+    fn has_game_object(&self, index: usize) -> bool;
+}
+
+#[allow(clippy::too_many_arguments)]
+fn visit_transform<G: SceneCollectionGraph>(
+    collection: &G,
+    index: usize,
+    parent: Option<usize>,
+    is_scene: bool,
+    limits: GlbLevelLimits,
+    visited: &mut [bool],
+    plan: &mut GlbLevelPlan,
+) -> Result<(), GlbError> {
+    if visited.get(index).copied().unwrap_or(true) {
+        return Ok(());
+    }
+    visited[index] = true;
+    if !collection.has_game_object(index) {
+        // `AddGameObjectToScene` returns before emitting anything when the GameObject is null.
+        return Ok(());
+    }
+    if plan.nodes.len() >= limits.max_nodes {
+        return Err(GlbError::LevelNodeLimitExceeded {
+            count: plan.nodes.len().saturating_add(1),
+            limit: limits.max_nodes,
+        });
+    }
+
+    // A Transform's node carries `transform.GameObject_C4P.Name`, which may legitimately be empty.
+    let name = collection.name(index).unwrap_or("").to_owned();
+    // The source writes the local transform only for a child of something, or for a scene build.
+    let local_transform = (parent.is_some() || is_scene)
+        .then(|| collection.local(index))
+        .flatten();
+    let node_index = plan.nodes.len();
+    plan.nodes.push(GlbLevelNode {
+        name,
+        parent,
+        local_transform,
+        mesh: collection.mesh(index),
+    });
+
+    for child in collection.children(index) {
+        visit_transform(
+            collection,
+            *child,
+            Some(node_index),
+            is_scene,
+            limits,
+            visited,
+            plan,
+        )?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A test graph over the fixture hierarchy, so the scene adapter is checked against the same
+    /// reference rows as the direct plan path.
+    struct FixtureGraph {
+        names: Vec<&'static str>,
+        fathers: Vec<Option<usize>>,
+        children: Vec<Vec<usize>>,
+        locals: Vec<Option<GlbLevelLocalTransform>>,
+        has_go: Vec<bool>,
+    }
+
+    impl FixtureGraph {
+        /// Root(0) -> Child(1) -> Grandchild(2), plus parentless Second(3).
+        fn new() -> Self {
+            Self {
+                names: vec!["Root", "Child", "Grandchild", "Second"],
+                fathers: vec![None, Some(0), Some(1), None],
+                children: vec![vec![1], vec![2], Vec::new(), Vec::new()],
+                locals: vec![None; 4],
+                has_go: vec![true; 4],
+            }
+        }
+
+        /// The reference's own emitted transforms for the scene run.
+        fn with_reference_locals() -> Self {
+            let mut graph = Self::new();
+            graph.locals = [
+                (
+                    [-1.0, 2.0, 3.0],
+                    [0.0, -0.707_106_77, -0.0, 0.707_106_77],
+                    [2.0, 2.0, 2.0],
+                ),
+                (
+                    [-4.0, 5.0, 6.0],
+                    [0.5, -0.0, -0.0, 0.866_025_4],
+                    [1.0, 1.0, 1.0],
+                ),
+                (
+                    [-7.0, 8.0, 9.0],
+                    [0.0, -0.0, -0.707_106_77, 0.707_106_77],
+                    [1.0, 1.0, 1.0],
+                ),
+                ([1.0, -2.0, -3.0], [0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0]),
+            ]
+            .into_iter()
+            .map(|(translation, rotation, scale)| {
+                Some(GlbLevelLocalTransform {
+                    scale,
+                    rotation,
+                    translation,
+                })
+            })
+            .collect();
+            graph
+        }
+    }
+
+    impl SceneCollectionGraph for FixtureGraph {
+        fn len(&self) -> usize {
+            self.names.len()
+        }
+        fn name(&self, index: usize) -> Option<&str> {
+            self.names.get(index).copied()
+        }
+        fn father(&self, index: usize) -> Option<usize> {
+            self.fathers.get(index).copied().flatten()
+        }
+        fn children(&self, index: usize) -> &[usize] {
+            self.children.get(index).map_or(&[], Vec::as_slice)
+        }
+        fn local(&self, index: usize) -> Option<GlbLevelLocalTransform> {
+            self.locals.get(index).copied().flatten()
+        }
+        fn mesh(&self, _index: usize) -> Option<GlbLevelAttachedMesh> {
+            None
+        }
+        fn has_game_object(&self, index: usize) -> bool {
+            self.has_go.get(index).copied().unwrap_or(false)
+        }
+    }
+
+    /// The adapter walks the hierarchy the reference rows describe.
+    #[test]
+    fn scene_plan_adapter_walks_roots_in_source_order() {
+        let graph = FixtureGraph::with_reference_locals();
+        let plan = build_scene_plan(&graph, true).expect("the plan builds");
+        let names: Vec<&str> = plan.nodes.iter().map(|node| node.name.as_str()).collect();
+        // Depth-first in source order, exactly as the reference emitted.
+        assert_eq!(names, ["Root", "Child", "Grandchild", "Second"]);
+        assert_eq!(plan.nodes[0].parent, None);
+        assert_eq!(plan.nodes[1].parent, Some(0));
+        assert_eq!(plan.nodes[2].parent, Some(1));
+        assert_eq!(plan.nodes[3].parent, None);
+        // The scene rows from the fixture, reproduced through the adapter.
+        let root = plan.nodes[0]
+            .local_transform
+            .expect("a scene root is transformed");
+        assert_eq!(root.translation, [-1.0, 2.0, 3.0]);
+        assert_eq!(root.scale, [2.0, 2.0, 2.0]);
+        assert_eq!(root.rotation, [0.0, -0.707_106_77, -0.0, 0.707_106_77]);
+
+        // An asset build leaves roots untransformed, even with the same graph.
+        let asset = build_scene_plan(&graph, false).expect("the plan builds");
+        assert!(
+            asset.nodes[0].local_transform.is_none(),
+            "an asset root is untransformed"
+        );
+        assert!(
+            asset.nodes[1].local_transform.is_some(),
+            "a child is transformed in both modes"
+        );
+
+        // A graph that resolved no values produces nodes with no transforms at all.
+        let bare = build_scene_plan(&FixtureGraph::new(), true).expect("the plan builds");
+        assert!(bare.nodes.iter().all(|node| node.local_transform.is_none()));
+    }
+
+    /// A Transform with no GameObject emits no node and ends the walk there.
+    ///
+    /// The source returns from `AddGameObjectToScene` before its child loop, so a null GameObject
+    /// **prunes the whole subtree** rather than merely skipping that node. That is easy to get
+    /// backwards: descending anyway would emit a subtree the reference never visits.
+    #[test]
+    fn scene_plan_adapter_skips_a_transform_without_a_game_object() {
+        let mut graph = FixtureGraph::new();
+        graph.has_go = vec![true, false, true, true];
+        let plan = build_scene_plan(&graph, true).expect("the plan builds");
+        let names: Vec<&str> = plan.nodes.iter().map(|node| node.name.as_str()).collect();
+        // Root and Second survive; Child prunes itself and Grandchild along with it.
+        assert_eq!(names, ["Root", "Second"], "the subtree is pruned");
+        assert_eq!(plan.nodes[0].parent, None);
+        assert_eq!(plan.nodes[1].parent, None);
+    }
+
+    /// The adapter's node bound is enforced like the direct path's.
+    #[test]
+    fn scene_plan_adapter_enforces_the_node_limit() {
+        let graph = FixtureGraph::new();
+        let error = build_scene_plan_with_limits(&graph, true, GlbLevelLimits { max_nodes: 2 })
+            .expect_err("the limit is enforced");
+        assert_eq!(
+            error,
+            GlbError::LevelNodeLimitExceeded { count: 3, limit: 2 }
+        );
+    }
 
     /// The reference-runtime rows for the two-root, three-deep hierarchy.
     ///

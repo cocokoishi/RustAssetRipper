@@ -1,5 +1,35 @@
 # Validation log
 
+## 2026-10-16 - Scene plan adapter, and the subtree-pruning rule it pinned
+
+- Outcome: `build_scene_plan` adapts a materialized scene collection to a `GlbLevelPlan`. This is
+  the port of the step the reference performs in `GlbModelExporter.ExportModel`, which hands
+  `SceneHierarchyObject.Assets` to `GlbLevelBuilder.Build`. Eleven tests pass in the module (up
+  from eight).
+- **A test failure caught a real semantic question, and the reference settled it.** My first
+  version of the null-GameObject test asserted that a Transform with no GameObject is skipped but
+  its children are still walked. That failed, so I read `AddGameObjectToScene` again:
+  `if (gameObject is null) { return; }` sits **before** the child loop, so a null GameObject
+  **prunes the entire subtree** rather than skipping one node. The implementation was already
+  right and the test was wrong - which is the useful direction for that to go. The corrected test
+  now pins the behaviour explicitly, because descending anyway would emit a subtree the reference
+  never visits.
+- The adapter walks only fatherless Transforms as roots and visits each Transform once, matching
+  the reference's `IGameObject.GetRoot()` plus its `exportedAssets` deduplication set. It reads
+  through a small `SceneCollectionGraph` trait rather than the export crate's concrete types, so
+  the walk is testable against the committed reference rows without building a whole scene, and a
+  fixture graph reproduces the same node order, parent links and converted transforms as the
+  direct plan path.
+- **`EXP-GLB-001` and `RES-MODEL-001` keep their statuses.** The adapter is the input half of the
+  integration; the export entry that calls it - the port of `GlbModelExporter` - is still missing,
+  so the scene path remains unregistered and carries no parity row.
+- A lifetime design note for the next reader: the trait's methods return `&str`/`&[usize]` tied to
+  `&self` rather than to an explicit lifetime parameter. The `<'a>` version compiles for the
+  direct-return cases but the borrow checker rejects a `Vec`-backed implementation, and the
+  simplification costs nothing here.
+- Evidence: `cargo test --locked --workspace` - **1849** library (up from 1846) + 199 bin tests,
+  0 failed, 1 ignored. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+
 ## 2026-10-16 - Scene geometry attaches to plan nodes; two stale ledger claims corrected
 
 - Outcome: `attach_plan_geometry` in `src/resources/glb.rs` closes the seam between the two halves

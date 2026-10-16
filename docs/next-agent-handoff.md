@@ -1,8 +1,39 @@
 # RustAssetRipper hand-off — 2026-10-16
 
-## Latest current checkpoint - 2026-10-16 (scene geometry attaches; ledger claim corrected)
+## Latest current checkpoint - 2026-10-16 (scene plan adapter; subtree-pruning rule pinned)
 
-- `attach_plan_geometry` in `src/resources/glb.rs` closes the seam between the two halves of the
+- `build_scene_plan` in `src/resources/glb_level.rs` adapts a materialized scene collection to a
+  `GlbLevelPlan`, reading through a small `SceneCollectionGraph` trait so the walk is testable
+  against the committed reference rows without building a whole scene. Eleven tests pass.
+- **A rule worth knowing: a Transform with no GameObject PRUNES ITS SUBTREE.** The source's
+  `AddGameObjectToScene` does `if (gameObject is null) { return; }` *before* its child loop, so
+  neither the node nor its descendants are emitted. My first test asserted the opposite
+  (skip the node, keep the children) and failed; the implementation was right. If you touch this
+  walk, keep the early return - descending anyway emits a subtree the reference never visits.
+- **The remaining work for the scene GLB export is now only the export entry.** All the pieces
+  exist: `build_scene_plan` (input), `build_scene_document` (node graph), `attach_plan_geometry`
+  (geometry). What is missing is the port of `GlbModelExporter.ExportModel`, which takes a
+  `SceneHierarchyObject`/`PrefabHierarchyObject`, calls `GlbLevelBuilder.Build(assets, isScene)`
+  and writes through `GlbWriter.TryWrite`. The port's counterparts are
+  `WorkspaceSceneHierarchies` (`scenes()`, `scene_asset_identities_in_collection_order`) and
+  `MaterializedSceneCollection` (`transforms`, `game_objects`, `transform_of`), whose
+  `MaterializedTransform` already carries `game_object`, `father`, `children` and
+  `values: Option<SceneTransformValues>` with local position/rotation/scale. **Wire those into
+  `SceneCollectionGraph` and register the export.**
+- `EXP-GLB-001` and `RES-MODEL-001` keep their statuses until that entry exists; the scene path
+  carries no parity row yet.
+- **Never format `src/resources/glb_tests_01.rs`** (nor `main_tests_01.rs`/`main_tests_03.rs`).
+  `glb.rs` and `glb_level.rs` are rustfmt-clean and safe.
+- **A GLB is binary: decode the JSON chunk before asserting on text** (12-byte header, then the
+  chunk header); `glb_level.rs` has a `json_chunk` test helper.
+- Parity ledger: 405 rows, 381 verified, 24 non-verified, DUPES=0, MALFORMED=0, gate OPEN.
+- `/Scenes/View` still returns 501 (`load_game` does not run `process_workspace_scenes_and_prefabs`).
+- Corpus replays are local-only and have not run in these rounds.
+- Verified: **1849** library + 199 bin tests, 0 failed; warnings-denied Clippy exit 0.
+
+## Previous checkpoint - 2026-10-16 (scene geometry attaches; ledger claim corrected)
+
+- `attach_plan_geometry` in `src/resources/glb.rs` closed the seam between the two halves of the
   scene builder: the plan decides which sub-meshes a node wants, and this fills them with real
   primitives (positions, normals, tangents, UVs, colours, skin lanes, index accessor). Two tests
   pin it, including the two behaviours a naive version gets wrong - missing mesh data warns and
