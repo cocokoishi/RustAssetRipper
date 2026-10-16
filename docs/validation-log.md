@@ -6080,3 +6080,9 @@ These results do not pass the first-phase gate. The reference .NET solution buil
 ## 2026-10-16 (budget seed) - W11 fresh audit
 
 - Re-ran audit-project-documents.ps1 with SourceProject target/ra-w11/ref/ExportedProject, RustProject target/ra-w11/rust-r1, ReportPath target/ra-w11/audit-fresh-1.json. Exit 0. Counts reproduced exactly: pairedFiles=1107 onlySource=0 onlyRust=0, all 27 listed classes diff=0, opaque 367 with 261 pending probe (PNG 260 + OGG 1), additionalDifferences=1 (AuxiliaryFiles/path_id_map.json). No new mismatch.
+## 2026-10-16 - Public privacy check executed (real tool, not a fallback)
+
+- Command: C:\Users\koishi\AppData\Local\hermes\tools\python-3.14.7+20260901-win32-arm64\python.exe tools/check_public_repository.py.
+- Exit 0. Output: Public repository policy passed: tracked Git metadata contains no private input paths or oversized blobs.
+- 979 tracked objects scanned; no files > 25 MiB and no forbidden private suffixes or rtifacts paths; managed_reference_project_fixture/*.bundle allowed under the documented exception.
+- CI status unchanged: HEAD=origin/main; no private-path failures in Public repository hygiene job.
