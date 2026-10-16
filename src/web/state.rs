@@ -296,6 +296,106 @@ impl WebState {
         })
     }
 
+    /// Decode one audio clip's playable bytes.
+    ///
+    /// Mirrors the frozen `AssetAPI.GetAudioData`: the clip's raw audio is read the way
+    /// `AudioClipExtensions.GetAudioData` reads it (nonempty inline bytes, then the streamed
+    /// resource), `AudioClipDecoder.TryDecode` classifies it, and an Ogg result is transcoded to
+    /// WAV when the caller asks for that extension. Returns the bytes plus the served extension.
+    ///
+    /// A clip whose audio cannot be decoded reports the decoder's error rather than serving
+    /// container bytes as audio.
+    pub fn read_asset_audio(
+        &self,
+        file_index: usize,
+        object_index: usize,
+        desired_extension: Option<&str>,
+    ) -> Result<Option<(Vec<u8>, &'static str)>, String> {
+        use assetripper::export::audio_export::{
+            convert_ogg_to_wav_with_limit, converts_ogg_to_wav, try_decode_audio,
+            MAX_DECODED_AUDIO_BYTES,
+        };
+        use assetripper::resources::audio::AudioClipView;
+
+        let game = self
+            .loaded
+            .as_ref()
+            .ok_or_else(|| "no game is loaded".to_owned())?;
+        let object = game
+            .objects
+            .get(file_index, object_index)
+            .ok_or_else(|| "the snapshot row has no workspace object".to_owned())?;
+        let Ok(payload) = object.payload.as_ref() else {
+            return Ok(None);
+        };
+        let Ok(view) = AudioClipView::from_value(&payload.root) else {
+            return Ok(None);
+        };
+        let name = view
+            .name
+            .as_deref()
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+            .unwrap_or_default();
+        // `GetAudioData` source order: nonempty inline bytes, then the streamed resource.
+        let inline = view
+            .audio_data
+            .as_deref()
+            .filter(|bytes| !bytes.is_empty())
+            .map(<[u8]>::to_vec);
+        let raw = match inline {
+            Some(bytes) => bytes,
+            None => match view.resource.as_ref().filter(|info| info.is_set()) {
+                Some(info) => {
+                    let file = game
+                        .workspace
+                        .files()
+                        .get(file_index)
+                        .ok_or_else(|| "the snapshot row has no workspace file".to_owned())?;
+                    use assetripper::io::platform_structure::PlatformResourceProvider;
+                    let provider = PlatformResourceProvider::with_mixed_data_paths(
+                        None,
+                        Some(&game.data_paths),
+                    );
+                    let resolution =
+                        assetripper::resource::resolve_and_read_streamed_resource_range(
+                            &game.filesystem,
+                            &game.workspace,
+                            file.container_bundle_index,
+                            assetripper::resource::StreamedResourceRange {
+                                path: &info.path,
+                                offset: info.offset,
+                                size: info.size,
+                            },
+                            &game.root_catalog,
+                            &provider,
+                            assetripper::resource::StreamedResourceContentLimits::default(),
+                        )
+                        .map_err(|error| error.to_string())?;
+                    match resolution {
+                        assetripper::resource::StreamedResourceContentResolution::Resolved {
+                            bytes,
+                            ..
+                        } => bytes.to_vec(),
+                        _ => return Ok(None),
+                    }
+                }
+                None => return Ok(None),
+            },
+        };
+        let (decoded, extension) =
+            try_decode_audio(&name, view.sound_type, &raw).map_err(|error| error.to_string())?;
+        if converts_ogg_to_wav(extension, desired_extension.unwrap_or("")) {
+            // A failed transcode keeps the Ogg bytes, matching the frozen route, which only
+            // swaps the result in when the converter produced a non-empty WAV.
+            if let Ok(wav) = convert_ogg_to_wav_with_limit(&decoded, MAX_DECODED_AUDIO_BYTES) {
+                if !wav.is_empty() {
+                    return Ok(Some((wav, "wav")));
+                }
+            }
+        }
+        Ok(Some((decoded, extension)))
+    }
+
     /// Render one asset's decoded payload as a standalone Unity YAML document.    ///
     /// The frozen route walks the asset with `YamlWalker` and anchors the document with
     /// `ExportIdHandler.GetMainExportID(asset)`. This port converts the already-decoded value

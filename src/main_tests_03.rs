@@ -1461,8 +1461,119 @@
         finish_single_object_file(version, 83, &nodes, &strings, &payload, 42)
     }
 
-    fn make_streamed_audio_clip_file(
-        stream_path: &str,
+    /// Build an `AudioClip` file whose TypeTree and payload match the **production** class-83
+    /// layout at 3.5.0f1, which the asset factory prefers over a file TypeTree.
+    ///
+    /// The older hand-written builders above place `m_AudioData` directly after `m_Name`, which
+    /// suits the synthetic test layout source but not production: the reference class-83 record
+    /// has `m_Format`, `m_Type`, `m_3D`, `m_UseHardware` and `m_Stream` before `m_AudioData`, so
+    /// a fixture written for the short shape decodes with every field misaligned. This builder
+    /// mirrors the production node list in order.
+    pub(super) fn make_generated_audio_clip_file(data: &[u8]) -> Vec<u8> {
+        let mut strings = Vec::new();
+        let clip_type = push_type_tree_string(&mut strings, "AudioClip");
+        let empty_name = push_type_tree_string(&mut strings, "");
+        let string_type = push_type_tree_string(&mut strings, "string");
+        let name_field = push_type_tree_string(&mut strings, "m_Name");
+        let array_type = push_type_tree_string(&mut strings, "Array");
+        let sint32_type = push_type_tree_string(&mut strings, "SInt32");
+        let size_field = push_type_tree_string(&mut strings, "size");
+        let char_type = push_type_tree_string(&mut strings, "char");
+        let data_field = push_type_tree_string(&mut strings, "data");
+        let format_field = push_type_tree_string(&mut strings, "m_Format");
+        let type_field = push_type_tree_string(&mut strings, "m_Type");
+        let three_d_field = push_type_tree_string(&mut strings, "m_3D");
+        let bool_type = push_type_tree_string(&mut strings, "bool");
+        let use_hardware_field = push_type_tree_string(&mut strings, "m_UseHardware");
+        let int_type = push_type_tree_string(&mut strings, "int");
+        let stream_field = push_type_tree_string(&mut strings, "m_Stream");
+        let vector_type = push_type_tree_string(&mut strings, "vector");
+        let audio_data_field = push_type_tree_string(&mut strings, "m_AudioData");
+        let uint8_type = push_type_tree_string(&mut strings, "UInt8");
+
+        let mut nodes = Vec::new();
+        nodes.push((0, clip_type, empty_name, -1));
+        let table = StringTreeTable {
+            string_type,
+            array_type,
+            int_type,
+            size_field,
+            char_type,
+            data_field,
+        };
+        string_tree_nodes(&mut nodes, 1, &table, name_field);
+        nodes.push((1, sint32_type, format_field, 4));
+        nodes.push((1, sint32_type, type_field, 4));
+        nodes.push((1, bool_type, three_d_field, 1));
+        nodes.push((1, bool_type, use_hardware_field, 1));
+        nodes.push((1, int_type, stream_field, 4));
+        nodes.push((1, vector_type, audio_data_field, -1));
+        nodes.push((2, array_type, empty_name, -1));
+        nodes.push((3, sint32_type, size_field, 4));
+        nodes.push((3, uint8_type, data_field, 1));
+
+        let mut payload = Vec::new();
+        put_typetree_string_value(&mut payload, "TestClip");
+        put_i32_le(&mut payload, 0); // m_Format
+        // `m_Type` is an FMOD sound type; the decoder maps it to a raw extension. A value is
+        // present in the reference layout, so it must be written here too.
+        put_i32_le(&mut payload, 1); // m_Type
+        payload.push(0); // m_3D
+        payload.push(0); // m_UseHardware
+        // The reader aligns an `int` after the bool run, so `m_Stream` starts on a word.
+        while !payload.len().is_multiple_of(4) {
+            payload.push(0);
+        }
+        put_i32_le(&mut payload, 0); // m_Stream
+        put_i32_le(&mut payload, i32::try_from(data.len()).unwrap()); // m_AudioData count
+        payload.extend_from_slice(data);
+        let padding = (4 - payload.len() % 4) % 4;
+        payload.resize(payload.len() + padding, 0);
+        finish_single_object_file(b"3.5.0f1\0", 83, &nodes, &strings, &payload, 42)
+    }
+
+    #[test]
+    fn generated_audio_clip_layout_decodes_under_production_layouts() {
+        use crate::{load_object_workspace, load_workspace_from_vfs};
+        use assetripper::io::dependency::DependencyFilePath;
+        use assetripper::io::filesystem::VirtualFileSystem;
+        use assetripper::serialized_file::object_workspace::ObjectWorkspaceLimits;
+        use assetripper::serialized_file::workspace::SerializedFileWorkspaceLimits;
+
+        let _production = crate::SourceFactoryLayoutGuard::use_source_factory();
+        let bytes = make_generated_audio_clip_file(b"OggS-fake-payload");
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem.create_directory(Some("/game")).unwrap();
+        filesystem
+            .write_all_bytes("/game/audio.assets", &bytes)
+            .unwrap();
+        let input = DependencyFilePath {
+            file_name: "audio.assets".to_owned(),
+            virtual_path: "/game/audio.assets".to_owned(),
+        };
+        let workspace = load_workspace_from_vfs(
+            &filesystem,
+            &[input],
+            SerializedFileWorkspaceLimits::default(),
+        )
+        .expect("the workspace loads");
+        let objects = load_object_workspace(&filesystem, &workspace, ObjectWorkspaceLimits::default())
+            .expect("the object workspace loads");
+        let object = objects.get(0, 0).expect("the clip exists");
+        let payload = object
+            .payload
+            .as_ref()
+            .unwrap_or_else(|error| panic!("the clip must decode: {error}"));
+        let view = assetripper::resources::audio::AudioClipView::from_value(&payload.root)
+            .expect("the clip exposes audio fields");
+        assert_eq!(
+            view.audio_data.as_deref(),
+            Some(b"OggS-fake-payload".as_slice())
+        );
+        assert_eq!(view.sound_type, Some(1));
+    }
+
+    fn make_streamed_audio_clip_file(        stream_path: &str,
         stream_offset: u64,
         stream_size: u32,
     ) -> Vec<u8> {

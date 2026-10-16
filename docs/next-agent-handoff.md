@@ -1,5 +1,27 @@
 # RustAssetRipper hand-off — 2026-10-16
 
+## Latest current checkpoint - 2026-10-16 (audio tab + route, Development tab)
+
+- `PRODUCT-ASSET-AUDIO-TAB-001` is 已验证 and the Development tab is added. Route
+  `/Assets/Audio` reuses `try_decode_audio` + `convert_ogg_to_wav_with_limit`; streamed clips
+  read through `resolve_and_read_streamed_resource_range` (64-bit offset/size).
+- **Fixture trap to remember:** the production class-83 layout at 3.5.0f1 is
+  `m_Name, m_Format, m_Type, m_3D, m_UseHardware, m_Stream, m_AudioData` - `m_AudioData` is NOT
+  directly after `m_Name`. `make_audio_clip_file` writes the short shape and only decodes under
+  the synthetic layout source. Use `make_generated_audio_clip_file` for anything that runs under
+  production layouts, and remember the reader aligns an `int` after a bool run.
+- The e2e fixture set is now six inputs; root collections order as
+  `z-audio, z-textasset, z-texture, z-unknown`, so collection indexes are 0/1/2/3. Keep the
+  unknown-class view at `"I":3` and the texture view at `"I":2` when adding more.
+- Parity ledger: 400 rows, 375 verified, 25 non-verified, gate OPEN.
+- **Remaining tabs:** model (`/Assets/Model.glb`, gate `asset is IMesh`), font (`/Assets/Font`,
+  gate `asset is IFont` with readable data), video (`/Assets/Video`, gate `asset is IVideoClip`).
+  Then the frozen `ViewPage` tab list is complete. After that: `/Scenes/View` extras,
+  `/FailedFiles/Stack`, and `/Export/PrimaryContent`.
+- Do not run rustfmt on `src/main_tests_01.rs` or `src/main_tests_03.rs` (neither is clean at
+  HEAD; whole-file runs reformat hundreds of unrelated lines).
+- Verified: 1830 library + 196 bin tests, 0 failed; warnings-denied Clippy exit 0.
+
 ## Latest current checkpoint - 2026-10-16 (YAML tab + route)
 
 - `PRODUCT-ASSET-YAML-TAB-001` is 已验证. `render_asset_yaml` in `src/web/state.rs` reuses the

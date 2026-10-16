@@ -1,5 +1,42 @@
 # Validation log
 
+## 2026-10-16 - Audio tab and route, and the Development tab (PRODUCT-ASSET-AUDIO-TAB-001)
+
+- Outcome: the audio tab and `/Assets/Audio` are landed and verified, and the Development tab
+  (the last of the frozen tab list, needing no route) is added. `has_audio` mirrors the frozen
+  type test `asset is IAudioClip`.
+- The audio route reuses machinery the port already had rather than adding a decoder:
+  `try_decode_audio` (`AudioClipDecoder.TryDecode`), `convert_ogg_to_wav_with_limit`
+  (`AudioConverter.OggToWav`), and `converts_ogg_to_wav` for the `Extension=wav` decision.
+  Reading the clip follows `AudioClipExtensions.GetAudioData`: nonempty inline bytes first, then
+  the streamed resource. The streamed path uses `resolve_and_read_streamed_resource_range`
+  because `AudioClip.m_Resource` carries 64-bit offset and size, unlike `StreamingInfo`.
+  Failure replies match the frozen route (`Audio data could not be decoded.`,
+  `Asset was not an audio clip.`).
+- **The substantive finding is a fixture trap worth recording.** The first fixture attempt used
+  the existing `make_audio_clip_file`, which this repo's synthetic layout source accepts. Under
+  production layouts the same bytes fail because the reference class-83 record for 3.5.0f1 has
+  `m_Name, m_Format, m_Type, m_3D, m_UseHardware, m_Stream, m_AudioData` - `m_AudioData` comes
+  *after* five other fields, not directly after `m_Name`. Dumping the production tree confirmed
+  it. That is the same class of mistake as the texture fixture: a file TypeTree ordering that
+  only the synthetic source agrees with.
+- Second detail the fix needed: the reader aligns an `int` after a run of `bool`s, so `m_Stream`
+  starts on a word boundary. Writing the two bools back-to-back with `m_Stream` produced
+  `m_AudioData array count 1733230592` - the fixture's own `OggS` bytes read two bytes late.
+- Added `make_generated_audio_clip_file` (production class-83 layout) plus
+  `generated_audio_clip_layout_decodes_under_production_layouts`, which pins the layout
+  independent of the web layer. The older shared builder is untouched, since many passing tests
+  depend on its short shape.
+- Also added: the Development tab (a one-row table naming the resolved class), and the e2e
+  fixture set grew to six inputs, shifting root collection order to
+  `z-audio, z-textasset, z-texture, z-unknown`.
+- Evidence: `cargo test --locked --workspace` - 1830 library + 196 bin tests, 0 failed, 1
+  ignored. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0. Parity:
+  new row `PRODUCT-ASSET-AUDIO-TAB-001` 已验证; `parity-report.ps1` reports TOTAL=400,
+  RECOGNIZED=400, NONVERIFIED=25, GATE=OPEN, DUPES=0, MALFORMED=0.
+- Note: `src/main_tests_03.rs` is not rustfmt-clean at HEAD, like `main_tests_01.rs`; it was
+  edited by hand and left unformatted.
+
 ## 2026-10-16 - YAML tab and route: the standalone Unity YAML document (PRODUCT-ASSET-YAML-TAB-001)
 
 - Outcome: the YAML tab is landed and verified. Like the JSON tab it is enabled for every asset

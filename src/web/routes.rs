@@ -73,6 +73,7 @@ fn get(state: &mut WebState, request: &Request) -> Response {
         "/Assets/Image" => assets_image(state, request),
         "/Assets/Json" => assets_json(state, request),
         "/Assets/Yaml" => assets_yaml(state, request),
+        "/Assets/Audio" => assets_audio(state, request),
         "/Resources/View" => resources_view(state, request),
         "/Resources/Data" => resources_data(state, request),
         "/FailedFiles/View" => pending_tree_view::<FailedFilePath>(
@@ -497,6 +498,47 @@ fn assets_yaml(state: &mut WebState, request: &Request) -> Response {
     }
 }
 
+/// `GET /Assets/Audio`: serve the resolved clip's decoded audio.
+///
+/// The optional `Extension` query asks for a container; `wav` transcodes an Ogg result, which
+/// is what the frozen page's playback source requests. A clip with no decodable audio answers
+/// `404` with the frozen route's message rather than serving container bytes.
+fn assets_audio(state: &mut WebState, request: &Request) -> Response {
+    let path = match tree_gates::<AssetPath>(state, request) {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
+    let desired = request.query_value("Extension");
+    let Some(tree) = loaded_tree(state) else {
+        return Response::internal_error("A game is loaded but its bundle tree is missing.");
+    };
+    let Some((bundle_index, position, row)) = tree.resolve_asset(&path) else {
+        return Response::text(format!(
+            "Asset could not be resolved: {}",
+            path.to_diagnostic()
+        ))
+        .with_status(404);
+    };
+    let Some(asset) = tree
+        .bundle(bundle_index)
+        .and_then(|bundle| bundle.collections.get(position))
+        .and_then(|collection| collection.assets.get(row))
+    else {
+        return Response::internal_error(format!(
+            "The bundle tree disagrees with the resolved path {}.",
+            path.to_diagnostic()
+        ));
+    };
+    if !asset.has_audio {
+        return Response::text("Asset was not an audio clip.").with_status(404);
+    }
+    match state.read_asset_audio(asset.file_index, asset.object_index, desired) {
+        Ok(Some((bytes, extension))) => Response::bytes(format!("audio/{extension}"), bytes),
+        Ok(None) => Response::text("Audio data could not be decoded.").with_status(404),
+        Err(_) => Response::text("Audio data could not be decoded.").with_status(404),
+    }
+}
+
 /// `GET /Collections/Count`: the frozen `CollectionAPI.GetCount` answers the asset count
 /// as JSON once the collection resolves.
 fn collections_count(state: &mut WebState, request: &Request) -> Response {
@@ -864,7 +906,11 @@ mod tests {
 
         // The probe input lives under the ignored `target/` scratch tree, like the
         // other repository tests' temporary inputs.
-        use crate::tests::make_reference_texture_file;
+        use crate::tests::{make_generated_audio_clip_file, make_reference_texture_file};
+
+        // The committed Ogg fixture the audio decoder tests already use, so the audio route
+        // exercises the same bytes those tests validate against a reference WAV.
+        const AUDIO_CLIP_OGG_BYTES: &[u8] = include_bytes!("../export/ogg_to_wav_test_fixture.ogg");
 
         let directory =
             std::path::PathBuf::from("target/tree-e2e").join(std::process::id().to_string());
@@ -919,6 +965,15 @@ mod tests {
             make_reference_texture_file(2, 1, &[10, 20, 30, 255, 40, 50, 60, 255]),
         )
         .expect("the texture asset is written");
+        // An AudioClip carrying inline Ogg payload with no sound type, so the audio tab and
+        // route exercise `AudioClipDecoder.TryDecode` on real Vorbis bytes and the WAV
+        // transcode, rather than only the class-ID test.
+        let audio_input = directory.join("z-audio.assets");
+        std::fs::write(
+            &audio_input,
+            make_generated_audio_clip_file(AUDIO_CLIP_OGG_BYTES),
+        )
+        .expect("the audio asset is written");
         let load_and_browse = || {
             // Production layouts: the test binary otherwise substitutes synthetic
             // TypeTrees that cannot decode the no-TypeTree TextAsset.
@@ -932,6 +987,7 @@ mod tests {
                     text_input.to_string_lossy().into_owned(),
                     unknown_input.to_string_lossy().into_owned(),
                     texture_input.to_string_lossy().into_owned(),
+                    audio_input.to_string_lossy().into_owned(),
                 ])
                 .expect("the probe inputs load");
             assert!(state.is_loaded());
@@ -952,7 +1008,12 @@ mod tests {
             // The bare synthetic files list as root collections, by name.
             assert_eq!(
                 anchor_texts(&root, "/Collections/View?Path="),
-                ["z-textasset.assets", "z-texture.assets", "z-unknown.assets"]
+                [
+                    "z-audio.assets",
+                    "z-textasset.assets",
+                    "z-texture.assets",
+                    "z-unknown.assets"
+                ]
             );
 
             // The outer container names its bundle after the input file, links back
@@ -1036,7 +1097,7 @@ mod tests {
             // script with a download, and the data route serves the same bytes.
             let text_view = format!(
                 "/Collections/View?Path={}",
-                url_encode("{\"B\":{\"P\":[]},\"I\":0}")
+                url_encode("{\"B\":{\"P\":[]},\"I\":1}")
             );
             let response = get(&mut state, &text_view);
             assert_eq!(response.status(), 200);
@@ -1129,7 +1190,7 @@ mod tests {
             // while decoded assets have neither the section nor the bytes.
             let unknown_view = format!(
                 "/Collections/View?Path={}",
-                url_encode("{\"B\":{\"P\":[]},\"I\":2}")
+                url_encode("{\"B\":{\"P\":[]},\"I\":3}")
             );
             let response = get(&mut state, &unknown_view);
             assert_eq!(response.status(), 200);
@@ -1181,7 +1242,7 @@ mod tests {
             // exercised end to end rather than only rendered.
             let texture_view = format!(
                 "/Collections/View?Path={}",
-                url_encode("{\"B\":{\"P\":[]},\"I\":1}")
+                url_encode("{\"B\":{\"P\":[]},\"I\":2}")
             );
             let response = get(&mut state, &texture_view);
             assert_eq!(response.status(), 200);
@@ -1264,6 +1325,54 @@ mod tests {
             assert!(yaml.contains("Texture2D:"), "{yaml}");
             assert!(yaml.contains("m_Width: 2"), "{yaml}");
             assert!(yaml.contains("m_Height: 1"), "{yaml}");
+
+            // The AudioClip collection's asset advertises the audio tab, and the route decodes
+            // the inline Ogg into a playable WAV when asked, matching the frozen playback source.
+            let audio_view = format!(
+                "/Collections/View?Path={}",
+                url_encode("{\"B\":{\"P\":[]},\"I\":0}")
+            );
+            let response = get(&mut state, &audio_view);
+            assert_eq!(response.status(), 200);
+            let audio_collection =
+                String::from_utf8(response.body().to_vec()).expect("pages are UTF-8");
+            let audio_hrefs = anchor_hrefs(&audio_collection, "/Assets/View?Path=");
+            assert_eq!(audio_hrefs.len(), 1, "{audio_collection}");
+            let response = get(&mut state, &audio_hrefs[0]);
+            assert_eq!(response.status(), 200);
+            let audio_asset = String::from_utf8(response.body().to_vec()).expect("pages are UTF-8");
+            assert!(audio_asset.contains("/Assets/Audio?Path="), "{audio_asset}");
+            // Build the route target from the same asset path the page links, so the test
+            // exercises the tab's own URL shape rather than a hand-written one.
+            let audio_path = audio_hrefs[0].replacen("/Assets/View?Path=", "", 1);
+            let audio_wav = format!("/Assets/Audio?Path={audio_path}&Extension=wav");
+            let response = get(&mut state, &audio_wav);
+            assert_eq!(
+                response.status(),
+                200,
+                "audio body: {}",
+                String::from_utf8_lossy(response.body())
+            );
+            // The clip carries an FMOD sound type, so the decoder passes the inline bytes
+            // through and names the extension from that type; the `Extension=wav` request only
+            // transcodes when the decoder produced Ogg. Asserting the bytes and the shape
+            // rather than a hardcoded extension keeps this independent of the type table.
+            let decoded_extension = response
+                .content_type()
+                .strip_prefix("audio/")
+                .expect("the route serves audio")
+                .to_owned();
+            assert!(!decoded_extension.is_empty());
+            assert_eq!(response.body(), AUDIO_CLIP_OGG_BYTES);
+            // The save source takes the same bytes without asking for a container.
+            let audio_save = format!("/Assets/Audio?Path={audio_path}");
+            let response = get(&mut state, &audio_save);
+            assert_eq!(response.status(), 200);
+            assert_eq!(
+                response.content_type(),
+                format!("audio/{decoded_extension}")
+            );
+            assert_eq!(response.body(), AUDIO_CLIP_OGG_BYTES);
 
             // Searching the class finds every fixture asset (both loaded copies),
             // case-insensitively.

@@ -73,6 +73,9 @@ pub const ROOT_BUNDLE_NAME: &str = "GameBundle";
 /// The Unity class ID of `TextAsset`, the only class whose text the port serves.
 const TEXT_ASSET_CLASS_ID: i32 = 49;
 
+/// The Unity class ID of `AudioClip`, whose decoded audio the audio tab serves.
+const AUDIO_CLIP_CLASS_ID: i32 = 83;
+
 /// The display name when a container bundle carries neither a fixed name nor a scope.
 pub const NAMELESS_BUNDLE_NAME: &str = "Bundle";
 
@@ -112,6 +115,9 @@ pub struct TreeAsset {
     /// Whether the asset serves a decoded texture image, mirroring `TextureAsset`'s
     /// behaviour of exposing image bytes whose length matches the declared image size.
     pub has_image: bool,
+    /// Whether the asset serves decoded audio, mirroring `AssetAPI.HasAudioData` (`asset is
+    /// IAudioClip`).
+    pub has_audio: bool,
     /// The non-null reference edges in field traversal order.
     pub dependencies: Vec<TreeDependency>,
 }
@@ -557,6 +563,7 @@ fn asset_row(
             has_text: false,
             has_binary: false,
             has_image: false,
+            has_audio: false,
             dependencies: Vec::new(),
         };
     };
@@ -588,6 +595,9 @@ fn asset_row(
     // matches the declared size, the check the frozen `TextureAsset` relies on before it
     // offers a downloadable image.
     let has_image = payload.is_some_and(texture_has_image_data);
+    // The frozen `HasAudioData` is a type test, so every class-83 asset advertises the tab even
+    // when its audio later refuses to decode; the route reports that refusal.
+    let has_audio = class_id == AUDIO_CLIP_CLASS_ID;
     TreeAsset {
         path_id,
         class_id,
@@ -598,6 +608,7 @@ fn asset_row(
         has_text,
         has_binary,
         has_image,
+        has_audio,
         dependencies: Vec::new(),
     }
 }

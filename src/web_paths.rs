@@ -475,6 +475,18 @@ pub fn asset_yaml_url(path: &AssetPath) -> String {
     format!("/Assets/Yaml?Path={}", url_encode(&path.to_json()))
 }
 
+/// The audio URL the frozen `AssetAPI.GetAudioUrl` builds for `path`.
+///
+/// The frozen builder appends an `Extension` parameter only when the caller supplies one, so
+/// the playback source asks for `wav` while the save button takes the decoder's own format.
+pub fn asset_audio_url(path: &AssetPath, extension: Option<&str>) -> String {
+    let base = format!("/Assets/Audio?Path={}", url_encode(&path.to_json()));
+    match extension {
+        Some(extension) => format!("{base}&Extension={}", url_encode(extension)),
+        None => base,
+    }
+}
+
 /// The image URL the frozen `AssetAPI.GetImageUrl` builds for `path`.
 ///
 /// The frozen builder appends an `Extension` parameter when the caller supplies one, and

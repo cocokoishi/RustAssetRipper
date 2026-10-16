@@ -822,6 +822,31 @@ pub fn asset_page(
         inner.raw("</div>");
     }
 
+    if asset.has_audio {
+        // The frozen audio tab renders a player plus a save button: the playback source asks for
+        // WAV so any browser can play it, while the save source takes the decoder's own format.
+        use assetripper::web_paths::asset_audio_url;
+
+        inner.element("h2", &[], &t(state, "asset_tab_audio"));
+        let playback_url = asset_audio_url(path, Some("wav"));
+        inner.raw("<div class=\"text-center\">");
+        inner.raw(&format!(
+            "<audio controls=\"\" src=\"{}\" style=\"width:100%\"></audio>",
+            super::html::escape(&playback_url)
+        ));
+        inner.raw("</div>");
+        let save_url = asset_audio_url(path, None);
+        // The save name uses the decoded extension when the clip decodes, else `.ogg` is a
+        // reasonable placeholder that the route itself never confirms.
+        let file_name = match state.read_asset_audio(asset.file_index, asset.object_index, None) {
+            Ok(Some((_bytes, extension))) => format!("{}.{extension}", asset.best_name),
+            _ => format!("{}.ogg", asset.best_name),
+        };
+        inner.raw("<div class=\"text-center\">");
+        save_button(&mut inner, state, &save_url, &file_name);
+        inner.raw("</div>");
+    }
+
     if asset.has_image {
         // The frozen image tab shows the texture with a download button. Without client
         // code the port points the preview straight at the image route, so the browser
@@ -875,6 +900,19 @@ pub fn asset_page(
         save_button(&mut inner, state, &asset_yaml_url(path), &file_name);
         inner.raw("</div>");
     }
+
+    // The Development tab is the last in the frozen page and needs no route: it is a one-row
+    // table naming the C# type the reference built for the asset. The port's closest equivalent
+    // is the decoded class name the factory resolved, since that is the type the port created.
+    inner.element("h2", &[], &t(state, "asset_tab_development"));
+    inner.open("table", &[("class", "table")]);
+    inner.open("tbody", &[]);
+    inner.open("tr", &[]);
+    inner.element("th", &[], &t(state, "csharp_type"));
+    inner.element("td", &[], &asset.class_name);
+    inner.close("tr");
+    inner.close("tbody");
+    inner.close("table");
 
     Some(layout(state, &asset.best_name, inner.as_str()))
 }
@@ -1485,6 +1523,7 @@ mod tests {
                             has_text: false,
                             has_binary: false,
                             has_image: false,
+                            has_audio: false,
                             dependencies: Vec::new(),
                         },
                     }],
