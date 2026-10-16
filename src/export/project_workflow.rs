@@ -574,6 +574,8 @@ use self::scriptable_object_groups::*;
 use self::terrain_collections::{prepare_terrain_collections, PreparedTerrainCollections};
 use self::workspace_identity::*;
 
+/// The decoded TextAsset script helper, shared with the web asset pages.
+pub use self::asset_support::text_asset_script_bytes;
 pub use self::entrypoints::{
     export_workspace_yaml_project, export_workspace_yaml_project_with_script_manager,
     export_workspace_yaml_project_with_settings,

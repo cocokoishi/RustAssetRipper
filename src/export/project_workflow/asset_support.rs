@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn text_asset_script_bytes(
+pub fn text_asset_script_bytes(
     payload: &ParsedObjectPayload,
 ) -> Result<Option<Vec<u8>>, Box<dyn Error>> {
     let script = payload

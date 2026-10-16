@@ -67,6 +67,7 @@ fn get(state: &mut WebState, request: &Request) -> Response {
         "/Collections/View" => collections_view(state, request),
         "/Collections/Count" => collections_count(state, request),
         "/Assets/View" => assets_view(state, request),
+        "/Assets/Text" => assets_text(state, request),
         "/Resources/View" => resources_view(state, request),
         "/Resources/Data" => resources_data(state, request),
         "/FailedFiles/View" => pending_tree_view::<FailedFilePath>(
@@ -292,6 +293,48 @@ fn assets_view(state: &mut WebState, request: &Request) -> Response {
             "The bundle tree disagrees with the resolved path {}.",
             path.to_diagnostic()
         )),
+    }
+}
+
+/// `GET /Assets/Text`: serve the resolved asset's text.
+///
+/// Only TextAsset scripts are served; every other asset reads as no text, matching the
+/// frozen route's empty reply for assets without text.
+fn assets_text(state: &mut WebState, request: &Request) -> Response {
+    let path = match tree_gates::<AssetPath>(state, request) {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
+    let Some(tree) = loaded_tree(state) else {
+        return Response::internal_error("A game is loaded but its bundle tree is missing.");
+    };
+    let Some((bundle_index, position, row)) = tree.resolve_asset(&path) else {
+        return Response::text(format!(
+            "Asset could not be resolved: {}",
+            path.to_diagnostic()
+        ))
+        .with_status(404);
+    };
+    let Some(asset) = tree
+        .bundle(bundle_index)
+        .and_then(|bundle| bundle.collections.get(position))
+        .and_then(|collection| collection.assets.get(row))
+    else {
+        return Response::internal_error(format!(
+            "The bundle tree disagrees with the resolved path {}.",
+            path.to_diagnostic()
+        ));
+    };
+    if !asset.has_text {
+        return Response::text("");
+    }
+    match state.read_asset_text(asset.file_index, asset.object_index) {
+        Ok(script) => Response::text(
+            script
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .unwrap_or_default(),
+        ),
+        Err(diagnostic) => Response::internal_error(diagnostic),
     }
 }
 
@@ -683,13 +726,33 @@ mod tests {
         let probe_resource = directory.join("probe.resS");
         std::fs::write(&probe_resource, PROBE_RESOURCE_BYTES)
             .expect("the probe resource is written");
+        // A synthetic TextAsset file proves the text routes; the committed
+        // source-factory fixture carries the complete 2019.4 no-TypeTree file.
+        let text_hex = assetripper::processing::asset_factory::PROBE_FIXTURE
+            .lines()
+            .find_map(|line| line.strip_prefix("SF_HEX|textasset_notree|"))
+            .expect("the source-factory fixture includes the no-TypeTree TextAsset");
+        let text_bytes = text_hex
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                u8::from_str_radix(std::str::from_utf8(pair).expect("hex is ASCII"), 16)
+                    .expect("hex is valid")
+            })
+            .collect::<Vec<_>>();
+        let text_input = directory.join("z-textasset.assets");
+        std::fs::write(&text_input, &text_bytes).expect("the probe text asset is written");
         let load_and_browse = || {
+            // Production layouts: the test binary otherwise substitutes synthetic
+            // TypeTrees that cannot decode the no-TypeTree TextAsset.
+            let _layouts = crate::SourceFactoryLayoutGuard::use_source_factory();
             let mut state = state();
             state
                 .load(&[
                     input.to_string_lossy().into_owned(),
                     early_input.to_string_lossy().into_owned(),
                     probe_resource.to_string_lossy().into_owned(),
+                    text_input.to_string_lossy().into_owned(),
                 ])
                 .expect("the probe inputs load");
             assert!(state.is_loaded());
@@ -707,7 +770,11 @@ mod tests {
                 anchor_texts(&root, "/Bundles/View?Path="),
                 ["a-workspace.bundle", "workspace.bundle"]
             );
-            assert!(!root.contains("Collections</h2>"));
+            // The bare TextAsset file lists as a root collection.
+            assert_eq!(
+                anchor_texts(&root, "/Collections/View?Path="),
+                ["z-textasset.assets"]
+            );
 
             // The outer container names its bundle after the input file, links back
             // to the root, and holds one child bundle plus one collection.
@@ -786,6 +853,33 @@ mod tests {
                 b"Resource file could not be resolved: ResourcePath { BundlePath = {\"P\":[]}, Index = 9 }"
             );
 
+            // The TextAsset collection renders one row; its page inlines the
+            // script with a download, and the data route serves the same bytes.
+            let text_view = format!(
+                "/Collections/View?Path={}",
+                url_encode("{\"B\":{\"P\":[]},\"I\":0}")
+            );
+            let response = get(&mut state, &text_view);
+            assert_eq!(response.status(), 200);
+            let text_collection =
+                String::from_utf8(response.body().to_vec()).expect("pages are UTF-8");
+            assert!(text_collection.contains(">Hero<"), "{text_collection}");
+            assert!(text_collection.contains("TextAsset"), "{text_collection}");
+            let text_hrefs = anchor_hrefs(&text_collection, "/Assets/View?Path=");
+            assert_eq!(text_hrefs.len(), 1);
+            let response = get(&mut state, &text_hrefs[0]);
+            assert_eq!(response.status(), 200);
+            let text_asset = String::from_utf8(response.body().to_vec()).expect("pages are UTF-8");
+            assert!(text_asset.contains("<h1>Hero</h1>"), "{text_asset}");
+            assert!(text_asset.contains("<pre"), "{text_asset}");
+            assert!(text_asset.contains("print(1)"), "{text_asset}");
+            assert!(text_asset.contains("download=\"Hero.txt\""), "{text_asset}");
+            let text_data = text_hrefs[0].replacen("/Assets/View?Path=", "/Assets/Text?Path=", 1);
+            let response = get(&mut state, &text_data);
+            assert_eq!(response.status(), 200);
+            assert_eq!(response.content_type(), "text/plain; charset=utf-8");
+            assert_eq!(response.body(), b"print(1)");
+
             // A resolved collection renders its asset table with links.
             let view = format!(
                 "/Collections/View?Path={}",
@@ -843,6 +937,14 @@ mod tests {
             let nested_asset =
                 String::from_utf8(response.body().to_vec()).expect("pages are UTF-8");
             assert!(!nested_asset.contains(">Dependencies<"), "{nested_asset}");
+
+            // A MonoBehaviour has no text section and reads as empty text.
+            assert!(!asset.contains("/Assets/Text?Path="), "{asset}");
+            assert!(!asset.contains("print(1)"), "{asset}");
+            let mute_data = asset_hrefs[0].replacen("/Assets/View?Path=", "/Assets/Text?Path=", 1);
+            let response = get(&mut state, &mute_data);
+            assert_eq!(response.status(), 200);
+            assert!(response.body().is_empty());
             let missing_asset = format!(
                 "/Assets/View?Path={}",
                 url_encode("{\"C\":{\"B\":{\"P\":[0]},\"I\":0},\"D\":999999}")

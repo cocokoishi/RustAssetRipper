@@ -6328,3 +6328,32 @@ These results do not pass the first-phase gate. The reference .NET solution buil
   routes, `/FailedFiles/View` + `/StackTrace`, `/Scenes/View`, `/Export/PrimaryContent`.
   Unity Editor import/runtime and UABEA remain blocked (license/tooling), unchanged by
   this increment.
+## 2026-10-16 - Asset text served from TextAssets (`/Assets/Text` + tab section)
+
+- Scope: snapshot rows carry file/object indexes and a text flag (TextAsset with
+  non-empty script bytes); `GET /Assets/Text` serves the script bytes as text (empty
+  200 for anything else, matching the frozen route), and the asset page inlines the text
+  with a download button named by the settings-driven export extension. Shader and
+  MonoScript texts stay open (no fixture data; the export's dummy/decompile ports are
+  not wired here). No export-path behavior changes; no sample content touched.
+- Layout gotcha (recorded so the next web test does not rediscover it): the test binary
+  substitutes synthetic TypeTrees unless `crate::SourceFactoryLayoutGuard::
+  use_source_factory()` is held, which leaves no-TypeTree objects `Unreadable`. The
+  end-to-end holds the guard, so it exercises production layouts; a CLI export of the
+  identical four inputs confirmed the solo behavior first. This is test-harness-only and
+  changes no product code path.
+- Frozen reference: `Pages/Assets/` (`AssetAPI.TryGetText/HasText/GetTextUrl`, `TextTab`
+  with inline-pre-plus-save-button shape, `SaveButton`).
+- Commands run (worktree `main-work`, detached, HEAD == origin/main before this change):
+  1. The fixture end-to-end adds the committed synthetic 2019.4 no-TypeTree TextAsset
+     (`Hero`, `print(1)`): root collection listing, asset table row, page with inlined
+     text and `Hero.txt` download, byte-exact data route, plus the MonoBehaviour
+     no-section and empty-text negatives.
+  2. `cargo test --locked --workspace` - 1822 library + 194 bin tests, 0 failed, 1 ignored.
+  3. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+  4. `rustfmt --edition 2021 --check` on each touched file - clean; `git diff --check` -
+     exit 0.
+- Open after this increment: shader/MonoScript texts, the nine remaining asset tabs plus
+  the other `/Assets/*` data routes, `/FailedFiles/View` + `/StackTrace`, `/Scenes/View`,
+  `/Export/PrimaryContent`. Unity Editor import/runtime and UABEA remain blocked
+  (license/tooling), unchanged by this increment.

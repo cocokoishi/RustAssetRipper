@@ -455,6 +455,11 @@ pub fn asset_view_url(path: &AssetPath) -> String {
     format!("/Assets/View?Path={}", url_encode(&path.to_json()))
 }
 
+/// The text URL the frozen `AssetAPI.GetTextUrl` builds for `path`.
+pub fn asset_text_url(path: &AssetPath) -> String {
+    format!("/Assets/Text?Path={}", url_encode(&path.to_json()))
+}
+
 /// The view URL the frozen `ResourceAPI.GetViewUrl` builds for `path`.
 pub fn resource_view_url(path: &ResourcePath) -> String {
     format!("/Resources/View?Path={}", url_encode(&path.to_json()))
@@ -807,6 +812,16 @@ mod tests {
                 path_id: 7,
             }),
             "/Assets/View?Path=%7B%22C%22%3A%7B%22B%22%3A%7B%22P%22%3A%5B%5D%7D%2C%22I%22%3A0%7D%2C%22D%22%3A7%7D"
+        );
+        assert_eq!(
+            asset_text_url(&AssetPath {
+                collection: CollectionPath {
+                    bundle: BundlePath::root(),
+                    index: 0,
+                },
+                path_id: 7,
+            }),
+            "/Assets/Text?Path=%7B%22C%22%3A%7B%22B%22%3A%7B%22P%22%3A%5B%5D%7D%2C%22I%22%3A0%7D%2C%22D%22%3A7%7D"
         );
         assert_eq!(
             resource_view_url(&ResourcePath {

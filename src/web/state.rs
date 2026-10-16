@@ -170,6 +170,30 @@ impl WebState {
             .map_err(|error| error.to_string())
     }
 
+    /// Read one asset's served text, if it has any.
+    ///
+    /// Only TextAsset scripts are served: the frozen `HasText` also covers shaders and
+    /// MonoScripts, whose text ports are still open. Anything else reads as no text,
+    /// matching the frozen route's empty reply for assets without text.
+    pub fn read_asset_text(
+        &self,
+        file_index: usize,
+        object_index: usize,
+    ) -> Result<Option<Vec<u8>>, String> {
+        use assetripper::export::project_workflow::text_asset_script_bytes;
+
+        let game = self
+            .loaded
+            .as_ref()
+            .ok_or_else(|| "no game is loaded".to_owned())?;
+        let object = game
+            .objects
+            .get(file_index, object_index)
+            .ok_or_else(|| "the snapshot row has no workspace object".to_owned())?;
+        let payload = object.payload.as_ref().map_err(|error| error.to_string())?;
+        text_asset_script_bytes(payload).map_err(|error| error.to_string())
+    }
+
     /// The loaded game, when one is present.
     pub fn loaded(&self) -> Option<&LoadedGame> {
         self.loaded.as_ref()

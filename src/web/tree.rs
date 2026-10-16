@@ -34,7 +34,7 @@
 //!   reports it instead of dropping the entry silently.
 
 use assetripper::export::project_exporter::object_class_name;
-use assetripper::export::project_workflow::object_asset_name;
+use assetripper::export::project_workflow::{object_asset_name, text_asset_script_bytes};
 use assetripper::io::special_names::fix_file_identifier;
 use assetripper::serialized_file::object_workspace::ObjectWorkspace;
 use assetripper::serialized_file::reference_graph::{
@@ -68,6 +68,9 @@ impl std::error::Error for TreeError {}
 /// The name of the snapshot root, matching the frozen `GameBundle.Name`.
 pub const ROOT_BUNDLE_NAME: &str = "GameBundle";
 
+/// The Unity class ID of `TextAsset`, the only class whose text the port serves.
+const TEXT_ASSET_CLASS_ID: i32 = 49;
+
 /// The display name when a container bundle carries neither a fixed name nor a scope.
 pub const NAMELESS_BUNDLE_NAME: &str = "Bundle";
 
@@ -93,6 +96,13 @@ pub struct TreeAsset {
     pub class_name: String,
     /// The display name, mirroring `IUnityObjectBase.GetBestName`.
     pub best_name: String,
+    /// The workspace file index holding the object.
+    pub file_index: usize,
+    /// The object index within the file's object table.
+    pub object_index: usize,
+    /// Whether the asset serves text, mirroring `AssetAPI.HasText` for the ported
+    /// TextAsset case (non-empty script bytes).
+    pub has_text: bool,
     /// The non-null reference edges in field traversal order.
     pub dependencies: Vec<TreeDependency>,
 }
@@ -533,6 +543,9 @@ fn asset_row(
             class_id,
             class_name: class_name.clone(),
             best_name: class_name,
+            file_index,
+            object_index,
+            has_text: false,
             dependencies: Vec::new(),
         };
     };
@@ -546,11 +559,25 @@ fn asset_row(
             object.factory.name.clone()
         }
     });
+    // Only TextAsset scripts are served: the frozen `HasText` also covers shaders and
+    // MonoScripts, whose text ports are still open.
+    let has_text = class_id == TEXT_ASSET_CLASS_ID
+        && payload
+            .map(|value| {
+                text_asset_script_bytes(value)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|script| !script.is_empty())
+            })
+            .unwrap_or(false);
     TreeAsset {
         path_id,
         class_id,
         class_name,
         best_name,
+        file_index,
+        object_index,
+        has_text,
         dependencies: Vec::new(),
     }
 }

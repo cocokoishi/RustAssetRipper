@@ -782,6 +782,33 @@ pub fn asset_page(
         inner.close("table");
     }
 
+    if asset.has_text {
+        // The frozen text tab shows the asset text with a download button; without
+        // client code the port inlines the text instead of fetching it from the data
+        // route. Shader and MonoScript texts stay open, so only TextAsset rows qualify.
+        use assetripper::export::resource_extensions::text_export_extension;
+        use assetripper::web_paths::asset_text_url;
+
+        inner.element("h2", &[], &t(state, "asset_tab_text"));
+        let bytes = state
+            .read_asset_text(asset.file_index, asset.object_index)
+            .ok()
+            .flatten()
+            .filter(|script| !script.is_empty())?;
+        let text = String::from_utf8_lossy(&bytes);
+        inner.open("pre", &[("class", "bg-dark-subtle rounded-3 p-2")]);
+        inner.text(text.as_ref());
+        inner.close("pre");
+        let file_name = format!(
+            "{}.{}",
+            asset.best_name,
+            text_export_extension(None, state.settings().export.text_export_mode, &text)
+        );
+        inner.raw("<div class=\"text-center\">");
+        save_button(&mut inner, state, &asset_text_url(path), &file_name);
+        inner.raw("</div>");
+    }
+
     Some(layout(state, &asset.best_name, inner.as_str()))
 }
 
@@ -1386,6 +1413,9 @@ mod tests {
                             class_id: 114,
                             class_name: "MonoBehaviour".to_owned(),
                             best_name: "ManagedRoot".to_owned(),
+                            file_index: 0,
+                            object_index: 0,
+                            has_text: false,
                             dependencies: Vec::new(),
                         },
                     }],

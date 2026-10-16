@@ -1,5 +1,23 @@
 # RustAssetRipper hand-off — 2026-10-16
 
+## Latest current checkpoint - 2026-10-16 (asset text served from TextAssets)
+
+- Worktree: `main-work` detached; HEAD == origin/main before this slice. Snapshot rows
+  carry file/object indexes and a TextAsset text flag; `GET /Assets/Text` serves script
+  bytes (empty 200 otherwise) and the asset page inlines the text with a
+  settings-driven download name. Shader/MonoScript texts stay open.
+- Verification evidence: fixture end-to-end adds the synthetic TextAsset (`Hero`,
+  `print(1)`, `Hero.txt`) plus MonoBehaviour negatives; full `cargo test --locked
+  --workspace` **1822 lib + 194 bin, 0 failed**, 1 ignored; Clippy `-D warnings` exit 0;
+  per-file rustfmt and `git diff --check` clean. Full evidence in `docs/validation-log.md`.
+- Gotcha recorded: the test binary substitutes synthetic TypeTrees unless the
+  `SourceFactoryLayoutGuard` is held — the end-to-end holds it (production layouts).
+- Privacy: no sample content/paths/names in code, tests, docs or commit text. Mapping table
+  stays outside the repo; history untouched.
+- Next move: shader/MonoScript texts, nine remaining asset tabs plus the other
+  `/Assets/*` data routes, `/FailedFiles/*`, `/Scenes/View`, `/Export/PrimaryContent`;
+  then continue down the ledger.
+
 ## Latest current checkpoint - 2026-10-16 (`PRODUCT-I18N-001` closed, gate 26 to 25)
 
 - Worktree: `main-work` detached; HEAD == origin/main before this slice. Full re-audit of
