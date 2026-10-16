@@ -1,5 +1,41 @@
 # Validation log
 
+## 2026-10-16 - Font tab and route (PRODUCT-ASSET-FONT-TAB-001)
+
+- Outcome: the font tab and `/Assets/Font` are landed and verified. `has_font` mirrors the
+  frozen `HasFontData`, which is the class-128 type test **and** a successful read.
+- The magic table is ported exactly as the frozen `TryGetFontData` writes it, in
+  `font_extension_and_mime`: `OTTO` -> `font/otf`, `00 01 00 00` -> `font/ttf`,
+  `ttcf` -> `font/collection`, everything else -> `dat` with `application/octet-stream`.
+  Two details are worth recording because they are easy to "fix" wrongly:
+  - `ttcf` is recognized by the route but **not** by `FontExtensions.GetFontExtension`, which
+    only knows `OTTO` and otherwise says `ttf`. The route's table is the authority for the tab.
+  - The generic fallback means the route **succeeds** for data it cannot name. That is the
+    frozen behaviour, not a silent degradation, and it is why `has_font` uses the same table as
+    the route rather than the narrower `font_extension` helper.
+  - Data shorter than four bytes is "no font data", matching the frozen `Length: >= 4` test.
+- **Fixture finding, the third instance of one pattern.** The first fixture wrote only `m_Name`
+  and `m_FontData` and decoded as `UnreadableFont_*` under production layouts. The production
+  class-128 record at 3.5.0f1 puts thirteen fields before `m_FontData`
+  (`m_AsciiStartOffset`, `m_FontCountX`, `m_FontCountY`, `m_Kerning`, `m_LineSpacing`,
+  `m_PerCharacterKerning`, `m_ConvertCase`, `m_DefaultMaterial`, `m_CharacterRects`,
+  `m_Texture`, `m_KerningValues`, `m_GridFont`) and four after it (`m_FontSize`, `m_Ascent`,
+  `m_DefaultStyle`, `m_FontNames`). A tree that stops at `m_FontData` fails later at
+  `m_FontSize` with "truncated input (requested 4 bytes, 0 remain)" - the reader walks the whole
+  production node list, so an omitted tail is a hard error rather than an unused extra.
+- The recurring pattern across texture, audio and font: **a hand-written fixture whose field
+  order or field set only the synthetic test layout agrees with**. The fix each time is to read
+  the production tree from `reference_class_layouts().tpk_trees` and mirror it, and to pin the
+  result with a focused test that runs under
+  `SourceFactoryLayoutGuard::use_source_factory()` so the web layer is not the only witness.
+- Also refactored: `read_asset_font` returns a named `FontData` struct instead of a three-tuple,
+  keeping the signature readable.
+- The e2e fixture set grew to seven inputs; root collections now order as
+  `z-audio, z-font, z-textasset, z-texture, z-unknown` (indexes 0-4).
+- Evidence: `cargo test --locked --workspace` - 1830 library + 197 bin tests, 0 failed, 1
+  ignored. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0. Parity:
+  new row `PRODUCT-ASSET-FONT-TAB-001` 已验证.
+
 ## 2026-10-16 - Audio tab and route, and the Development tab (PRODUCT-ASSET-AUDIO-TAB-001)
 
 - Outcome: the audio tab and `/Assets/Audio` are landed and verified, and the Development tab

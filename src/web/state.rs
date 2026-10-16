@@ -62,6 +62,17 @@ pub struct WebState {
     static_content: Vec<(String, Vec<u8>)>,
 }
 
+/// A font asset's binary data with the extension and MIME the frozen route reports.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FontData {
+    /// The font's `m_FontData` bytes.
+    pub bytes: Vec<u8>,
+    /// The sniffed container extension (`otf`, `ttf`, `ttc`, or `dat`).
+    pub extension: &'static str,
+    /// The MIME type paired with `extension`.
+    pub mime: &'static str,
+}
+
 impl WebState {
     /// Load the settings record and the message tables the way the baseline launcher does.
     ///
@@ -294,6 +305,40 @@ impl WebState {
             assetripper::resource::StreamedResourceContentResolution::Missing { .. }
             | assetripper::resource::StreamedResourceContentResolution::Unset => None,
         })
+    }
+
+    /// Read one font asset's binary data with the extension and MIME the frozen route reports.
+    ///
+    /// Mirrors `AssetAPI.TryGetFontData`: the payload's `m_FontData` is read, and the first four
+    /// bytes select the extension and MIME. Data shorter than four bytes counts as no font data.
+    pub fn read_asset_font(
+        &self,
+        file_index: usize,
+        object_index: usize,
+    ) -> Result<Option<FontData>, String> {
+        use assetripper::export::resource_extensions::{font_data_bytes, font_extension_and_mime};
+
+        let game = self
+            .loaded
+            .as_ref()
+            .ok_or_else(|| "no game is loaded".to_owned())?;
+        let object = game
+            .objects
+            .get(file_index, object_index)
+            .ok_or_else(|| "the snapshot row has no workspace object".to_owned())?;
+        let Ok(payload) = object.payload.as_ref() else {
+            return Ok(None);
+        };
+        let Some(data) = font_data_bytes(&payload.root).map_err(|error| error.to_string())? else {
+            return Ok(None);
+        };
+        Ok(
+            font_extension_and_mime(&data).map(|(extension, mime)| FontData {
+                bytes: data,
+                extension,
+                mime,
+            }),
+        )
     }
 
     /// Decode one audio clip's playable bytes.

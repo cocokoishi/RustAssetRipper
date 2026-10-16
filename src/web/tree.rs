@@ -76,6 +76,9 @@ const TEXT_ASSET_CLASS_ID: i32 = 49;
 /// The Unity class ID of `AudioClip`, whose decoded audio the audio tab serves.
 const AUDIO_CLIP_CLASS_ID: i32 = 83;
 
+/// The Unity class ID of `Font`, whose binary data the font tab serves.
+const FONT_CLASS_ID: i32 = 128;
+
 /// The display name when a container bundle carries neither a fixed name nor a scope.
 pub const NAMELESS_BUNDLE_NAME: &str = "Bundle";
 
@@ -118,6 +121,9 @@ pub struct TreeAsset {
     /// Whether the asset serves decoded audio, mirroring `AssetAPI.HasAudioData` (`asset is
     /// IAudioClip`).
     pub has_audio: bool,
+    /// Whether the asset serves font binary data, mirroring `AssetAPI.HasFontData` (`asset is
+    /// IFont` *and* its `m_FontData` identifies as a font).
+    pub has_font: bool,
     /// The non-null reference edges in field traversal order.
     pub dependencies: Vec<TreeDependency>,
 }
@@ -564,6 +570,7 @@ fn asset_row(
             has_binary: false,
             has_image: false,
             has_audio: false,
+            has_font: false,
             dependencies: Vec::new(),
         };
     };
@@ -598,6 +605,18 @@ fn asset_row(
     // The frozen `HasAudioData` is a type test, so every class-83 asset advertises the tab even
     // when its audio later refuses to decode; the route reports that refusal.
     let has_audio = class_id == AUDIO_CLIP_CLASS_ID;
+    // `HasFontData` is the type test *and* a successful read, so a Font whose `m_FontData` is
+    // absent, too short to identify, or malformed advertises no font tab.
+    let has_font = class_id == FONT_CLASS_ID
+        && payload.is_some_and(|value| {
+            assetripper::export::resource_extensions::font_data_bytes(&value.root)
+                .ok()
+                .flatten()
+                .is_some_and(|data| {
+                    assetripper::export::resource_extensions::font_extension_and_mime(&data)
+                        .is_some()
+                })
+        });
     TreeAsset {
         path_id,
         class_id,
@@ -609,6 +628,7 @@ fn asset_row(
         has_binary,
         has_image,
         has_audio,
+        has_font,
         dependencies: Vec::new(),
     }
 }

@@ -1461,6 +1461,180 @@
         finish_single_object_file(version, 83, &nodes, &strings, &payload, 42)
     }
 
+    /// Build a `Font` file for the font route and tab.
+    ///
+    /// The TypeTree and payload follow the **production** class-128 layout at 3.5.0f1, which the
+    /// asset factory prefers over any file TypeTree. `m_FontData` sits after `m_Name`,
+    /// `m_AsciiStartOffset`, `m_FontCountX/Y`, `m_Kerning`, `m_LineSpacing`, an empty
+    /// `m_PerCharacterKerning`, `m_ConvertCase`, a null `m_DefaultMaterial`, an empty
+    /// `m_CharacterRects`, a null `m_Texture`, an empty `m_KerningValues` and a `m_GridFont`
+    /// bool - so a fixture that writes only `m_Name` and `m_FontData` decodes as unreadable.
+    pub(super) fn make_font_file(data: &[u8]) -> Vec<u8> {
+        let mut strings = Vec::new();
+        let font_type = push_type_tree_string(&mut strings, "Font");
+        let empty_name = push_type_tree_string(&mut strings, "");
+        let string_type = push_type_tree_string(&mut strings, "string");
+        let name_field = push_type_tree_string(&mut strings, "m_Name");
+        let array_type = push_type_tree_string(&mut strings, "Array");
+        let sint32_type = push_type_tree_string(&mut strings, "SInt32");
+        let int_type = push_type_tree_string(&mut strings, "int");
+        let float_type = push_type_tree_string(&mut strings, "float");
+        let bool_type = push_type_tree_string(&mut strings, "bool");
+        let size_field = push_type_tree_string(&mut strings, "size");
+        let data_field = push_type_tree_string(&mut strings, "data");
+        let char_type = push_type_tree_string(&mut strings, "char");
+        let vector_type = push_type_tree_string(&mut strings, "vector");
+        let font_data_field = push_type_tree_string(&mut strings, "m_FontData");
+
+        let ascii_field = push_type_tree_string(&mut strings, "m_AsciiStartOffset");
+        let count_x_field = push_type_tree_string(&mut strings, "m_FontCountX");
+        let count_y_field = push_type_tree_string(&mut strings, "m_FontCountY");
+        let kerning_field = push_type_tree_string(&mut strings, "m_Kerning");
+        let line_spacing_field = push_type_tree_string(&mut strings, "m_LineSpacing");
+        let per_char_field = push_type_tree_string(&mut strings, "m_PerCharacterKerning");
+        let convert_case_field = push_type_tree_string(&mut strings, "m_ConvertCase");
+        let default_material_field = push_type_tree_string(&mut strings, "m_DefaultMaterial");
+        let pptr_material_type = push_type_tree_string(&mut strings, "PPtr<Material>");
+        let char_rects_field = push_type_tree_string(&mut strings, "m_CharacterRects");
+        let texture_field = push_type_tree_string(&mut strings, "m_Texture");
+        let pptr_texture_type = push_type_tree_string(&mut strings, "PPtr<Texture>");
+        let kerning_values_field = push_type_tree_string(&mut strings, "m_KerningValues");
+        let map_type = push_type_tree_string(&mut strings, "map");
+        let grid_font_field = push_type_tree_string(&mut strings, "m_GridFont");
+        let font_size_field = push_type_tree_string(&mut strings, "m_FontSize");
+        let ascent_field = push_type_tree_string(&mut strings, "m_Ascent");
+        let default_style_field = push_type_tree_string(&mut strings, "m_DefaultStyle");
+        let font_names_field = push_type_tree_string(&mut strings, "m_FontNames");
+        let unsigned_int_type = push_type_tree_string(&mut strings, "unsigned int");
+        let file_id_field = push_type_tree_string(&mut strings, "m_FileID");
+        let path_id_field = push_type_tree_string(&mut strings, "m_PathID");
+
+        let mut nodes = Vec::new();
+        nodes.push((0, font_type, empty_name, -1));
+        let table = StringTreeTable {
+            string_type,
+            array_type,
+            int_type,
+            size_field,
+            char_type,
+            data_field,
+        };
+        string_tree_nodes(&mut nodes, 1, &table, name_field);
+        nodes.push((1, int_type, ascii_field, 4));
+        nodes.push((1, int_type, count_x_field, 4));
+        nodes.push((1, int_type, count_y_field, 4));
+        nodes.push((1, float_type, kerning_field, 4));
+        nodes.push((1, float_type, line_spacing_field, 4));
+        // An empty `vector` is a single `Array` child with no elements.
+        nodes.push((1, vector_type, per_char_field, -1));
+        nodes.push((2, array_type, empty_name, -1));
+        nodes.push((3, sint32_type, size_field, 4));
+        nodes.push((3, int_type, convert_case_field, 4));
+        // Both PPtrs are two `SInt32` leaves.
+        nodes.push((1, pptr_material_type, default_material_field, 8));
+        nodes.push((2, sint32_type, file_id_field, 4));
+        nodes.push((2, sint32_type, path_id_field, 4));
+        nodes.push((1, vector_type, char_rects_field, -1));
+        nodes.push((2, array_type, empty_name, -1));
+        nodes.push((3, sint32_type, size_field, 4));
+        nodes.push((1, pptr_texture_type, texture_field, 8));
+        nodes.push((2, sint32_type, file_id_field, 4));
+        nodes.push((2, sint32_type, path_id_field, 4));
+        nodes.push((1, map_type, kerning_values_field, -1));
+        nodes.push((2, array_type, empty_name, -1));
+        nodes.push((3, sint32_type, size_field, 4));
+        nodes.push((1, bool_type, grid_font_field, 1));
+        // `m_FontData` is a `vector` whose `Array` has `char` data leaves.
+        nodes.push((1, vector_type, font_data_field, -1));
+        nodes.push((2, array_type, empty_name, -1));
+        nodes.push((3, sint32_type, size_field, 4));
+        nodes.push((3, char_type, data_field, 1));
+        // The production record continues past `m_FontData`; the reader walks the whole tree,
+        // so an absent tail reads as truncated input rather than an unused extra.
+        nodes.push((1, float_type, font_size_field, 4));
+        nodes.push((1, float_type, ascent_field, 4));
+        nodes.push((1, unsigned_int_type, default_style_field, 4));
+        nodes.push((1, vector_type, font_names_field, -1));
+        nodes.push((2, array_type, empty_name, -1));
+        nodes.push((3, sint32_type, size_field, 4));
+        nodes.push((3, string_type, data_field, -1));
+        nodes.push((4, array_type, empty_name, -1));
+        nodes.push((5, sint32_type, size_field, 4));
+        nodes.push((5, char_type, data_field, 1));
+
+        let mut payload = Vec::new();
+        put_typetree_string_value(&mut payload, "TestFont");
+        put_i32_le(&mut payload, 0); // m_AsciiStartOffset
+        put_i32_le(&mut payload, 0); // m_FontCountX
+        put_i32_le(&mut payload, 0); // m_FontCountY
+        put_f32_le(&mut payload, 0.0); // m_Kerning
+        put_f32_le(&mut payload, 0.0); // m_LineSpacing
+        put_i32_le(&mut payload, 0); // m_PerCharacterKerning (empty)
+        put_i32_le(&mut payload, 0); // m_ConvertCase
+        put_i32_le(&mut payload, 0); // m_DefaultMaterial.m_FileID
+        put_i32_le(&mut payload, 0); // m_DefaultMaterial.m_PathID
+        put_i32_le(&mut payload, 0); // m_CharacterRects (empty)
+        put_i32_le(&mut payload, 0); // m_Texture.m_FileID
+        put_i32_le(&mut payload, 0); // m_Texture.m_PathID
+        put_i32_le(&mut payload, 0); // m_KerningValues (empty)
+        payload.push(0); // m_GridFont
+        // The reader aligns the following `int` after the bool run.
+        while !payload.len().is_multiple_of(4) {
+            payload.push(0);
+        }
+        put_i32_le(&mut payload, i32::try_from(data.len()).unwrap()); // m_FontData count
+        payload.extend_from_slice(data);
+        // The production record continues past `m_FontData`.
+        put_f32_le(&mut payload, 0.0); // m_FontSize
+        put_f32_le(&mut payload, 0.0); // m_Ascent
+        put_i32_le(&mut payload, 0); // m_DefaultStyle
+        put_i32_le(&mut payload, 0); // m_FontNames (empty)
+        let padding = (4 - payload.len() % 4) % 4;
+        payload.resize(payload.len() + padding, 0);
+        finish_single_object_file(b"3.5.0f1\0", 128, &nodes, &strings, &payload, 42)
+    }
+
+    #[test]
+    fn generated_font_layout_decodes_under_production_layouts() {
+        use crate::{load_object_workspace, load_workspace_from_vfs};
+        use assetripper::io::dependency::DependencyFilePath;
+        use assetripper::io::filesystem::VirtualFileSystem;
+        use assetripper::serialized_file::object_workspace::ObjectWorkspaceLimits;
+        use assetripper::serialized_file::workspace::SerializedFileWorkspaceLimits;
+
+        let _production = crate::SourceFactoryLayoutGuard::use_source_factory();
+        let bytes = make_font_file(b"OTTOfont-bytes");
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem.create_directory(Some("/game")).unwrap();
+        filesystem.write_all_bytes("/game/font.assets", &bytes).unwrap();
+        let input = DependencyFilePath {
+            file_name: "font.assets".to_owned(),
+            virtual_path: "/game/font.assets".to_owned(),
+        };
+        let workspace = load_workspace_from_vfs(
+            &filesystem,
+            &[input],
+            SerializedFileWorkspaceLimits::default(),
+        )
+        .expect("the workspace loads");
+        let objects =
+            load_object_workspace(&filesystem, &workspace, ObjectWorkspaceLimits::default())
+                .expect("the object workspace loads");
+        let object = objects.get(0, 0).expect("the font exists");
+        let payload = object
+            .payload
+            .as_ref()
+            .unwrap_or_else(|error| panic!("the font must decode: {error}"));
+        let data = assetripper::export::resource_extensions::font_data_bytes(&payload.root)
+            .expect("the font data reads")
+            .expect("m_FontData is present");
+        assert_eq!(data, b"OTTOfont-bytes");
+        assert_eq!(
+            assetripper::export::resource_extensions::font_extension_and_mime(&data),
+            Some(("otf", "font/otf"))
+        );
+    }
+
     /// Build an `AudioClip` file whose TypeTree and payload match the **production** class-83
     /// layout at 3.5.0f1, which the asset factory prefers over a file TypeTree.
     ///

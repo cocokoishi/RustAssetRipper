@@ -847,6 +847,33 @@ pub fn asset_page(
         inner.raw("</div>");
     }
 
+    if asset.has_font {
+        // The frozen font tab previews the typeface with a heading styled by the font family
+        // and a save button. The port keeps that shape and adds the linked preview so the
+        // browser can load the served font.
+        use super::html::escape;
+        use assetripper::web_paths::asset_font_url;
+
+        let Ok(Some(font)) = state.read_asset_font(asset.file_index, asset.object_index) else {
+            return Some(layout(state, &asset.best_name, inner.as_str()));
+        };
+        let extension = font.extension;
+        inner.element("h2", &[], &t(state, "asset_tab_font"));
+        let font_url = asset_font_url(path);
+        inner.raw("<div class=\"text-center\">");
+        inner.raw(&format!(
+            "<style>@font-face {{ font-family: 'asset-preview'; src: url('{}'); }}</style>",
+            escape(&font_url)
+        ));
+        inner.raw(&format!(
+            "<h1 style=\"font-family: 'asset-preview', {};\">Preview Font (0, 1, 2, 3, 4, 5, 6, 7, 8, 9)</h1>",
+            escape(&asset.best_name)
+        ));
+        let file_name = format!("{}.{extension}", asset.best_name);
+        save_button(&mut inner, state, &font_url, &file_name);
+        inner.raw("</div>");
+    }
+
     if asset.has_image {
         // The frozen image tab shows the texture with a download button. Without client
         // code the port points the preview straight at the image route, so the browser
@@ -1524,6 +1551,7 @@ mod tests {
                             has_binary: false,
                             has_image: false,
                             has_audio: false,
+                            has_font: false,
                             dependencies: Vec::new(),
                         },
                     }],

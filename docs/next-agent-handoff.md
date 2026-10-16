@@ -1,5 +1,29 @@
 # RustAssetRipper hand-off — 2026-10-16
 
+## Latest current checkpoint - 2026-10-16 (font tab + route)
+
+- `PRODUCT-ASSET-FONT-TAB-001` is 已验证. Route `/Assets/Font` ports the frozen magic table
+  exactly (`OTTO`, `00 01 00 00`, `ttcf`, else `dat`/octet-stream); data under four bytes counts
+  as no font data. `read_asset_font` returns a named `FontData` struct.
+- **The recurring fixture trap, now seen three times.** A hand-written fixture that only the
+  *synthetic* test layout accepts will decode as `Unreadable*` once production layouts apply.
+  The production class-128 layout puts **13 fields before `m_FontData` and 4 after it**; a tree
+  that stops at `m_FontData` fails at `m_FontSize` with "truncated input (requested 4 bytes,
+  0 remain)". Always dump the production tree from
+  `reference_class_layouts().tpk_trees(class_id, &version)` and mirror it, then pin it with a
+  focused test under `SourceFactoryLayoutGuard::use_source_factory()`.
+- The e2e fixture set is now seven inputs; root collections order
+  `z-audio(0), z-font(1), z-textasset(2), z-texture(3), z-unknown(4)`. Update those indexes when
+  adding inputs.
+- Parity ledger: 401 rows, 376 verified, 25 non-verified, gate OPEN.
+- **Remaining tabs:** model (`/Assets/Model.glb`, gate `asset is IMesh`; needs `GlbMeshBuilder`
+  + `GlbWriter` on the web path) and video (`/Assets/Video`, gate `asset is IVideoClip` with
+  `CheckIntegrity`; needs `TryGetExtensionFromPath` + `TryGetContent`). Those two complete the
+  frozen `ViewPage` tab list. After that: `/Scenes/View` extras, `/FailedFiles/Stack`,
+  `/Export/PrimaryContent`.
+- Do not run rustfmt on `src/main_tests_01.rs` or `src/main_tests_03.rs`.
+- Verified: 1830 library + 197 bin tests, 0 failed; warnings-denied Clippy exit 0.
+
 ## Latest current checkpoint - 2026-10-16 (audio tab + route, Development tab)
 
 - `PRODUCT-ASSET-AUDIO-TAB-001` is 已验证 and the Development tab is added. Route

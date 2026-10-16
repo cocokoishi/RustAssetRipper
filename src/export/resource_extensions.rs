@@ -24,6 +24,7 @@
 //! Number-range and encoder edge cases beyond the grammar stay open.
 
 use super::settings::{ImageExportFormat, TextExportMode};
+use crate::serialized_file::object::SerializedValue;
 
 /// `TextAssetExportCollection.DangerousExtensions`, matched case-insensitively.
 pub const DANGEROUS_EXTENSIONS: [&str; 11] = [
@@ -368,6 +369,90 @@ pub fn font_extension(font_data: &[u8]) -> &'static str {
         }
     }
     "ttf"
+}
+
+/// `AssetAPI.TryGetFontData`'s magic table: the extension and MIME type for font bytes.
+///
+/// The frozen route sniffs the first four bytes directly rather than reusing
+/// `FontExtensions.GetFontExtension`, and it recognizes one case that helper does not: the
+/// `ttcf` TrueType-collection magic. Anything else falls back to a generic binary, which is
+/// what lets the route report success for data it cannot name.
+///
+/// `None` means the data is too short to identify, matching the frozen `Length: >= 4` test;
+/// the route treats that as "no font data".
+pub fn font_extension_and_mime(data: &[u8]) -> Option<(&'static str, &'static str)> {
+    let magic = data.get(..4)?;
+    Some(match magic {
+        [0x4F, 0x54, 0x54, 0x4F] => ("otf", "font/otf"),
+        [0x00, 0x01, 0x00, 0x00] => ("ttf", "font/ttf"),
+        [0x74, 0x74, 0x63, 0x66] => ("ttc", "font/collection"),
+        _ => ("dat", "application/octet-stream"),
+    })
+}
+
+/// Read a `Font` payload's `m_FontData` as bytes.
+///
+/// The reference `IFont.FontData` exposes the field as bytes; the port's decoded value keeps it
+/// either as a `Bytes` leaf or as a byte array, so both spellings are accepted. `None` means the
+/// field is absent, which the frozen `HasFontData` treats as no font data.
+///
+/// Errors name the offending element rather than silently dropping it, matching the export
+/// path's own refusal for a malformed array.
+pub fn font_data_bytes(root: &SerializedValue) -> Result<Option<Vec<u8>>, FontDataReadError> {
+    let Some(value) = root.unique_field_in_base_chain("m_FontData")? else {
+        return Ok(None);
+    };
+    match value {
+        SerializedValue::Bytes(bytes) => Ok(Some(bytes.clone())),
+        SerializedValue::Array(values) => {
+            let mut output = Vec::new();
+            for (index, value) in values.iter().enumerate() {
+                let SerializedValue::U8(value) = value else {
+                    return Err(FontDataReadError::NotAByte { index });
+                };
+                output.push(*value);
+            }
+            Ok(Some(output))
+        }
+        _ => Err(FontDataReadError::WrongType),
+    }
+}
+
+/// Why a `Font.m_FontData` field could not be read.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FontDataReadError {
+    /// A `m_FontData` array element is not a byte.
+    NotAByte {
+        /// The offending element index.
+        index: usize,
+    },
+    /// `m_FontData` is neither bytes nor an array of bytes.
+    WrongType,
+    /// The field lookup failed.
+    Lookup(String),
+}
+
+impl std::fmt::Display for FontDataReadError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotAByte { index } => {
+                write!(formatter, "Font m_FontData[{index}] is not a byte")
+            }
+            Self::WrongType => write!(
+                formatter,
+                "Font m_FontData is neither bytes nor an array of bytes"
+            ),
+            Self::Lookup(message) => write!(formatter, "Font m_FontData lookup failed: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for FontDataReadError {}
+
+impl From<crate::serialized_file::object::SerializedValueLookupError> for FontDataReadError {
+    fn from(error: crate::serialized_file::object::SerializedValueLookupError) -> Self {
+        Self::Lookup(error.to_string())
+    }
 }
 
 /// `VideoClipExtensions.TryGetExtensionFromPath`: the original path's extension.
