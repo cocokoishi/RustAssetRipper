@@ -48,6 +48,11 @@ pub(super) struct ScenePlanningContext<'context, 'graph, 'provider> {
 
 pub(super) struct LightingDataPlanningContext<'context, 'object, 'graph> {
     pub(super) lighting_data_assets: &'context [RoutedLightingDataAsset],
+    /// Pre-planned relative paths, one per entry in `lighting_data_assets`, reserved
+    /// before routed assets so the fixed `LightingData` name is claimed by the
+    /// generated LightingDataAsset (the reference collection order puts it before the
+    /// scene's `LightProbes` asset whose `m_Name` is also `LightingData`).
+    pub(super) lighting_data_paths: &'context [String],
     pub(super) reference_graph: &'context MultiFileReferenceGraph<'graph>,
     pub(super) pointer_map: &'context ProjectExportPointerMap,
     pub(super) routed: &'context [RoutedObject<'object>],
@@ -1381,23 +1386,58 @@ pub(super) fn plan_scene_files(
     builder.exported_object_count = exported_object_count;
     Ok(())
 }
+/// Pre-plans the generated LightingData file paths before routed assets run.
+///
+/// The generated `LightingData` name is fixed, while a scene's `LightProbes` asset
+/// carries the same `m_Name`; the reference's collection order gives the fixed name to
+/// the generated LightingDataAsset, so reserving it here keeps the shared-name suffix
+/// sequence aligned (`LightingData` then `LightingData_0`).
+pub(super) fn plan_lighting_data_paths(
+    lighting_data_assets: &[RoutedLightingDataAsset],
+    builder: &mut ProjectExportPlanBuilder,
+) -> Result<Vec<String>, Box<dyn Error>> {
+    let mut paths = Vec::new();
+    paths
+        .try_reserve_exact(lighting_data_assets.len())
+        .map_err(|_| invalid_project("could not allocate LightingData path list"))?;
+    for lighting_data in lighting_data_assets {
+        let relative_path = builder.planner.plan_asset_path(
+            &ExportAssetPathIdentity {
+                class_name: "LightingDataAsset".to_owned(),
+                named_name: Some("LightingData".to_owned()),
+                original_directory: Some(lighting_data.original_directory.clone()),
+                ..Default::default()
+            },
+            DEFAULT_EXPORT_EXTENSION,
+        )?;
+        paths.push(relative_path);
+    }
+    Ok(paths)
+}
 pub(super) fn plan_lighting_data_files(
     context: &LightingDataPlanningContext<'_, '_, '_>,
     builder: &mut ProjectExportPlanBuilder,
 ) -> Result<(), Box<dyn Error>> {
     let LightingDataPlanningContext {
         lighting_data_assets,
+        lighting_data_paths,
         reference_graph,
         pointer_map,
         routed,
         limits,
         project_version,
     } = *context;
+    if lighting_data_paths.len() != lighting_data_assets.len() {
+        return Err(invalid_project(
+            "LightingData path plan does not match the routed asset count",
+        ));
+    }
     let mut total_bytes = builder.total_bytes;
     let mut exported_object_count = builder.exported_object_count;
-    let planner = &mut builder.planner;
     let files = &mut builder.files;
-    for lighting_data in lighting_data_assets {
+    for (lighting_data, relative_path) in
+        lighting_data_assets.iter().zip(lighting_data_paths.iter())
+    {
         let bytes = generated_lighting_data_asset_to_yaml(
             lighting_data,
             reference_graph,
@@ -1423,19 +1463,10 @@ pub(super) fn plan_lighting_data_files(
                 })?,
             ))
             .ok_or_else(|| invalid_project("exported object count overflows"))?;
-        let relative_path = planner.plan_asset_path(
-            &ExportAssetPathIdentity {
-                class_name: "LightingDataAsset".to_owned(),
-                named_name: Some("LightingData".to_owned()),
-                original_directory: Some(lighting_data.original_directory.clone()),
-                ..Default::default()
-            },
-            DEFAULT_EXPORT_EXTENSION,
-        )?;
         files.push(PlannedProjectFile {
             collection_name: "LightingDataAssetExportCollection",
             kind: ExportCollectionKind::Asset,
-            relative_path,
+            relative_path: relative_path.clone(),
             guid: lighting_data.guid,
             bytes,
             meta: Some(PlannedProjectMeta {
@@ -1453,4 +1484,70 @@ pub(super) fn plan_lighting_data_files(
     builder.total_bytes = total_bytes;
     builder.exported_object_count = exported_object_count;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plan_lighting_named(
+        builder: &mut ProjectExportPlanBuilder,
+        class_name: &str,
+        original_directory: &str,
+    ) -> String {
+        builder
+            .planner
+            .plan_asset_path(
+                &ExportAssetPathIdentity {
+                    class_name: class_name.to_owned(),
+                    named_name: Some("LightingData".to_owned()),
+                    original_directory: Some(original_directory.to_owned()),
+                    ..Default::default()
+                },
+                DEFAULT_EXPORT_EXTENSION,
+            )
+            .expect("LightingData-named asset plans a path")
+    }
+
+    /// The generated `LightingDataAsset` and a scene's `LightProbes` asset share the
+    /// fixed `LightingData` name. `export.rs` reserves the generated name first (via
+    /// `plan_lighting_data_paths`), so this pins the naming contract the seventh-world
+    /// regression depends on: whoever plans first keeps the plain name and a later
+    /// same-named asset takes the conflict suffix.
+    #[test]
+    fn generated_lighting_data_keeps_the_plain_name_when_reserved_first() {
+        let mut builder = ProjectExportPlanBuilder::new(0, 0).expect("plan builder");
+
+        let generated = plan_lighting_named(&mut builder, "LightingDataAsset", "Assets/Scene");
+        let probes = plan_lighting_named(&mut builder, "LightProbes", "Assets/Scene");
+
+        assert!(
+            generated.ends_with("LightingData.asset") && !generated.contains("_0"),
+            "generated LightingDataAsset keeps the plain name, got {generated}"
+        );
+        assert!(
+            probes.ends_with("LightingData_0.asset"),
+            "the later same-named LightProbes takes the conflict suffix, got {probes}"
+        );
+    }
+
+    /// The reverse call order (routed assets first, the pre-fix layout) must hand the
+    /// plain name to the `LightProbes` and push the generated asset to `_0`; this shows
+    /// the assertion above actually depends on the reservation order.
+    #[test]
+    fn a_same_named_asset_planned_first_takes_the_plain_name() {
+        let mut builder = ProjectExportPlanBuilder::new(0, 0).expect("plan builder");
+
+        let probes = plan_lighting_named(&mut builder, "LightProbes", "Assets/Scene");
+        let generated = plan_lighting_named(&mut builder, "LightingDataAsset", "Assets/Scene");
+
+        assert!(
+            probes.ends_with("LightingData.asset") && !probes.contains("_0"),
+            "the first same-named asset keeps the plain name, got {probes}"
+        );
+        assert!(
+            generated.ends_with("LightingData_0.asset"),
+            "the second same-named asset takes the conflict suffix, got {generated}"
+        );
+    }
 }

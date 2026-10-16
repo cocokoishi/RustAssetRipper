@@ -549,8 +549,8 @@ use self::importer_metadata::*;
 use self::lighting_asset::*;
 use self::object_routing::route_project_objects;
 use self::planning::{
-    plan_lighting_data_files, plan_prefab_files, plan_routed_asset_files, plan_scene_files,
-    LightingDataPlanningContext, PrefabPlanningContext, ProjectExportPlanBuilder,
+    plan_lighting_data_files, plan_lighting_data_paths, plan_prefab_files, plan_routed_asset_files,
+    plan_scene_files, LightingDataPlanningContext, PrefabPlanningContext, ProjectExportPlanBuilder,
     RoutedAssetPlanningContext, ScenePlanningContext, StagedProjectFiles,
 };
 use self::scene_collections::*;

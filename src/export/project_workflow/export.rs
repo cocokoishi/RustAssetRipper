@@ -433,6 +433,10 @@ pub fn export_workspace_yaml_project_with_serialized_settings(
     let mut plan_builder = ProjectExportPlanBuilder::new(collection_count, saved_assemblies.len())?;
     plan_builder.next_guid_sequence = next_guid_sequence;
     plan_builder.used_guids = used_guids;
+    // Reserve the fixed generated `LightingData` name before routed assets, whose
+    // scene `LightProbes` asset also carries `m_Name: LightingData`; the reference's
+    // collection order gives the plain name to the generated LightingDataAsset.
+    let lighting_data_paths = plan_lighting_data_paths(&lighting_data_assets, &mut plan_builder)?;
     plan_routed_asset_files(
         &RoutedAssetPlanningContext {
             filesystem,
@@ -489,6 +493,7 @@ pub fn export_workspace_yaml_project_with_serialized_settings(
     plan_lighting_data_files(
         &LightingDataPlanningContext {
             lighting_data_assets: &lighting_data_assets,
+            lighting_data_paths: &lighting_data_paths,
             reference_graph,
             pointer_map: &pointer_map,
             routed: &routed,

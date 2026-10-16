@@ -143,6 +143,10 @@ fn should_use_scene_editor_type_tree(class_id: i32, unity_version_text: Option<&
                     | 221
                     | 238
                     | 363
+                    // Breadth probe (seventh world): AudioReverbZone carries the
+                    // full editor base on 2022.3 (probed) but was exported
+                    // release-shaped, which costs the four base fields.
+                    | 167
                     | 1_183_024_399
                     | 1_818_360_610
             ));
@@ -4695,6 +4699,7 @@ mod tests {
             221,
             238,
             363,
+            167,
             1_183_024_399,
             1_818_360_610,
         ] {
@@ -4738,6 +4743,7 @@ mod tests {
             221,
             238,
             363,
+            167,
             1_183_024_399,
             1_818_360_610,
         ] {
