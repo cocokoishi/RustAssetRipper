@@ -1,5 +1,38 @@
 # Validation log
 
+## 2026-10-16 - Scene geometry attaches to plan nodes; two stale ledger claims corrected
+
+- Outcome: `attach_plan_geometry` in `src/resources/glb.rs` closes the seam between the two halves
+  of the scene builder - the plan decides which sub-meshes a node wants, and this fills them with
+  real primitives. Two new tests. Also corrected a **stale gap list** on `RES-MODEL-001`.
+- **`RES-MODEL-001` claimed three things were unported. All three are implemented**, and I checked
+  each before editing:
+  - `GlbTerrainBuilder` - `build_terrain_glb_with_limits`, wired from `src/export/res_wiring.rs`,
+    covered by `terrain_plan_reads_the_heightmap_and_scale_through_the_source_builder`.
+  - The `GlbWriter` size guard - `GlbBuildLimits::max_output_bytes` reporting
+    `GlbError::OutputTooLarge` instead of an allocation failure.
+  - `GlbLevelBuilder` hierarchy export - now both the traversal (`build_level_plan`, verified
+    node-for-node against the shipped `Build`) and the document emission (`build_scene_document`).
+  The row's own evidence column already mentioned the `GlbLevelBuilder` dispatch kernels, so the
+  gap cell contradicted the row it sat in.
+- **I checked whether this is a systemic problem rather than one bad cell.** Every other row
+  containing the word "unported" was read in context, and they are accurate, scoped statements
+  about specific sub-features (`/PremiumFeatures` needs shader platform and combined-mesh
+  detection; `EXP-EXPORT-PATH-001` needs generated class schemas; `PRODUCT-WEB-SURFACE-001` lists
+  the pages that return 501). `RES-MODEL-001` was the outlier, not a pattern.
+- The geometry attachment is deliberately in `glb.rs` beside `build_primitive`, so the accessor,
+  buffer-view and attribute encodings keep exactly one implementation; `glb_level.rs` stays a pure
+  node-graph composer. Two behaviours are pinned because a naive implementation gets them wrong:
+  a node whose mesh data is missing keeps no geometry and produces a warning rather than failing
+  the whole build (matching the reference's `TryGetOrMakeMeshData` gate), and a sub-mesh index the
+  mesh does not contain is reported and skipped rather than panicking.
+- **What is still open:** `glb_level.rs` is still not wired into an export path, so `EXP-GLB-001`
+  and `RES-MODEL-001` keep their statuses and the scene path carries no parity row. The remaining
+  work is the integration described by the reference's `GlbModelExporter`, which drives
+  `GlbLevelBuilder.Build` from `SceneHierarchyObject`/`PrefabHierarchyObject`.
+- Evidence: `cargo test --locked --workspace` - **1846** library (up from 1844) + 199 bin tests,
+  0 failed, 1 ignored. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+
 ## 2026-10-16 - The scene plan now emits a real multi-node glTF document
 
 - Outcome: `build_scene_document` turns a `GlbLevelPlan` into a multi-node glTF scene container,

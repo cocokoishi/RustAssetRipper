@@ -1403,6 +1403,163 @@ impl SceneDocument {
     }
 }
 
+/// Attach decoded mesh geometry to the nodes of a scene plan.
+///
+/// This is the missing half of a scene-level GLB export: [`super::glb_level::build_scene_document`]
+/// emits the node graph, and this fills each node that recorded a sub-mesh selection with real
+/// primitives. It lives here, beside [`build_primitive`], so there is still exactly one
+/// implementation of the accessor, buffer-view and attribute encodings.
+///
+/// `meshes` supplies the decoded geometry for one node; a node whose plan recorded no mesh, or
+/// whose mesh index is absent from `meshes`, keeps no geometry, matching the reference's
+/// `TryGetOrMakeMeshData` gate that silently skips a mesh it cannot build.
+///
+/// The dynamic path emits every sub-mesh in order with identity transforms; the static path
+/// emits the plan's `subset_indices` through the accumulated transforms. Both were verified
+/// against the shipped `GlbLevelBuilder.Build` node graph, and the sub-mesh selection against
+/// `references_dynamic_mesh`/`subset_indices`.
+pub fn attach_plan_geometry(
+    document: &mut SceneDocument,
+    plan: &super::glb_level::GlbLevelPlan,
+    meshes: &[Option<MeshData>],
+    limits: GlbBuildLimits,
+) -> Result<Vec<String>, GlbError> {
+    let mut builder = GlbBuilder::with_limit(limits.max_output_bytes);
+    let mut warnings: Vec<String> = Vec::new();
+    let mut mesh_jsons: Vec<String> = Vec::new();
+    // Node index -> the mesh index it references.
+    let mut node_mesh: Vec<(usize, usize)> = Vec::new();
+
+    for (node_index, node) in plan.nodes.iter().enumerate() {
+        let Some(attached) = node.mesh.as_ref() else {
+            continue;
+        };
+        let Some(Some(mesh)) = meshes.get(node_index) else {
+            // The reference skips a node whose mesh cannot be built rather than failing the build.
+            warnings.push(format!(
+                "node {} ({}) has no decoded mesh data; its geometry is omitted",
+                node_index, node.name
+            ));
+            continue;
+        };
+
+        let mut primitive_jsons: Vec<String> = Vec::new();
+        for sub_mesh_index in &attached.subset_indices {
+            let sub_mesh_index = *sub_mesh_index as usize;
+            if sub_mesh_index >= mesh.sub_meshes.len() {
+                warnings.push(format!(
+                    "node {} ({}) selects sub-mesh {sub_mesh_index}, but the mesh has {}",
+                    node_index,
+                    node.name,
+                    mesh.sub_meshes.len()
+                ));
+                continue;
+            }
+            let primitive = build_primitive(mesh, &node.name, sub_mesh_index)?;
+            warnings.extend(primitive.warnings);
+            let Primitive {
+                indices,
+                vertices,
+                mode,
+                ..
+            } = primitive;
+            let positions: Vec<[f32; 3]> = vertices.iter().map(|vertex| vertex.position).collect();
+            let mut attributes = vec![(
+                "POSITION".to_owned(),
+                builder.push_position_accessor(&positions, &node.name)?,
+            )];
+            if let Some(values) = flatten_optional(&vertices, |vertex| vertex.normal) {
+                attributes.push((
+                    "NORMAL".to_owned(),
+                    builder.push_vertex_accessor(&values, "VEC3")?,
+                ));
+            }
+            if let Some(values) = flatten_optional(&vertices, |vertex| vertex.tangent) {
+                attributes.push((
+                    "TANGENT".to_owned(),
+                    builder.push_vertex_accessor(&values, "VEC4")?,
+                ));
+            }
+            let tex_coord_count = vertices.first().map_or(0, |vertex| vertex.tex_coords.len());
+            for channel in 0..tex_coord_count {
+                let mut values = Vec::with_capacity(vertices.len() * 2);
+                for vertex in &vertices {
+                    values.extend_from_slice(
+                        vertex
+                            .tex_coords
+                            .get(channel)
+                            .copied()
+                            .unwrap_or([0.0, 0.0])
+                            .as_slice(),
+                    );
+                }
+                attributes.push((
+                    format!("TEXCOORD_{channel}"),
+                    builder.push_vertex_accessor(&values, "VEC2")?,
+                ));
+            }
+            if let Some(colors) = vertices
+                .iter()
+                .map(|vertex| vertex.color)
+                .collect::<Option<Vec<_>>>()
+            {
+                attributes.push(("COLOR_0".to_owned(), builder.push_color_accessor(&colors)?));
+            }
+            if let Some(joints) = collect_joints(&vertices) {
+                let mut weights = Vec::with_capacity(vertices.len() * 4);
+                for vertex in &vertices {
+                    weights.extend_from_slice(&vertex.weights.unwrap_or([0.0; 4])[..]);
+                }
+                attributes.push((
+                    "JOINTS_0".to_owned(),
+                    builder.push_joints_accessor(&joints)?,
+                ));
+                attributes.push((
+                    "WEIGHTS_0".to_owned(),
+                    builder.push_vertex_accessor(&weights, "VEC4")?,
+                ));
+            }
+            let index_accessor = builder.push_index_accessor(&indices)?;
+            let attribute_json = attributes
+                .iter()
+                .map(|(name, accessor)| format!("\"{name}\":{accessor}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            primitive_jsons.push(format!(
+                "{{\"attributes\":{{{attribute_json}}},\"indices\":{index_accessor},\
+                 \"material\":0,\"mode\":{mode}}}"
+            ));
+        }
+
+        if primitive_jsons.is_empty() {
+            continue;
+        }
+        node_mesh.push((node_index, mesh_jsons.len()));
+        mesh_jsons.push(format!(
+            "{{\"name\":\"{}\",\"primitives\":[{}]}}",
+            escape_json(&node.name),
+            primitive_jsons.join(",")
+        ));
+    }
+
+    // Point each node's placeholder `mesh` at the mesh it contributed.
+    for (node_index, mesh_index) in node_mesh {
+        let placeholder = "\"mesh\":0";
+        let replacement = format!("\"mesh\":{mesh_index}");
+        if let Some(node) = document.nodes.get_mut(node_index) {
+            if let Some(position) = node.rfind(placeholder) {
+                node.replace_range(position..position + placeholder.len(), &replacement);
+            }
+        }
+    }
+
+    document.meshes = mesh_jsons;
+    document.accessors = builder.accessors;
+    document.buffer_views = builder.buffer_views;
+    document.bin = builder.bin;
+    Ok(warnings)
+}
+
 /// A node's local transform, already converted to glTF space.
 pub fn node_transform_json(translation: [f32; 3], rotation: [f32; 4], scale: [f32; 3]) -> String {
     format!(

@@ -1,6 +1,38 @@
 # RustAssetRipper hand-off — 2026-10-16
 
-## Latest current checkpoint - 2026-10-16 (scene plan emits a multi-node glTF document)
+## Latest current checkpoint - 2026-10-16 (scene geometry attaches; ledger claim corrected)
+
+- `attach_plan_geometry` in `src/resources/glb.rs` closes the seam between the two halves of the
+  scene builder: the plan decides which sub-meshes a node wants, and this fills them with real
+  primitives (positions, normals, tangents, UVs, colours, skin lanes, index accessor). Two tests
+  pin it, including the two behaviours a naive version gets wrong - missing mesh data warns and
+  skips rather than failing the build, and an out-of-range sub-mesh index is reported rather than
+  panicking.
+- **The scene GLB export still needs its integration, and the reference shows exactly what it
+  is.** `AssetRipper.Export.PrimaryContent/Models/GlbModelExporter.cs` drives
+  `GlbLevelBuilder.Build(assets, isScene)` from `SceneHierarchyObject` and `PrefabHierarchyObject`
+  and writes through `GlbWriter.TryWrite`. **That is the next unit of work**; the port has the
+  counterparts (`WorkspaceSceneGameObjectHierarchy`, `WorkspaceSceneTransformHierarchy` in
+  `src/processing/scene_hierarchy.rs`). Until it lands, `EXP-GLB-001` and `RES-MODEL-001` stay
+  non-verified and the scene path carries no parity row.
+- **`RES-MODEL-001`'s gap list was stale and is corrected.** It claimed `GlbLevelBuilder`,
+  `GlbTerrainBuilder` and the `GlbWriter` size guard were all unported; all three are implemented
+  and I verified each before editing. Its own evidence column already mentioned the
+  `GlbLevelBuilder` kernels, so the cell contradicted its own row.
+- **That was one bad cell, not a pattern.** Every other row containing "unported" was read in
+  context and is accurate and scoped. Before "correcting" another one, read the cell in full - the
+  wording is usually about a named sub-feature, not the whole capability.
+- Both `glb.rs` and `glb_level.rs` are rustfmt-clean and safe to format. **Never format
+  `src/resources/glb_tests_01.rs`** (nor `main_tests_01.rs`/`main_tests_03.rs`); it is an indented
+  fragment.
+- **A GLB is binary: decode the JSON chunk before asserting on text** (12-byte header, then the
+  chunk header). `glb_level.rs` has a `json_chunk` test helper.
+- Parity ledger: 405 rows, 381 verified, 24 non-verified, DUPES=0, MALFORMED=0, gate OPEN.
+- `/Scenes/View` still returns 501 (`load_game` does not run `process_workspace_scenes_and_prefabs`).
+- Corpus replays are local-only and have not run in these rounds.
+- Verified: **1846** library + 199 bin tests, 0 failed; warnings-denied Clippy exit 0.
+
+## Previous checkpoint - 2026-10-16 (scene plan emits a multi-node glTF document)
 
 - Both halves of the scene builder now exist and are reference-checked:
   `build_scene_document` in `src/resources/glb_level.rs` emits a multi-node glTF container from a

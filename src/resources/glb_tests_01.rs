@@ -134,6 +134,136 @@
         values
     }
 
+    /// A scene plan's geometry attachment emits real primitives on the meshed nodes.
+    ///
+    /// Covers the seam between the two halves of the scene builder: the plan decides which
+    /// sub-meshes a node wants, and this fills them with geometry. Also pins the two behaviours a
+    /// naive implementation gets wrong - a node with no decoded mesh keeps no geometry rather
+    /// than failing the build, and a sub-mesh index the mesh does not have is reported and
+    /// skipped rather than panicking.
+    #[test]
+    fn plan_geometry_attaches_to_meshed_nodes_only() {
+        use crate::resources::glb_level::{
+            build_level_plan, build_scene_document, GlbLevelMesh, GlbLevelTransform,
+        };
+
+        fn node(name: &str, mesh: Option<GlbLevelMesh>) -> GlbLevelTransform {
+            GlbLevelTransform {
+                game_object_name: name.to_owned(),
+                local_position: [0.0, 0.0, 0.0],
+                local_rotation: [0.0, 0.0, 0.0, 1.0],
+                local_scale: [1.0, 1.0, 1.0],
+                children: Vec::new(),
+                mesh,
+            }
+        }
+        // A dynamic renderer takes every sub-mesh in order.
+        let dynamic = GlbLevelMesh {
+            sub_mesh_count: 1,
+            is_16_bit_indices: true,
+            mesh_type: None,
+            has_renderer: true,
+            has_static_batch_info: false,
+            static_batch_sub_mesh_count: 0,
+            has_subset_indices: true,
+            subset_indices_count: 0,
+            subset_indices: Some(Vec::new()),
+            static_batch_info: None,
+        };
+        // A static renderer that selects sub-mesh 0 explicitly.
+        let static_mesh = GlbLevelMesh {
+            has_subset_indices: true,
+            subset_indices_count: 1,
+            subset_indices: Some(vec![0]),
+            ..dynamic.clone()
+        };
+
+        let plan = build_level_plan(
+            &[
+                node("WithMesh", Some(dynamic)),
+                node("WithoutData", Some(static_mesh)),
+                node("NoMesh", None),
+            ],
+            true,
+        )
+        .expect("the plan builds");
+        let mut document = build_scene_document(&plan);
+
+        // Only the first node has decoded geometry; the second has a mesh selection but no data.
+        let meshes = vec![Some(triangle_mesh()), None, None];
+        let warnings = attach_plan_geometry(&mut document, &plan, &meshes, GlbBuildLimits::default())
+            .expect("geometry attaches");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("WithoutData"),
+            "the node without data is named: {warnings:?}"
+        );
+
+        let bytes = document.into_glb();
+        let json = {
+            let length = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]) as usize;
+            String::from_utf8(bytes[20..20 + length].to_vec()).expect("the JSON chunk is UTF-8")
+        };
+
+        // Exactly one mesh was emitted, and the node that owns it references mesh 0.
+        assert!(json.contains("\"meshes\":["), "{json}");
+        assert_eq!(json.matches("\"primitives\":[").count(), 1, "{json}");
+        assert!(json.contains("\"mesh\":0"), "{json}");
+        // The other two nodes carry no mesh reference.
+        assert!(!json.contains("WithoutData\",\"mesh"), "{json}");
+        // The primitive is a triangle with positions and an index accessor.
+        assert!(json.contains("\"POSITION\":"), "{json}");
+        assert!(json.contains("\"indices\":"), "{json}");
+        assert!(json.contains("\"mode\":4"), "{json}");
+        // A binary chunk followed the JSON, so the whole buffer is not text.
+        assert!(bytes.len() > 20 + json.len(), "a binary chunk is present");
+    }
+
+    /// A sub-mesh index the mesh does not have is reported, not panicked on.
+    #[test]
+    fn plan_geometry_reports_an_out_of_range_sub_mesh() {
+        use crate::resources::glb_level::{
+            build_level_plan, build_scene_document, GlbLevelMesh, GlbLevelTransform,
+        };
+
+        let plan = build_level_plan(
+            &[GlbLevelTransform {
+                game_object_name: "Bad".to_owned(),
+                local_position: [0.0, 0.0, 0.0],
+                local_rotation: [0.0, 0.0, 0.0, 1.0],
+                local_scale: [1.0, 1.0, 1.0],
+                children: Vec::new(),
+                mesh: Some(GlbLevelMesh {
+                    sub_mesh_count: 1,
+                    is_16_bit_indices: true,
+                    mesh_type: None,
+                    has_renderer: true,
+                    has_static_batch_info: false,
+                    static_batch_sub_mesh_count: 0,
+                    has_subset_indices: true,
+                    subset_indices_count: 1,
+                    subset_indices: Some(vec![7]),
+                    static_batch_info: None,
+                }),
+            }],
+            true,
+        )
+        .expect("the plan builds");
+        let mut document = build_scene_document(&plan);
+        let warnings =
+            attach_plan_geometry(&mut document, &plan, &[Some(triangle_mesh())], GlbBuildLimits::default())
+                .expect("an out-of-range selection is not fatal");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("sub-mesh 7"), "{warnings:?}");
+        // Nothing was emitted, so the node keeps no mesh reference.
+        let json = {
+            let bytes = document.into_glb();
+            let length = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]) as usize;
+            String::from_utf8(bytes[20..20 + length].to_vec()).expect("the JSON chunk is UTF-8")
+        };
+        assert!(!json.contains("\"meshes\":"), "{json}");
+    }
+
     fn vec3(x: f32, y: f32, z: f32) -> Vec3 {
         Vec3 { x, y, z }
     }
