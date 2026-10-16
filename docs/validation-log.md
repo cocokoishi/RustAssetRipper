@@ -1,5 +1,40 @@
 # Validation log
 
+## 2026-10-16 - Texture fixture: real blocker identified (two disagreeing 2019.4 trees)
+
+- Outcome: the previously vague "payload is 4 bytes short" is resolved into a concrete,
+  reproducible cause, and it is **not** a payload-authoring problem. No code committed; the
+  tree is left at `4248638` and green.
+- Mechanism, read directly from the source:
+  `processing/asset_factory/materialize.rs::class_layout` chooses the decode layout as
+  `source.tpk_trees(class_id, version)` **first**, and only falls back to the file's own
+  TypeTree when the class database has no record. `reference_class_layouts()` sets
+  `source_tpk = SourceTpkDatabase::embedded()`, so under production layouts class 28 is
+  decoded with the embedded database, not with a file TypeTree. The test-only
+  `FileTypeTreeTestLayouts` returns `None` from `tpk_trees`, which is exactly why the
+  isolated decode and the synthetic-layout runs exercise the *file* tree and pass.
+- The two trees genuinely disagree for 2019.4.40f1. Dumped live from
+  `ClassLayoutSource::tpk_trees(28, 2019.4.40f1)` (the tree production actually uses):
+  `m_Name, m_ForcedFallbackFormat, m_DownscaleFallback, m_Width, m_Height,
+  m_CompleteImageSize, m_TextureFormat, m_MipCount, m_IsReadable, m_IgnoreMasterTextureLimit,
+  m_IsPreProcessed, m_StreamingMipmaps, m_StreamingMipmapsPriority, m_ImageCount,
+  m_TextureDimension, m_TextureSettings, m_LightmapFormat, m_ColorSpace, image data,
+  m_StreamData`.
+  The committed file dump (release root 23374, from `tools/probes/tpk-trees`) instead has
+  `m_IsAlphaChannelOptional`, `m_MipsStripped`, `m_MipmapLimitGroupName`, `m_PlatformBlob`
+  and lacks `m_ForcedFallbackFormat`/`m_DownscaleFallback`/`m_IgnoreMasterTextureLimit`.
+- Consequence: **one payload cannot satisfy both trees.** Authoring against the file dump
+  makes the production decode fail at `m_StreamData.path`; authoring against the production
+  tree makes the file-tree decode fail at `m_PlatformBlob` (offset 88). This is why every
+  previous layout permutation moved the error around without ever going green.
+- Next step, and it is a real question rather than busywork: determine which 2019.4
+  Texture2D shape is correct for a `2019.4.40f1` file. The probe read release root 23374
+  from the TPK for this exact version, while the embedded database's record for the same
+  version is a different shape - so one of the two lookups is selecting the wrong record.
+  That is worth settling because it affects real 2019.4 texture decoding, not just fixtures.
+- Verified after the revert: `cargo test --locked --bin assetripper-rs` - 195 bin tests,
+  0 failed. Working tree clean; HEAD == origin/main == `4248638`.
+
 ## 2026-10-16 - Texture payload tail: measurements narrowed, still open (no code change)
 
 - Outcome: another round spent on the hand-written Texture2D payload tail; **no commit of

@@ -1,5 +1,26 @@
 # RustAssetRipper hand-off — 2026-10-16
 
+## Latest current checkpoint - 2026-10-16 (texture blocker: two 2019.4 trees disagree)
+
+- The "payload 4 bytes short" is **solved as a diagnosis**: it is not a payload bug. Read
+  `materialize.rs::class_layout` - the decode layout is `source.tpk_trees(class_id, version)`
+  first, and the file TypeTree is only a fallback. Production sets
+  `source_tpk = SourceTpkDatabase::embedded()`; the test-only layout source returns `None`
+  from `tpk_trees`, which is why only the synthetic-layout runs exercise the file tree.
+- The embedded database's 2019.4.40f1 class-28 record is a **different shape** from the
+  committed file dump (release root 23374):
+  - embedded: `m_ForcedFallbackFormat`, `m_DownscaleFallback`, `m_IgnoreMasterTextureLimit`;
+    no `m_PlatformBlob`, no `m_IsAlphaChannelOptional`, no `m_MipmapLimitGroupName`.
+  - committed dump: has those three, lacks the first three.
+  One payload cannot satisfy both, so every layout permutation moved the error without
+  going green.
+- **The real task now** (not fixture busywork): decide which 2019.4 Texture2D shape is
+  correct. Both the probe and the embedded database claim to answer for `2019.4.40f1`, so
+  one lookup is picking the wrong record - a genuine correctness question for real 2019.4
+  texture decoding. Recipe: dump both with `TEXFIX_DEBUG=1` (prints a `TPKNODE|` list of the
+  production tree) and compare against `src/resources/texture_typetree_fixture.txt`.
+- Do not run rustfmt on `src/main_tests_01.rs` (not clean at HEAD).
+
 ## Latest current checkpoint - 2026-10-16 (texture payload: hypotheses ruled out, next lead given)
 
 - No code change this round; the tree is at `306e81e` and green. The value is the narrowed
