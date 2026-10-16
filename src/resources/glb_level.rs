@@ -272,6 +272,65 @@ fn attached_mesh(transform: &GlbLevelTransform) -> Option<GlbLevelAttachedMesh> 
     })
 }
 
+/// Turn a plan into a multi-node glTF scene document.
+///
+/// This is the second half of `GlbLevelBuilder.Build`: the plan decides the node graph, and this
+/// emits it. Each node carries its local transform when the plan recorded one, and the scene
+/// lists the roots the plan found.
+///
+/// Geometry is not attached here: a plan node records the *sub-mesh selection* a renderer asks
+/// for, and turning that into primitives needs the decoded `MeshData` the caller holds. Nodes
+/// with a mesh therefore emit a placeholder `mesh` reference the caller fills by appending to
+/// `meshes`, keeping the node/accessor bookkeeping in one place.
+pub fn build_scene_document(plan: &GlbLevelPlan) -> super::glb::SceneDocument {
+    let mut document = super::glb::SceneDocument {
+        nodes: Vec::with_capacity(plan.nodes.len()),
+        meshes: Vec::new(),
+        accessors: Vec::new(),
+        buffer_views: Vec::new(),
+        bin: Vec::new(),
+        scene_roots: Vec::new(),
+    };
+
+    // Children are recorded by parent index, so a node's `children` array needs the full graph.
+    let mut children: Vec<Vec<usize>> = vec![Vec::new(); plan.nodes.len()];
+    for (index, node) in plan.nodes.iter().enumerate() {
+        if let Some(parent) = node.parent {
+            children[parent].push(index);
+        } else {
+            document.scene_roots.push(index);
+        }
+    }
+
+    for (index, node) in plan.nodes.iter().enumerate() {
+        let mut fields: Vec<String> = vec![format!(
+            "\"name\":\"{}\"",
+            super::glb::escape_json(&node.name)
+        )];
+        if let Some(local) = node.local_transform {
+            fields.push(super::glb::node_transform_json(
+                local.translation,
+                local.rotation,
+                local.scale,
+            ));
+        }
+        if !children[index].is_empty() {
+            let list = children[index]
+                .iter()
+                .map(|child| child.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            fields.push(format!("\"children\":[{list}]"));
+        }
+        if node.mesh.is_some() {
+            // The caller appends the mesh and rewrites this index; a plan alone has no geometry.
+            fields.push("\"mesh\":0".to_owned());
+        }
+        document.nodes.push(format!("{{{}}}", fields.join(",")));
+    }
+    document
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,7 +429,8 @@ mod tests {
                             "<none>" => None,
                             other => Some(other),
                         },
-                        "node {} parent", fields[2]
+                        "node {} parent",
+                        fields[2]
                     );
                     let children: Vec<&str> = if fields[4].is_empty() {
                         Vec::new()
@@ -389,27 +449,28 @@ mod tests {
                     let expected_translation = parse_f32_row(fields[6], 3);
                     let expected_scale = parse_f32_row(fields[7], 3);
                     let expected_rotation = parse_f32_row(fields[8], 4);
-                    let local = node
-                        .local_transform
-                        .unwrap_or(GlbLevelLocalTransform {
-                            scale: [1.0, 1.0, 1.0],
-                            rotation: [0.0, 0.0, 0.0, 1.0],
-                            translation: [0.0, 0.0, 0.0],
-                        });
+                    let local = node.local_transform.unwrap_or(GlbLevelLocalTransform {
+                        scale: [1.0, 1.0, 1.0],
+                        rotation: [0.0, 0.0, 0.0, 1.0],
+                        translation: [0.0, 0.0, 0.0],
+                    });
                     assert_eq!(
                         local.translation.as_slice(),
                         expected_translation.as_slice(),
-                        "node {} translation", fields[2]
+                        "node {} translation",
+                        fields[2]
                     );
                     assert_eq!(
                         local.rotation.as_slice(),
                         expected_rotation.as_slice(),
-                        "node {} rotation", fields[2]
+                        "node {} rotation",
+                        fields[2]
                     );
                     assert_eq!(
                         local.scale.as_slice(),
                         expected_scale.as_slice(),
-                        "node {} scale", fields[2]
+                        "node {} scale",
+                        fields[2]
                     );
                     rows_checked += 1;
                 }
@@ -445,6 +506,130 @@ mod tests {
         let values: Vec<f32> = text.split(',').map(|v| v.parse().unwrap()).collect();
         assert_eq!(values.len(), expected, "{text}");
         values
+    }
+
+    /// The emitted document reproduces the reference's node graph.
+    ///
+    /// Same fixture as the plan test, but checked on the serialized glTF rather than the plan: the
+    /// node names and order, the parent/child edges through `children`, the scene roots, and the
+    /// presence or absence of a local transform per node.
+    #[test]
+    fn scene_document_reproduces_the_reference_node_graph() {
+        fn leaf(name: &str, position: [f32; 3]) -> GlbLevelTransform {
+            GlbLevelTransform {
+                game_object_name: name.to_owned(),
+                local_position: position,
+                local_rotation: [0.0, 0.0, 0.0, 1.0],
+                local_scale: [1.0, 1.0, 1.0],
+                children: Vec::new(),
+                mesh: None,
+            }
+        }
+        let plan = build_level_plan(
+            &[
+                GlbLevelTransform {
+                    game_object_name: "Root".to_owned(),
+                    local_position: [1.0, 2.0, 3.0],
+                    local_rotation: [0.0, 0.707_106_77, 0.0, 0.707_106_77],
+                    local_scale: [2.0, 2.0, 2.0],
+                    children: vec![leaf("Child", [4.0, 5.0, 6.0])],
+                    mesh: None,
+                },
+                leaf("Second", [-1.0, -2.0, -3.0]),
+            ],
+            true,
+        )
+        .expect("the plan builds");
+        let document = build_scene_document(&plan);
+        let bytes = document.into_glb();
+
+        // A well-formed GLB header, as the single-mesh export also produces.
+        assert_eq!(&bytes[0..4], b"glTF");
+        assert_eq!(
+            u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+            2
+        );
+        let declared = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize;
+        assert_eq!(
+            declared,
+            bytes.len(),
+            "the declared length matches the body"
+        );
+        let text = json_chunk(&bytes);
+        let text = text.as_str();
+
+        // The reference emitted Root, Child, Grandchild, Second; this fixture has Root, Child,
+        // Second, and the names appear in that order.
+        let root = text.find("\"name\":\"Root\"").expect("Root is emitted");
+        let child = text.find("\"name\":\"Child\"").expect("Child is emitted");
+        let second = text.find("\"name\":\"Second\"").expect("Second is emitted");
+        assert!(
+            root < child && child < second,
+            "emission order is source order"
+        );
+
+        // Both parentless nodes are scene roots.
+        assert!(text.contains("\"scenes\":[{\"nodes\":[0,2]}]"), "{text}");
+        // Root is index 0 and Child index 1, so Root lists Child.
+        assert!(text.contains("\"children\":[1]"), "{text}");
+        // A scene build transforms its roots, so Root carries the converted transform:
+        // position (1,2,3) -> (-1,2,3), and the +90 degree Y rotation -> -0.70710677 about Y.
+        assert!(
+            text.contains("\"translation\":[-1.0,2.0,3.0]"),
+            "the root is converted: {text}"
+        );
+        assert!(
+            text.contains("\"rotation\":[0.0,-0.70710677,-0.0,0.70710677]"),
+            "the axis flip reaches the document: {text}"
+        );
+        // Scale is untouched.
+        assert!(text.contains("\"scale\":[2.0,2.0,2.0]"), "{text}");
+    }
+
+    /// An asset-shaped plan leaves its roots untransformed in the document too.
+    #[test]
+    fn asset_document_leaves_roots_untransformed() {
+        let root = GlbLevelTransform {
+            game_object_name: "Root".to_owned(),
+            local_position: [1.0, 2.0, 3.0],
+            local_rotation: [0.0, 0.0, 0.0, 1.0],
+            local_scale: [2.0, 2.0, 2.0],
+            children: vec![GlbLevelTransform {
+                game_object_name: "Child".to_owned(),
+                local_position: [4.0, 5.0, 6.0],
+                local_rotation: [0.0, 0.0, 0.0, 1.0],
+                local_scale: [1.0, 1.0, 1.0],
+                children: Vec::new(),
+                mesh: None,
+            }],
+            mesh: None,
+        };
+        let plan = build_level_plan(&[root], false).expect("the plan builds");
+        let bytes = build_scene_document(&plan).into_glb();
+        let text = json_chunk(&bytes);
+        // Root is the first node and has no transform; Child does have one.
+        let root_node = text
+            .split("\"nodes\":[")
+            .nth(1)
+            .and_then(|rest| rest.split("},").next())
+            .expect("the nodes array is emitted");
+        assert!(
+            !root_node.contains("translation"),
+            "an asset root is untransformed: {root_node}"
+        );
+        assert!(
+            text.contains("\"translation\":[-4.0,5.0,6.0]"),
+            "the child is converted: {text}"
+        );
+    }
+
+    /// The JSON chunk of a GLB, which is the part a test compares against text.
+    ///
+    /// The file is a binary container: after the 12-byte header comes the JSON chunk header, then
+    /// the JSON, then the binary chunk, so the whole buffer is not valid UTF-8.
+    fn json_chunk(bytes: &[u8]) -> String {
+        let json_length = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]) as usize;
+        String::from_utf8(bytes[20..20 + json_length].to_vec()).expect("the JSON chunk is UTF-8")
     }
 
     fn transform(name: &str, children: Vec<GlbLevelTransform>) -> GlbLevelTransform {

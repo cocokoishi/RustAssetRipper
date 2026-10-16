@@ -762,7 +762,7 @@ fn format_f32(value: f32) -> String {
 }
 
 /// Escapes a string for a glTF JSON document.
-fn escape_json(value: &str) -> String {
+pub fn escape_json(value: &str) -> String {
     let mut result = String::with_capacity(value.len() + 2);
     for character in value.chars() {
         match character {
@@ -1344,6 +1344,89 @@ pub fn build_glb_with_limits(
         emitted_source_indices,
         warnings,
     })
+}
+
+/// Compose a multi-node glTF scene document from already-built parts.
+///
+/// Exposed for `glb_level`, which assembles one document out of several GameObject nodes. The
+/// accessor and buffer-view encodings stay in this module so there is exactly one implementation
+/// of them.
+pub struct SceneDocument {
+    /// Node JSON objects, in emission order.
+    pub nodes: Vec<String>,
+    /// Mesh JSON objects, indexed by the `mesh` a node references.
+    pub meshes: Vec<String>,
+    /// Accessor JSON objects.
+    pub accessors: Vec<String>,
+    /// Buffer-view JSON objects.
+    pub buffer_views: Vec<String>,
+    /// The binary chunk.
+    pub bin: Vec<u8>,
+    /// The indices of the root nodes the scene references.
+    pub scene_roots: Vec<usize>,
+}
+
+impl SceneDocument {
+    /// The complete GLB bytes, following the same layout as a single-mesh export.
+    pub fn into_glb(self) -> Vec<u8> {
+        let meshes = self.meshes.join(",");
+        let mut json = String::new();
+        json.push_str("{\"asset\":{\"version\":\"2.0\",\"generator\":");
+        json.push_str(&escape_json(GENERATOR));
+        let roots = self
+            .scene_roots
+            .iter()
+            .map(|index| index.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        json.push_str(&format!(
+            "}},\"scene\":0,\"scenes\":[{{\"nodes\":[{roots}]}}]"
+        ));
+        json.push_str(&format!(",\"nodes\":[{}]", self.nodes.join(",")));
+        if !meshes.is_empty() {
+            json.push_str(&format!(",\"meshes\":[{meshes}]"));
+        }
+        json.push_str(&format!(
+            ",\"materials\":[{{\"name\":\"{DEFAULT_MATERIAL_NAME}\",\"pbrMetallicRoughness\":\
+             {{\"baseColorFactor\":[1.0,1.0,1.0,1.0],\"metallicFactor\":1.0,\"roughnessFactor\":1.0}}}}]"
+        ));
+        json.push_str(&format!(",\"accessors\":[{}]", self.accessors.join(",")));
+        json.push_str(&format!(
+            ",\"bufferViews\":[{}]",
+            self.buffer_views.join(",")
+        ));
+        json.push_str(&format!(
+            ",\"buffers\":[{{\"byteLength\":{}}}]}}",
+            self.bin.len()
+        ));
+        wrap_glb(&json, &self.bin)
+    }
+}
+
+/// A node's local transform, already converted to glTF space.
+pub fn node_transform_json(translation: [f32; 3], rotation: [f32; 4], scale: [f32; 3]) -> String {
+    format!(
+        "\"translation\":[{},{},{}],\"rotation\":[{},{},{},{}],\"scale\":[{},{},{}]",
+        json_float(translation[0]),
+        json_float(translation[1]),
+        json_float(translation[2]),
+        json_float(rotation[0]),
+        json_float(rotation[1]),
+        json_float(rotation[2]),
+        json_float(rotation[3]),
+        json_float(scale[0]),
+        json_float(scale[1]),
+        json_float(scale[2])
+    )
+}
+
+/// Render a float the way the rest of the document does.
+pub fn json_float(value: f32) -> String {
+    if value == value.trunc() && value.is_finite() && value.abs() < 1e16 {
+        format!("{value:.1}")
+    } else {
+        format!("{value}")
+    }
 }
 
 fn build_json(

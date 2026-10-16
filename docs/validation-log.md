@@ -1,5 +1,40 @@
 # Validation log
 
+## 2026-10-16 - The scene plan now emits a real multi-node glTF document
+
+- Outcome: `build_scene_document` turns a `GlbLevelPlan` into a multi-node glTF scene container,
+  the second half of `GlbLevelBuilder.Build`. Eight tests pass in the module (up from six).
+- **The emitted document reproduces the reference's node graph**, checked on the serialized glTF
+  rather than on the plan: node names in emission order, parent/child edges through `children`,
+  the scene's root list, and whether each node carries a local transform. The root's emitted
+  transform is `"translation":[-1.0,2.0,3.0]` with
+  `"rotation":[0.0,-0.70710677,-0.0,0.70710677]` and `"scale":[2.0,2.0,2.0]`, which are the
+  reference rows from `glb_level_fixture.txt` to the digit - so the axis-flip fix from two rounds
+  ago is now visible in actual emitted output, not only in a helper call.
+- **A structural point worth recording:** a GLB is a binary container, so the whole buffer is not
+  UTF-8 and cannot be compared as text. A test has to decode the JSON chunk at its offset (12-byte
+  header, then the chunk header) to assert on document content. Asserting on `from_utf8_lossy` of
+  the whole file would be silently comparing binary as mojibake.
+- The document writer lives in `glb.rs` (`SceneDocument`, `into_glb`, plus `node_transform_json`,
+  `json_float` and `escape_json` made public), so there is exactly one implementation of the
+  accessor and buffer-view encodings. `glb_level.rs` composes nodes and leaves geometry to the
+  caller, which holds the decoded `MeshData`.
+- **What this does and does not close.** `glb_level.rs` is still **not wired into an export path**,
+  so `EXP-GLB-001` keeps 已实现但未验证 and this module still carries no parity row. What changed is
+  that both halves of the scene builder - the traversal and the document emission - now exist and
+  are reference-checked.
+- **A probe experiment was abandoned deliberately.** Attaching a class-43 `MeshFilter`/`Renderer`
+  to the probe's hierarchy, so the reference would emit geometry lanes for comparison, ran into a
+  chain of generated-API mismatches (the 2019 `VertexData` spells its fields `Channels`/`Data`/
+  `VertexCount` where the modern subclass uses `m_` prefixes; `ChannelInfo` fields are `Byte` and
+  capitalised; the channel list starts empty) and ended in a `NullReferenceException` with no
+  AssetRipper frame, meaning the fault was in the probe's own fixture rather than in the reference.
+  The experiment was reverted rather than committed half-working, and the reference's node-graph
+  rows - which are complete and verified - are what the port is checked against. Geometry lanes for
+  a scene build remain uncompared and are recorded as such.
+- Evidence: `cargo test --locked --workspace` - **1844** library (up from 1842) + 199 bin tests,
+  0 failed, 1 ignored. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+
 ## 2026-10-16 - The scene-level hierarchy walk verified against the reference runtime
 
 - Outcome: `src/resources/glb_level.rs` now matches the shipped `GlbLevelBuilder.Build` node for

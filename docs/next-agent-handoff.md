@@ -1,8 +1,42 @@
 # RustAssetRipper hand-off — 2026-10-16
 
-## Latest current checkpoint - 2026-10-16 (scene walk verified against the reference runtime)
+## Latest current checkpoint - 2026-10-16 (scene plan emits a multi-node glTF document)
 
-- `src/resources/glb_level.rs` now matches the shipped `GlbLevelBuilder.Build` **node for node**,
+- Both halves of the scene builder now exist and are reference-checked:
+  `build_scene_document` in `src/resources/glb_level.rs` emits a multi-node glTF container from a
+  `GlbLevelPlan`, and the emitted root transform
+  (`"translation":[-1.0,2.0,3.0]`, `"rotation":[0.0,-0.70710677,-0.0,0.70710677]`) matches the
+  reference rows in `glb_level_fixture.txt` exactly, so `DIFF-GLB-QUATERNION-SIGN-001` is now
+  visible in emitted output.
+- **A GLB is binary: decode the JSON chunk before asserting on text.** 12-byte header, then the
+  chunk header; the whole buffer is not UTF-8, so `from_utf8_lossy` over the file compares
+  mojibake. `glb_level.rs` has a `json_chunk` test helper for this.
+- The document writer lives in `glb.rs` (`SceneDocument::into_glb`, `node_transform_json`,
+  `json_float`, `escape_json` now public) so the accessor/buffer-view encodings have one
+  implementation. `glb_level.rs` composes nodes only; geometry stays with the caller that holds
+  the decoded `MeshData`.
+- **Still open, and the next real step:** `glb_level.rs` is **not wired into an export path** and
+  carries no parity row, so `EXP-GLB-001` stays 已实现但未验证. Wiring it means feeding decoded
+  meshes through the plan's `subset_indices` and appending real primitives to `SceneDocument`.
+- **Geometry lanes for a scene build are uncompared.** I tried attaching a class-43
+  `MeshFilter`/`Renderer` to the probe hierarchy so the reference would emit `GMESH`/`GPOS`/`GIDX`
+  rows, and reverted the attempt: the generated 2019 API differs from the modern one (2019
+  `VertexData` uses `Channels`/`Data`/`VertexCount`; `ChannelInfo` fields are capitalised `Byte`;
+  the channel list starts empty and must be filled), and it ended in a `NullReferenceException`
+  with **no AssetRipper frame**, i.e. a fault in the probe fixture, not in the reference. If you
+  retry, start from the working `TerrainCase` geometry path in the same probe rather than from a
+  hand-built class-43 Mesh. Until then, do not claim scene geometry is verified.
+- **Never run rustfmt on `src/resources/glb_tests_01.rs`**, `src/main_tests_01.rs`, or
+  `src/main_tests_03.rs`; all three are indented fragments. `src/resources/glb.rs` and
+  `src/resources/glb_level.rs` *are* rustfmt-clean and safe to format.
+- Parity ledger: 405 rows, 381 verified, 24 non-verified, DUPES=0, MALFORMED=0, gate OPEN.
+- `/Scenes/View` still returns 501 (`load_game` does not run `process_workspace_scenes_and_prefabs`).
+- Corpus replays are local-only and have not run in these rounds.
+- Verified: **1844** library + 199 bin tests, 0 failed; warnings-denied Clippy exit 0.
+
+## Previous checkpoint - 2026-10-16 (scene walk verified against the reference runtime)
+
+- `src/resources/glb_level.rs` matched the shipped `GlbLevelBuilder.Build` **node for node**,
   verified against the reference runtime and not against a reading of its source. The new probe
   mode `dotnet run --project tools/probes/res-glb/ResGlbProbe.csproj -c Release -- level` builds a
   two-root hierarchy, drives the real `Build`, and dumps every node; the rows are committed as
