@@ -110,6 +110,7 @@ fn get(state: &mut WebState, request: &Request) -> Response {
                 )
             },
         ),
+        "/Search/View" => search_view(state, request),
         "/IO/File/Exists" => probe(request, |path| Path::new(path).is_file()),
         "/IO/Directory/Exists" => probe(request, |path| Path::new(path).is_dir()),
         "/IO/Directory/Empty" => probe(request, |path| !is_non_empty_directory(Path::new(path))),
@@ -310,6 +311,18 @@ fn collections_count(state: &mut WebState, request: &Request) -> Response {
             path.to_diagnostic()
         )),
     }
+}
+
+/// `GET /Search/View`: search every asset by display and class name.
+///
+/// The frozen page takes no `Path`: an unloaded game answers `404`, and the trimmed `q`
+/// value (empty when absent) drives the form, the matching and the title alike.
+fn search_view(state: &mut WebState, request: &Request) -> Response {
+    let Some(tree) = loaded_tree(state) else {
+        return Response::text("No files loaded.").with_status(404);
+    };
+    let query = request.query_value("q").unwrap_or("").trim().to_owned();
+    Response::html(pages::search_page(state, &query, &tree.search(&query)))
 }
 
 /// One `GET /X/View` page whose asset model is still open: resolve the path, report an
@@ -540,8 +553,11 @@ mod tests {
     #[test]
     fn an_unwired_baseline_route_reports_not_implemented_and_an_unknown_one_404() {
         let mut state = state();
-        assert_eq!(status(&mut state, "GET", "/Search/View"), 501);
         assert_eq!(status(&mut state, "POST", "/Export/PrimaryContent"), 501);
+        // The search page takes no path: without a loaded game it reports that.
+        let response = dispatch(&mut state, &request("GET", "/Search/View"));
+        assert_eq!(response.status(), 404);
+        assert_eq!(response.body(), b"No files loaded.");
         assert_eq!(status(&mut state, "GET", "/nope"), 404);
         // The same path with the other method is a method error, not a missing route.
         assert_eq!(status(&mut state, "GET", "/Reset"), 405);
@@ -650,6 +666,38 @@ mod tests {
             assert!(collection.contains("assetsTable"), "{collection}");
             assert!(collection.contains("/Assets/View?Path="), "{collection}");
             assert!(collection.contains("MonoBehaviour"), "{collection}");
+
+            // Searching the class finds every fixture asset (both loaded copies),
+            // case-insensitively.
+            for query in ["MonoBehaviour", "MONOBEHAVIOUR", "mono"] {
+                let search = format!("/Search/View?q={query}");
+                let response = get(&mut state, &search);
+                assert_eq!(response.status(), 200, "{search}");
+                let body = String::from_utf8(response.body().to_vec()).expect("pages are UTF-8");
+                assert_eq!(body.matches("/Assets/View?Path=").count(), 4, "{search}");
+                assert!(body.contains("/Collections/View?Path="), "{search}");
+            }
+
+            // Searching a display name from the table finds its row.
+            let names = anchor_texts(&collection, "/Assets/View?Path=");
+            assert!(!names.is_empty());
+            let search = format!("/Search/View?q={}", url_encode(&names[0]));
+            let response = get(&mut state, &search);
+            assert_eq!(response.status(), 200, "{search}");
+            let body = String::from_utf8(response.body().to_vec()).expect("pages are UTF-8");
+            assert!(body.contains("/Assets/View?Path="), "{search}");
+
+            // An empty query prompts, a hopeless one reports no results.
+            let response = get(&mut state, "/Search/View");
+            assert_eq!(response.status(), 200);
+            let prompt = String::from_utf8(response.body().to_vec()).expect("pages are UTF-8");
+            assert!(prompt.contains("name=\"q\""), "{prompt}");
+            assert!(!prompt.contains("resultsTable"), "{prompt}");
+            let response = get(&mut state, "/Search/View?q=zzz-no-such-asset");
+            assert_eq!(response.status(), 200);
+            let empty = String::from_utf8(response.body().to_vec()).expect("pages are UTF-8");
+            assert!(!empty.contains("resultsTable"), "{empty}");
+            assert!(!empty.contains("/Assets/View?Path="), "{empty}");
 
             // Unresolvable paths report the baseline's per-kind message.
             let response = get(&mut state, &page("{\"P\":[7]}"));

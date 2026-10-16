@@ -440,6 +440,11 @@ pub fn bundle_view_url(path: &BundlePath) -> String {
     format!("/Bundles/View?Path={}", url_encode(&path.to_json()))
 }
 
+/// The view URL the frozen `SearchAPI.GetViewUrl` builds for `query`.
+pub fn search_view_url(query: &str) -> String {
+    format!("/Search/View?q={}", url_encode(query))
+}
+
 /// The view URL the frozen `CollectionAPI.GetViewUrl` builds for `path`.
 pub fn collection_view_url(path: &CollectionPath) -> String {
     format!("/Collections/View?Path={}", url_encode(&path.to_json()))
@@ -819,6 +824,11 @@ mod tests {
             })),
             "/Scenes/View?Path=%7B%22C%22%3A%7B%22B%22%3A%7B%22P%22%3A%5B%5D%7D%2C%22I%22%3A0%7D%7D"
         );
+        assert_eq!(
+            search_view_url("MonoBehaviour"),
+            "/Search/View?q=MonoBehaviour"
+        );
+        assert_eq!(search_view_url("a b+c"), "/Search/View?q=a%20b%2Bc");
     }
 
     #[test]

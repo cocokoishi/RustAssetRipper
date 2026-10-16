@@ -357,6 +357,83 @@ impl BundleTree {
                     .any(|asset| asset.path_id == path.path_id)
             })
     }
+
+    /// The `BundlePath` of the bundle at `index`, or `None` when out of range.
+    pub fn bundle_path(&self, index: usize) -> Option<BundlePath> {
+        let mut steps = Vec::new();
+        let mut current = index;
+        loop {
+            let bundle = self.bundles.get(current)?;
+            match bundle.parent {
+                None => {
+                    if current != 0 {
+                        return None;
+                    }
+                    break;
+                }
+                Some(parent) => {
+                    let position =
+                        self.bundles
+                            .get(parent)?
+                            .children
+                            .iter()
+                            .position(|&child| child == current)? as i32;
+                    steps.push(position);
+                    current = parent;
+                }
+            }
+        }
+        steps.reverse();
+        let mut path = BundlePath::root();
+        for step in steps {
+            path = path.child(step);
+        }
+        Some(path)
+    }
+
+    /// Search every asset by display and class name, mirroring the frozen `Match`.
+    ///
+    /// Both fields match case-insensitively by containment, and results keep collection
+    /// order: the frozen search never sorts them. Case folding uses Unicode lowercase,
+    /// which agrees with the frozen ordinal-ignore-case comparison on ASCII text.
+    pub fn search(&self, query: &str) -> Vec<SearchMatch> {
+        let folded = query.to_lowercase();
+        let mut matches = Vec::new();
+        for (bundle_index, bundle) in self.bundles.iter().enumerate() {
+            let Some(bundle_path) = self.bundle_path(bundle_index) else {
+                continue;
+            };
+            for (position, collection) in bundle.collections.iter().enumerate() {
+                let collection_path = CollectionPath {
+                    bundle: bundle_path.clone(),
+                    index: position as i32,
+                };
+                for asset in &collection.assets {
+                    if asset.best_name.to_lowercase().contains(&folded)
+                        || asset.class_name.to_lowercase().contains(&folded)
+                    {
+                        matches.push(SearchMatch {
+                            collection_path: collection_path.clone(),
+                            collection_name: collection.name.clone(),
+                            asset: asset.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        matches
+    }
+}
+
+/// One search hit: the asset row with its collection address.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SearchMatch {
+    /// The address of the collection holding the asset.
+    pub collection_path: CollectionPath,
+    /// The collection display name.
+    pub collection_name: String,
+    /// The matching asset row.
+    pub asset: TreeAsset,
 }
 
 /// Build one [`TreeCollection`] from a workspace file.
@@ -454,5 +531,24 @@ mod tests {
         assert_eq!(tree.resolve_bundle(&BundlePath::root()), Some(0));
         assert!(tree.resolve_bundle(&BundlePath::root().child(-1)).is_none());
         assert!(tree.resolve_bundle(&BundlePath::root().child(4)).is_none());
+    }
+
+    #[test]
+    fn bundle_paths_round_trip_through_parent_links() {
+        let workspace = SerializedFileWorkspace::default();
+        let objects = ObjectWorkspace::default();
+        let tree =
+            BundleTree::from_loaded(&workspace, &objects, &[]).expect("empty workspace projects");
+        assert_eq!(tree.bundle_path(0), Some(BundlePath::root()));
+        assert_eq!(tree.bundle_path(1), None);
+    }
+
+    #[test]
+    fn an_empty_tree_has_no_search_hits() {
+        let workspace = SerializedFileWorkspace::default();
+        let objects = ObjectWorkspace::default();
+        let tree =
+            BundleTree::from_loaded(&workspace, &objects, &[]).expect("empty workspace projects");
+        assert!(tree.search("MonoBehaviour").is_empty());
     }
 }

@@ -683,6 +683,96 @@ pub fn collection_page(
     Some(layout(state, &collection.name, inner.as_str()))
 }
 
+/// The search page: the query form plus every matching asset in collection order.
+///
+/// `query` is the trimmed `q` value the frozen page works with. The input element carries
+/// the query pre-escaped exactly like the frozen `WithValue(SearchQuery.ToHtml())` (the
+/// element writer escapes attribute values again), and the table keeps the frozen columns
+/// with the asset and collection links. The class filter and the client script have no
+/// port counterpart (the server renders every row with no client code).
+pub fn search_page(state: &WebState, query: &str, matches: &[super::tree::SearchMatch]) -> String {
+    use super::html::escape;
+    use assetripper::web_paths::{asset_view_url, collection_view_url};
+
+    let title = format!("{}: {query}", t(state, "search"));
+    let mut inner = Html::new();
+    inner.element("h1", &[], &t(state, "search"));
+
+    inner.open(
+        "form",
+        &[
+            ("action", "/Search/View"),
+            ("method", "get"),
+            ("class", "d-flex align-items-center mb-3"),
+        ],
+    );
+    let encoded = escape(query).into_owned();
+    inner.void(
+        "input",
+        &[
+            ("type", "text"),
+            ("id", "searchQuery"),
+            ("name", "q"),
+            ("value", &encoded),
+            ("placeholder", &t(state, "search_placeholder")),
+            ("class", "form-control me-2"),
+            ("style", "max-width: 50%;"),
+        ],
+    );
+    inner.element(
+        "button",
+        &[("type", "submit"), ("class", "btn btn-primary")],
+        &t(state, "search"),
+    );
+    inner.close("form");
+
+    if query.trim().is_empty() {
+        inner.element("p", &[], &t(state, "enter_search_query"));
+    } else if matches.is_empty() {
+        inner.element("p", &[], &t(state, "no_results_found"));
+    } else {
+        inner.element(
+            "h2",
+            &[],
+            &format!("{}: {}", t(state, "results"), matches.len()),
+        );
+        inner.open("table", &[("class", "table")]);
+        inner.open("thead", &[]);
+        inner.open("tr", &[]);
+        inner.element("th", &[], &t(state, "path_id"));
+        inner.element("th", &[], &t(state, "class"));
+        inner.element("th", &[], &t(state, "name"));
+        inner.element("th", &[], &t(state, "collection"));
+        inner.close("tr");
+        inner.close("thead");
+        inner.open("tbody", &[("id", "resultsTable")]);
+        for hit in matches {
+            inner.open("tr", &[("data-class", &hit.asset.class_name)]);
+            inner.element("td", &[], &hit.asset.path_id.to_string());
+            inner.element("td", &[], &hit.asset.class_name);
+            inner.open("td", &[]);
+            tree_link(
+                &mut inner,
+                &asset_view_url(&hit.collection_path.asset(hit.asset.path_id)),
+                &hit.asset.best_name,
+            );
+            inner.close("td");
+            inner.open("td", &[]);
+            tree_link(
+                &mut inner,
+                &collection_view_url(&hit.collection_path),
+                &hit.collection_name,
+            );
+            inner.close("td");
+            inner.close("tr");
+        }
+        inner.close("tbody");
+        inner.close("table");
+    }
+
+    layout(state, &title, inner.as_str())
+}
+
 /// The OpenAPI document the development menu links to.
 ///
 /// The baseline serves a document generated from its minimal API definitions. The port
@@ -1079,13 +1169,13 @@ fn post_form(html: &mut Html, action: &str, label: &str, class: &str) {
 mod tests {
     use super::{
         bundle_page, commands, confirm_delete, index, licenses, openapi_document, pending_page,
-        premium_features, privacy, settings_edit, swagger_page, BOOLEAN_LABELS, LICENSE_TEXTS,
-        TEXT_LABELS,
+        premium_features, privacy, search_page, settings_edit, swagger_page, BOOLEAN_LABELS,
+        LICENSE_TEXTS, TEXT_LABELS,
     };
     use crate::web::localization::{Messages, MISSING_MARKER_PREFIX};
     use crate::web::settings_form::BOOLEAN_KEYS;
     use crate::web::state::WebState;
-    use crate::web::tree::BundleTree;
+    use crate::web::tree::{BundleTree, SearchMatch, TreeAsset};
     use assetripper::export::settings::{ExportDefaults, ImportDefaults, ProcessingDefaults};
     use assetripper::export::settings_file::SerializedSettingsFile;
     use assetripper::localization::LANGUAGE_CODES;
@@ -1127,6 +1217,27 @@ mod tests {
                 ),
             ),
             ("pending", pending_page(state, "GET", "/Search/View")),
+            ("search-prompt", search_page(state, "", &[])),
+            ("search-empty", search_page(state, "zzz", &[])),
+            (
+                "search-results",
+                search_page(
+                    state,
+                    "MonoBehaviour",
+                    &[SearchMatch {
+                        collection_path: assetripper::web_paths::CollectionPath {
+                            bundle: assetripper::web_paths::BundlePath::root(),
+                            index: 0,
+                        },
+                        collection_name: "managed.assets".to_owned(),
+                        asset: TreeAsset {
+                            path_id: 7,
+                            class_name: "MonoBehaviour".to_owned(),
+                            best_name: "ManagedRoot".to_owned(),
+                        },
+                    }],
+                ),
+            ),
             (
                 "bundle",
                 bundle_page(

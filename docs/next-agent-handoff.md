@@ -1,5 +1,24 @@
 # RustAssetRipper hand-off — 2026-10-16
 
+## Latest current checkpoint - 2026-10-16 (search pages query every asset)
+
+- Worktree: `main-work` detached; HEAD == origin/main before this slice.
+  `BundleTree::search` (display/class containment, collection order) plus `bundle_path`
+  feed `GET /Search/View`, which renders the frozen form, prompt/empty/results states
+  and the four-column results table. The class filter and client script are recorded
+  open (server renders every row, no client code).
+- Verification evidence: fixture end-to-end (class, name, case-insensitive, empty and
+  hopeless queries; unloaded 404); every-language sweep renders all three search states;
+  full `cargo test --locked --workspace` **1822 lib + 193 bin, 0 failed**, 1 ignored;
+  `cargo clippy --workspace --all-targets --locked -- -D warnings` exit 0; per-file
+  rustfmt and `git diff --check` clean. Full evidence in `docs/validation-log.md`.
+- Privacy: no sample content/paths/names in code, tests, docs or commit text. Mapping table
+  stays outside the repo; history untouched.
+- Next move: `/Assets/*` data routes, `/Resources/View` + `/Data`,
+  `/FailedFiles/View` + `/StackTrace`, `/Scenes/View`, `/Export/PrimaryContent`.
+  Resource/failed test data still needs crafted inputs. Then re-run the Phase-1 gap
+  rules (9 `实现中` + 1 blocked + 16 `已实现但未验证`).
+
 ## Latest current checkpoint - 2026-10-16 (collection pages list every asset)
 
 - Worktree: `main-work` detached; HEAD == origin/main before this slice. The snapshot now

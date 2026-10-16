@@ -6187,3 +6187,29 @@ These results do not pass the first-phase gate. The reference .NET solution buil
   `/FailedFiles/StackTrace`, `/Scenes/View`, `/Search/View`, `/Export/PrimaryContent`.
   Unity Editor import/runtime and UABEA remain blocked (license/tooling), unchanged by
   this increment.
+## 2026-10-16 - Search pages query every asset (`/Search/View`)
+
+- Scope: `BundleTree::search` matches display and class names case-insensitively by
+  containment in collection order (the frozen `Match`); `BundleTree::bundle_path`
+  rebuilds a bundle's `BundlePath` upward for result links; `search_view_url` joins the
+  lib builders; `GET /Search/View` renders the frozen form, prompt/empty/results states
+  and the four-column results table with asset and collection links. The class filter
+  and client script have no port counterpart (server renders every row, no client code);
+  trim and case folding follow Unicode rules where the frozen side uses ordinal-ignore
+  semantics (identical on ASCII). No export-path behavior changes; no sample, oracle or
+  third-party code touched.
+- Frozen reference: `Pages/Search/` (`SearchAPI` with the `q` query and no-`Path` gates,
+  `ViewPage` with the form/table/filter/script), `PathLinking` button links.
+- Commands run (worktree `main-work`, detached, HEAD == origin/main before this change):
+  1. The fixture end-to-end covers class, name, case-insensitive, empty and hopeless
+     queries plus the unloaded 404.
+  2. `cargo test --locked --workspace` - 1822 library + 193 bin tests, 0 failed, 1 ignored
+     (includes the `search_view_url` builder rows and the every-language sweep now
+     rendering the three search states).
+  3. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+  4. `rustfmt --edition 2021 --check` on each touched file - clean; `git diff --check` -
+     exit 0.
+- Open after this increment: `/Assets/*` data routes, `/Resources/View` + `/Data`,
+  `/FailedFiles/View` + `/StackTrace`, `/Scenes/View`, `/Export/PrimaryContent`.
+  Resource/failed test data still needs crafted inputs. Unity Editor import/runtime and
+  UABEA remain blocked (license/tooling), unchanged by this increment.
