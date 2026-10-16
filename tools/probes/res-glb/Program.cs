@@ -216,8 +216,94 @@ public static class Program
         }
     }
 
+    private static IEnumerable<Type> SafeTypes(Assembly assembly)
+    {
+        try
+        {
+            return assembly.GetTypes();
+        }
+        catch (ReflectionTypeLoadException ex)
+        {
+            return ex.Types.Where(t => t is not null)!;
+        }
+    }
+
+    private static string Format(object value)
+    {
+        // `System.Numerics` vectors and quaternions expose their components as public fields.
+        List<string> parts = new();
+        foreach (FieldInfo field in value.GetType().GetFields(BindingFlags.Public | BindingFlags.Instance))
+        {
+            if (field.FieldType == typeof(float))
+            {
+                parts.Add(((float)field.GetValue(value)!).ToString(Invariant));
+            }
+        }
+        return string.Join(',', parts);
+    }
+
     public static int Main(string[] args)
     {
+        if (args.Length > 0 && args[0] == "quat")
+        {
+            // Call the shipped `GlbCoordinateConversion` helpers directly. The type is internal,
+            // so this binds by reflection rather than by reference. Settles the sign question
+            // for `ToGltfQuaternionConvert`, which composes an axis flip with the coordinate
+            // scale rather than applying the coordinate scale alone.
+            Assembly[] loaded = AppDomain.CurrentDomain.GetAssemblies();
+            Type? conversion = loaded
+                .SelectMany(SafeTypes)
+                .FirstOrDefault(t => t.Name == "GlbCoordinateConversion");
+            if (conversion is null)
+            {
+                // The type lives in the Models module, which may not be loaded yet.
+                try
+                {
+                    Assembly models = Assembly.Load("AssetRipper.Export.Modules.Models");
+                    conversion = SafeTypes(models)
+                        .FirstOrDefault(t => t.Name == "GlbCoordinateConversion");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"QUAT|load-failed|{ex.GetType().Name}");
+                }
+            }
+            if (conversion is null)
+            {
+                string searched = string.Join(',', loaded.Select(a => a.GetName().Name).OrderBy(n => n));
+                Console.WriteLine($"QUAT|missing|GlbCoordinateConversion|{searched}");
+                return 1;
+            }
+            MethodInfo quat = conversion.GetMethod(
+                "ToGltfQuaternionConvert",
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)!;
+            MethodInfo vec3 = conversion.GetMethod(
+                "ToGltfVector3Convert",
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)!;
+            FieldInfo scale = conversion.GetField(
+                "CoordinateSpaceConversionScale",
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)!;
+            object scaleValue = scale.GetValue(null)!;
+            Console.WriteLine($"QUAT|scale|{Format(scaleValue)}");
+            foreach ((float x, float y, float z, float w) input in new[]
+            {
+                (0f, 0f, 0f, 1f),
+                (1f, 0f, 0f, 1f),
+                (0f, 1f, 0f, 1f),
+                (0f, 0f, 1f, 1f),
+                (0.1f, 0.2f, 0.3f, 0.9f),
+            })
+            {
+                object quaternion = Activator.CreateInstance(quat.GetParameters()[0].ParameterType, input.x, input.y, input.z, input.w)!;
+                object converted = quat.Invoke(null, new[] { quaternion })!;
+                object vector = Activator.CreateInstance(vec3.GetParameters()[0].ParameterType, input.x, input.y, input.z)!;
+                object vectorConverted = vec3.Invoke(null, new[] { vector })!;
+                Console.WriteLine(
+                    $"QUAT|{input.x}|{input.y}|{input.z}|{input.w}|{Format(converted)}|{Format(vectorConverted)}");
+            }
+            return 0;
+        }
+
         if (args.Length > 0 && args[0] == "dump")
         {
             Assembly sg = typeof(AssetRipper.SourceGenerated.Classes.ClassID_156.TerrainData).Assembly;

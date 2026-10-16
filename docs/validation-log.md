@@ -1,5 +1,48 @@
 # Validation log
 
+## 2026-10-16 - Found and fixed a real glTF quaternion sign bug (DIFF-GLB-QUATERNION-SIGN-001)
+
+- Outcome: a genuine correctness bug in the port's glTF coordinate conversion, found by starting
+  the scene-level `GlbLevelBuilder` work. New parity row `RES-GLB-COORDINATE-001` 已验证;
+  differential entry `DIFF-GLB-QUATERNION-SIGN-001`.
+- **The bug.** `to_gltf_quaternion` applied `ToGltfVector3Convert` to the axis of rotation, giving
+  `(-1, 1, 1)`. The reference multiplies by `axisFlipScale * CoordinateSpaceConversionScale`,
+  where the private `axisFlipScale` is `-1`, so the real product is `(1, -1, -1)`. **Every axis
+  sign was inverted.** For the input `(1, 0, 0, 1)` the port said `(-1, 0, 0, 1)`; the reference
+  says `(1, -0, -0, 1)`. The flip is not cosmetic - reversing one axis reverses handedness, and
+  rotations run the opposite way in a right-handed system.
+- **Why it survived, which is the more useful lesson.** The helper had **no callers and no test**,
+  so nothing exercised it. Worse, the one test that *mentioned* it asserted the same wrong value:
+  the expectation had been written from the implementation rather than from the reference, so the
+  test confirmed the bug instead of catching it. It became reachable only when the scene-level
+  builder needed local rotations. **A test derived from the code it tests proves nothing**, and an
+  unreferenced helper is an untested helper.
+- **Evidence, established independently rather than by reading source.** I rebuilt the frozen
+  reference into an isolated output directory (the reference tree was not modified), added a
+  `quat` mode to the existing `res-glb` probe that binds the internal `GlbCoordinateConversion`
+  type by reflection and invokes the shipped methods, and captured the reference's own outputs at
+  five inputs. Those rows are committed verbatim as `src/resources/glb_coordinate_fixture.txt`.
+  The probe output `QUAT|1|0|0|1|1,-0,-0,1|-1,0,0` is decisive: the quaternion keeps `x = +1`
+  while the vector becomes `-1`, which is exactly the distinction the port had lost.
+- Two tests now pin it: one replays the five reference-runtime rows and asserts the quaternion and
+  vector conversions stay distinct on all three axes; the other pins the same values from
+  hand-derived expectations, so the fixture is not the only witness.
+- Two probe bugs were fixed along the way and are worth remembering: `System.Numerics` vectors and
+  quaternions expose their components as **public fields, not properties**, so reflection over
+  properties silently produced empty strings; and the type must be loaded explicitly because an
+  internal type is not present in the loaded-assembly set until something touches it.
+- **Process note:** the environment variable that points probes at the reference build names a
+  temp directory, and temp cleanup had removed it. Rebuilding it is cheap and must be done before
+  trusting a probe failure as a real result.
+- Evidence: `cargo test --locked --workspace` - **1841** library (up from 1834) + 199 bin tests,
+  0 failed, 1 ignored. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+  Parity: TOTAL=405, RECOGNIZED=405, NONVERIFIED=24, DUPES=0, MALFORMED=0, GATE=OPEN.
+- Also landed this round, as the first half of the scene-level builder: `src/resources/glb_level.rs`
+  ports `GlbLevelBuilder.Build`'s traversal as an explicit plan - one node per Transform in source
+  order, parent links, the "local transform only for a child or a scene root" rule, the
+  dynamic-versus-static mesh choice, and a node bound. Five tests cover it. It is **not** yet wired
+  into an export path and **not** marked verified; `EXP-GLB-001` keeps its status.
+
 ## 2026-10-16 - Corrected stale gap claims on `EXP-GLB-001`
 
 - Outcome: the `EXP-GLB-001` row's 已知差异 column asserted four unported features and was

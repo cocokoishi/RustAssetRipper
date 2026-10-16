@@ -1,0 +1,26 @@
+# GlbCoordinateConversion: reference-runtime output for `ToGltfQuaternionConvert` and
+# `ToGltfVector3Convert` over the same input vectors and quaternions.
+#
+# Captured from the isolated baseline build of the frozen reference by the probe mode
+#   dotnet run --project tools/probes/res-glb/ResGlbProbe.csproj -c Release -- quat
+# which binds the internal `GlbCoordinateConversion` type by reflection and invokes the shipped
+# methods, so the rows below are the reference's own outputs rather than a reading of its source.
+#
+# Columns:
+#   QCOORD|<quaternion input x,y,z,w>|<ToGltfQuaternionConvert output x,y,z,w>|<ToGltfVector3Convert of the input xyz>
+#   SCALE|<CoordinateSpaceConversionScale>
+#
+# The point of interest is that the quaternion conversion is NOT the vector conversion applied to
+# the axis: `ToGltfQuaternionConvert` additionally multiplies by the private `axisFlipScale = -1`,
+# because reversing one axis reverses handedness and rotations run the other way in a right-handed
+# system. Read row `QCOORD|1|0|0|1|1,-0,-0,1|-1,0,0`: the quaternion x stays +1 while the vector x
+# becomes -1.
+SCALE|-1,1,1
+QCOORD|0,0,0,1|0,-0,-0,1|-0,0,0
+QCOORD|1,0,0,1|1,-0,-0,1|-1,0,0
+QCOORD|0,1,0,1|0,-1,-0,1|-0,1,0
+QCOORD|0,0,1,1|0,-0,-1,1|-0,0,1
+QCOORD|0.1,0.2,0.3,0.9|0.1,-0.2,-0.3,0.9|-0.1,0.2,0.3
+
+# The tangent conversion uses a distinct scale, `(-1, 1, 1, -1)`, so its w component flips too.
+TANGENT_SCALE|-1,1,1,-1

@@ -164,17 +164,18 @@ pub fn to_gltf_tangent(value: Vec4) -> Vec4 {
 }
 
 /// `GlbCoordinateConversion.ToGltfQuaternionConvert`.
+///
+/// The source composes two signs, not one: it multiplies the axis of rotation by
+/// `axisFlipScale * CoordinateSpaceConversionScale`, where `axisFlipScale` is `-1` and the
+/// coordinate scale is `(-1, 1, 1)`. The product is `(1, -1, -1)` - **not** the `(-1, 1, 1)` that
+/// a plain `ToGltfVector3Convert` would give. The extra flip exists because reversing one axis
+/// reverses handedness, and rotations run the other way in a right-handed system. The `w`
+/// component is carried through unchanged.
 pub fn to_gltf_quaternion(value: Quat) -> Quat {
-    let from = Vec3 {
-        x: value.x,
-        y: value.y,
-        z: value.z,
-    };
-    let to = to_gltf_vector3(from);
     Quat {
-        x: to.x,
-        y: to.y,
-        z: to.z,
+        x: -value.x * COORDINATE_SPACE_CONVERSION_SCALE.x,
+        y: -value.y * COORDINATE_SPACE_CONVERSION_SCALE.y,
+        z: -value.z * COORDINATE_SPACE_CONVERSION_SCALE.z,
         w: value.w,
     }
 }
@@ -284,6 +285,13 @@ pub enum GlbError {
         /// The available vertex count.
         vertex_count: usize,
     },
+    /// A scene-level `GlbLevelBuilder.Build` walk exceeded its node bound.
+    LevelNodeLimitExceeded {
+        /// The node count the walk reached.
+        count: usize,
+        /// The configured cap.
+        limit: usize,
+    },
     /// An emitted source index leaves the vertex list it was assembled from.
     VertexIndexOutOfRange {
         /// The node name supplied by the caller.
@@ -387,6 +395,10 @@ impl Display for GlbError {
                 formatter,
                 "navmesh height mesh {mesh_index} index {entry} is {index}, which leaves the \
                  {vertex_count}-vertex list"
+            ),
+            Self::LevelNodeLimitExceeded { count, limit } => write!(
+                formatter,
+                "scene-level GLB build reached {count} nodes, above the {limit}-node limit"
             ),
             Self::VertexIndexOutOfRange {
                 mesh,
@@ -496,6 +508,25 @@ impl Default for GlbBuildLimits {
     fn default() -> Self {
         Self {
             max_output_bytes: 2 * 1024 * 1024 * 1024,
+        }
+    }
+}
+
+/// Resource bounds for a scene-level `GlbLevelBuilder.Build` walk.
+///
+/// The reference has no explicit bound; it walks whatever hierarchy the assets describe. The port
+/// keeps a limit so a cyclic or pathological hierarchy reports a diagnosable error rather than
+/// exhausting the process, in the same spirit as `GlbBuildLimits`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GlbLevelLimits {
+    /// Maximum nodes one scene build may emit.
+    pub max_nodes: usize,
+}
+
+impl Default for GlbLevelLimits {
+    fn default() -> Self {
+        Self {
+            max_nodes: 1_000_000,
         }
     }
 }

@@ -2,6 +2,138 @@
     use crate::numerics::BoneWeight4;
     use crate::resources::sub_mesh_data::SubMeshData;
 
+    /// `GlbCoordinateConversion.ToGltfQuaternionConvert` composes two signs.
+    ///
+    /// The source multiplies the axis of rotation by `axisFlipScale * CoordinateSpaceConversionScale`,
+    /// that is `-1 * (-1, 1, 1)`, which is `(1, -1, -1)`. Applying only the coordinate scale - the
+    /// `(-1, 1, 1)` a plain `ToGltfVector3Convert` gives - would be wrong on all three axes, and
+    /// that was exactly the state of this helper before the scene-level builder became its first
+    /// caller. The `w` component is unchanged.
+    ///
+    /// The expected values below are written from the reference formula, not from the
+    /// implementation, so the test does not simply restate the code it checks.
+    #[test]
+    fn quaternion_conversion_composes_the_axis_flip_with_the_coordinate_scale() {
+        // axisFlipScale * CoordinateSpaceConversionScale = -1 * (-1, 1, 1) = (1, -1, -1).
+        const AXIS_FLIP_TIMES_SCALE: [f32; 3] = [1.0, -1.0, -1.0];
+        fn expected(x: f32, y: f32, z: f32, w: f32) -> [f32; 4] {
+            [
+                x * AXIS_FLIP_TIMES_SCALE[0],
+                y * AXIS_FLIP_TIMES_SCALE[1],
+                z * AXIS_FLIP_TIMES_SCALE[2],
+                w,
+            ]
+        }
+
+        let identity = to_gltf_quaternion(Quat {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            w: 1.0,
+        });
+        assert_eq!(
+            [identity.x, identity.y, identity.z, identity.w],
+            expected(0.0, 0.0, 0.0, 1.0)
+        );
+
+        // A rotation about +X keeps its axis (both signs cancel), and `w` is untouched.
+        let about_x = to_gltf_quaternion(Quat {
+            x: 0.5,
+            y: 0.0,
+            z: 0.0,
+            w: 0.5,
+        });
+        assert_eq!(
+            [about_x.x, about_x.y, about_x.z, about_x.w],
+            expected(0.5, 0.0, 0.0, 0.5)
+        );
+
+        // A rotation about +Y or +Z flips, which a coordinate-scale-only implementation misses.
+        for (x, y, z) in [(0.0, 0.25, 0.0), (0.0, 0.0, 0.25), (0.1, 0.2, 0.3)] {
+            let converted = to_gltf_quaternion(Quat { x, y, z, w: 0.9 });
+            assert_eq!(
+                [converted.x, converted.y, converted.z, converted.w],
+                expected(x, y, z, 0.9),
+                "({x}, {y}, {z})"
+            );
+        }
+    }
+
+    /// The quaternion and vector conversions over the reference's own recorded outputs.
+    ///
+    /// `glb_coordinate_fixture.txt` holds the rows the isolated baseline build produced through
+    /// the probe's `quat` mode, which invokes the shipped `GlbCoordinateConversion` methods by
+    /// reflection. This pins the port against the reference runtime rather than against a reading
+    /// of its source, which matters here because the two conversions differ by a sign that the
+    /// source expresses through a private constant.
+    #[test]
+    fn coordinate_conversions_match_the_reference_runtime_rows() {
+        let fixture = include_str!("glb_coordinate_fixture.txt");
+        let mut coordinate_scale: Option<[f32; 3]> = None;
+        let mut quaternion_rows = 0usize;
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let fields: Vec<&str> = line.split('|').collect();
+            match fields[0] {
+                "SCALE" => {
+                    let parsed = parse_f32_list(fields[1], 3);
+                    assert_eq!(parsed, [-1.0, 1.0, 1.0]);
+                    coordinate_scale = Some([parsed[0], parsed[1], parsed[2]]);
+                }
+                "TANGENT_SCALE" => {
+                    assert_eq!(parse_f32_list(fields[1], 4), [-1.0, 1.0, 1.0, -1.0]);
+                }
+                "QCOORD" => {
+                    let scale = coordinate_scale.expect("the coordinate scale row comes first");
+                    let input = parse_f32_list(fields[1], 4);
+                    let expected_quaternion = parse_f32_list(fields[2], 4);
+                    let expected_vector = parse_f32_list(fields[3], 3);
+
+                    let converted = to_gltf_quaternion(Quat {
+                        x: input[0],
+                        y: input[1],
+                        z: input[2],
+                        w: input[3],
+                    });
+                    // The fixture records IEEE negative zero, which compares equal to 0.0.
+                    assert_eq!(
+                        [converted.x, converted.y, converted.z, converted.w].as_slice(),
+                        expected_quaternion.as_slice(),
+                        "quaternion row {}",
+                        fields[1]
+                    );
+
+                    let vector = to_gltf_vector3(vec3(input[0], input[1], input[2]));
+                    assert_eq!(
+                        [vector.x, vector.y, vector.z].as_slice(),
+                        expected_vector.as_slice(),
+                        "vector row {}",
+                        fields[1]
+                    );
+                    // The two conversions must stay distinct: the quaternion carries an extra
+                    // axis flip, so their signs agree only on x.
+                    assert_eq!(expected_quaternion[0], -expected_vector[0]);
+                    assert_eq!(expected_quaternion[1], -expected_vector[1]);
+                    assert_eq!(expected_quaternion[2], -expected_vector[2]);
+                    assert_eq!(scale[0], -1.0);
+                    quaternion_rows += 1;
+                }
+                other => panic!("unknown fixture row {other}"),
+            }
+        }
+        assert_eq!(quaternion_rows, 5, "every recorded row is checked");
+    }
+
+    /// Parse a comma-separated float list of an expected length.
+    fn parse_f32_list(text: &str, expected: usize) -> Vec<f32> {
+        let values: Vec<f32> = text.split(',').map(|v| v.parse().unwrap()).collect();
+        assert_eq!(values.len(), expected, "{text}");
+        values
+    }
+
     fn vec3(x: f32, y: f32, z: f32) -> Vec3 {
         Vec3 { x, y, z }
     }
@@ -54,6 +186,9 @@
             [tangent.x, tangent.y, tangent.z, tangent.w],
             [-1.0, 2.0, 3.0, -1.0]
         );
+        // Reference-runtime output for (1, 0, 0, 1), captured from the isolated baseline build:
+        // `QUAT|1|0|0|1|1,-0,-0,1|-1,0,0`. The quaternion keeps a positive x while a plain
+        // `ToGltfVector3Convert` of the same vector gives -1; the difference is the axis flip.
         let rotation = to_gltf_quaternion(Quat {
             x: 1.0,
             y: 0.0,
@@ -62,7 +197,7 @@
         });
         assert_eq!(
             [rotation.x, rotation.y, rotation.z, rotation.w],
-            [-1.0, 0.0, 0.0, 1.0]
+            [1.0, -0.0, -0.0, 1.0]
         );
     }
 

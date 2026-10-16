@@ -1,5 +1,37 @@
 # RustAssetRipper hand-off — 2026-10-16
 
+## Latest current checkpoint - 2026-10-16 (glTF quaternion sign bug fixed; level plan ported)
+
+- **A real correctness bug was found and fixed: `DIFF-GLB-QUATERNION-SIGN-001`.** The glTF
+  quaternion conversion had every axis sign inverted. The reference multiplies the axis by
+  `axisFlipScale * CoordinateSpaceConversionScale` = `-1 * (-1, 1, 1)` = `(1, -1, -1)`; the port
+  applied the coordinate scale alone, `(-1, 1, 1)`. Fixed in `src/resources/glb.rs`.
+- **The lesson worth carrying: a test derived from the code it tests proves nothing.** The helper
+  had no callers and no test, and the single test that mentioned it asserted the *same wrong
+  value* - the expectation had been written from the implementation. It was found only because
+  the scene-level builder needed local rotations. When adding an expectation, derive it from the
+  reference or from the format, never from the implementation.
+- **How the reference evidence was obtained**, since the recipe matters: the temp reference build
+  that probes point at gets cleaned up, so rebuild it with
+  `dotnet build AssetRipper\Source\AssetRipper.GUI.Free\AssetRipper.GUI.Free.csproj -c Release -o %LOCALAPPDATA%\Temp\opencode\ar-ref\Source\0Bins\AssetRipper.GUI.Free\Release`.
+  Then `dotnet run --project tools/probes/res-glb/ResGlbProbe.csproj -c Release -- quat` prints
+  reference-runtime rows for the coordinate conversions (bind by reflection; the type is
+  internal). Two traps: `System.Numerics` vectors/quaternions expose **fields, not properties**,
+  and an internal type must be loaded explicitly before it appears in the assembly set.
+- **New this round:** `src/resources/glb_level.rs` ports `GlbLevelBuilder.Build`'s traversal as an
+  explicit plan (one node per Transform in source order, parent links, the "local transform only
+  for a child or a scene root" rule, dynamic-vs-static mesh choice, node bound). Five tests pass.
+  It is **not wired into an export path and not marked verified** - `EXP-GLB-001` keeps its status.
+  **The next step for that row** is to feed this plan into the GLB document writer so a scene
+  build emits real multi-node glTF, then verify it against the reference probe.
+- Parity ledger: 405 rows, **381 verified, 24 non-verified**, DUPES=0, MALFORMED=0, gate OPEN.
+- `/Scenes/View` still returns 501; the obstacle remains that `load_game` does not run
+  `process_workspace_scenes_and_prefabs` (only the export workflow does).
+- Corpus replays are local-only and have not run in these rounds, so `acceptance-corpus.md`
+  per-sample verdicts predate recent changes.
+- Do not run rustfmt on `src/main_tests_01.rs` or `src/main_tests_03.rs`.
+- Verified: **1841** library + 199 bin tests, 0 failed; warnings-denied Clippy exit 0.
+
 ## Latest current checkpoint - 2026-10-16 (`EXP-GLB-001` gap list corrected; one real gap left)
 
 - `EXP-GLB-001` stays 已实现但未验证, but its 已知差异 column was **wrong about two of four named

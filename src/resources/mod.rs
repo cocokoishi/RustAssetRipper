@@ -35,6 +35,7 @@ pub mod etc_decode;
 pub mod game_object;
 pub mod gl_texture_settings;
 pub mod glb;
+pub mod glb_level;
 pub mod graphics_format;
 pub mod image_export;
 pub mod jpeg;
