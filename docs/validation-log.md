@@ -1,5 +1,40 @@
 # Validation log
 
+## 2026-10-16 - The scene GLB export joins the exporter-selection tables
+
+- Outcome: the hierarchy GLB export is now selectable. `ResourceExportFamily::HierarchyGlb` and
+  `hierarchy_glb_family` in `src/export/res_wiring.rs` record how `GlbModelExporter` is chosen,
+  plus the per-family `export_extension` and `is_glb` answers. Three new tests.
+- **The reference selects this exporter by object kind, not by class ID**, and that distinction is
+  now explicit in the port:
+  ```csharp
+  GlbModelExporter modelExporter = new();
+  RegisterHandler<GameObjectHierarchyObject>(modelExporter);
+  RegisterHandler<IGameObject>(modelExporter);
+  RegisterHandler<IComponent>(modelExporter);
+  RegisterHandler<ILevelGameManager>(modelExporter);
+  ```
+  `resource_export_family` is keyed by class ID, so it cannot express this: a plain class-1
+  `GameObject` and a generated hierarchy root would look identical. `hierarchy_glb_family` is a
+  separate entry point taking "is this a hierarchy root?", and a test asserts that classes 29 and
+  1001 stay *unowned* by the class-keyed classifier so the two paths cannot be conflated.
+- **`plan_resource_export` deliberately returns `None` for the new family** rather than emitting
+  something. A whole-hierarchy GLB needs the scene graph and the per-node decoded meshes, which a
+  single-asset planner does not have; producing a one-object GLB would be a silent degradation
+  that *looks* like a hierarchy export. Declining keeps the caller's fall-through honest.
+- Extensions are taken from the reference's own overrides and pinned: `GlbExportCollection`,
+  `GlbSceneModelExportCollection` and `GlbPrefabModelExportCollection` all answer `"glb"`.
+- A correction to my own earlier read: the file path needs no new code. `SingleExportCollection`
+  computes `Asset.GetBestDirectory()` plus a unique name derived from `GetBestName()` with clone
+  and instance suffixes removed, empty names falling back to the class name - which is exactly
+  what `plan_single_export_paths` already implements. The only scene-specific decision was the
+  family and its extension.
+- **What remains for the scene export:** running a real-file export, and wiring geometry selection
+  (the reference reaches meshes through `BuildParameters.TryGetOrMakeMeshData`). `EXP-GLB-SCENE-001`
+  stays 已实现但未验证.
+- Evidence: `cargo test --locked --workspace` - **1861** library (up from 1858) + 199 bin tests,
+  0 failed, 1 ignored. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+
 ## 2026-10-16 - Scene GLB export entry, and a root-selection divergence found and fixed
 
 - Outcome: `src/export/scene_glb.rs` implements the port of `GlbModelExporter`, the scene-level

@@ -1,6 +1,38 @@
 # RustAssetRipper hand-off — 2026-10-16
 
-## Latest current checkpoint - 2026-10-16 (scene GLB export entry; root-selection bug fixed)
+## Latest current checkpoint - 2026-10-16 (hierarchy GLB joins the exporter tables)
+
+- The hierarchy GLB export is now **selectable**: `ResourceExportFamily::HierarchyGlb`,
+  `hierarchy_glb_family`, and per-family `export_extension`/`is_glb` in
+  `src/export/res_wiring.rs`. Three tests.
+- **`GlbModelExporter` is selected by object kind, not class ID.** The reference registers it for
+  `GameObjectHierarchyObject`, `IGameObject`, `IComponent` and `ILevelGameManager`;
+  `resource_export_family` is class-keyed and cannot express that, so `hierarchy_glb_family(true)`
+  is a separate entry point. Classes 29 and 1001 deliberately stay unowned by the class-keyed
+  classifier, and a test pins that so the two paths cannot be conflated.
+- **`plan_resource_export` returns `None` for the hierarchy family on purpose.** A whole-hierarchy
+  GLB needs the scene graph plus per-node meshes; a single-asset planner has neither, and a
+  one-object GLB would be a silent degradation that looks like a hierarchy export.
+- **No new path code was needed.** `SingleExportCollection`'s naming (best directory, best name
+  with clone/instance suffixes removed, empty -> class name, then unique) is exactly what
+  `plan_single_export_paths` already does; only the family and its `"glb"` extension were missing.
+- **Remaining work for `EXP-GLB-SCENE-001` (still 已实现但未验证), in order:**
+  1. Run a real-file scene export and compare against reference output.
+  2. Wire geometry selection: the reference reaches a mesh through
+     `BuildParameters.TryGetOrMakeMeshData` (an `IMesh` -> `MeshData` build plus cache), so the
+     caller resolves each GameObject's `MeshFilter`/`Renderer` fields and passes per-node
+     `MeshData`; `SceneCollectionGraph::mesh` is where the selection belongs.
+  3. Route the family through the project export pipeline so a scene actually writes its `.glb`.
+- **Never format `src/resources/glb_tests_01.rs`** (nor `main_tests_01.rs`/`main_tests_03.rs`).
+  `glb.rs`, `glb_level.rs`, `scene_glb.rs`, `res_wiring.rs` and `export/mod.rs` are rustfmt-clean.
+- **A GLB is binary: decode the JSON chunk before asserting on text** (12-byte header, then the
+  chunk header).
+- Parity ledger: 406 rows, 381 verified, 25 non-verified, DUPES=0, MALFORMED=0, gate OPEN.
+- `/Scenes/View` still returns 501 (`load_game` does not run `process_workspace_scenes_and_prefabs`).
+- Corpus replays are local-only and have not run in these rounds.
+- Verified: **1861** library + 199 bin tests, 0 failed; warnings-denied Clippy exit 0.
+
+## Previous checkpoint - 2026-10-16 (scene GLB export entry; root-selection bug fixed)
 
 - `src/export/scene_glb.rs` is the port of `GlbModelExporter`, the scene-level GLB export entry,
   with the `MaterializedSceneCollection` -> `GlbLevelPlan` adapter. Nine tests. New parity row

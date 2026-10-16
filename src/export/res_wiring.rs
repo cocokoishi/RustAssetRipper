@@ -90,6 +90,38 @@ pub enum ResourceExportFamily {
     ShaderText,
     /// A YAML text asset owned by the project YAML path (class 21).
     MaterialText,
+    /// A whole-hierarchy GLB export owned by `GlbModelExporter`.
+    ///
+    /// Unlike the other families this one is not keyed by the asset's own class: the reference
+    /// registers `GlbModelExporter` for `GameObjectHierarchyObject`, `IGameObject`, `IComponent`
+    /// and `ILevelGameManager`, and `PrimaryContentExporter` tries the handler stack *before* the
+    /// deleted-asset handler. A hierarchy object is a generated class-29 `SceneAsset` for a scene
+    /// and a generated class-1001 `PrefabInstance` for a prefab, so both arrive here through the
+    /// hierarchy path rather than through their own class.
+    HierarchyGlb,
+}
+
+impl ResourceExportFamily {
+    /// The file extension the family's export collection writes.
+    ///
+    /// From the reference's `ExportExtension` overrides: `GlbExportCollection`,
+    /// `GlbSceneModelExportCollection` and `GlbPrefabModelExportCollection` all answer `"glb"`.
+    pub const fn export_extension(self) -> &'static str {
+        match self {
+            Self::Texture => "png",
+            Self::Mesh | Self::Terrain | Self::NavMesh | Self::HierarchyGlb => "glb",
+            Self::Audio => "wav",
+            Self::ShaderText | Self::MaterialText => "asset",
+        }
+    }
+
+    /// True when the family exports through a GLB container.
+    pub const fn is_glb(self) -> bool {
+        matches!(
+            self,
+            Self::Mesh | Self::Terrain | Self::NavMesh | Self::HierarchyGlb
+        )
+    }
 }
 
 /// `IContentExtractor` selection by Unity class ID.
@@ -110,6 +142,20 @@ pub fn resource_export_family(class_id: i32) -> Option<ResourceExportFamily> {
         48 => Some(ResourceExportFamily::ShaderText),
         21 => Some(ResourceExportFamily::MaterialText),
         _ => None,
+    }
+}
+
+/// Whether a generated asset is a scene or prefab hierarchy, which `GlbModelExporter` owns.
+///
+/// The reference registers the exporter against the `GameObjectHierarchyObject` type rather than
+/// against a class ID, and it is tried before the deleted-asset handler. A whole-hierarchy export
+/// is therefore selected by *what the object is* - a generated hierarchy root - not by its class,
+/// so this is a separate entry point from [`resource_export_family`].
+pub const fn hierarchy_glb_family(is_hierarchy_root: bool) -> Option<ResourceExportFamily> {
+    if is_hierarchy_root {
+        Some(ResourceExportFamily::HierarchyGlb)
+    } else {
+        None
     }
 }
 
@@ -710,6 +756,13 @@ pub fn plan_resource_export(
                 }
             }
         }
+        ResourceExportFamily::HierarchyGlb => {
+            // A whole-hierarchy GLB is not a single-asset export: it needs the scene graph and the
+            // per-node decoded meshes, so it goes through `crate::export::scene_glb` rather than
+            // through this per-asset planner. Returning `None` keeps the caller's fall-through
+            // honest instead of emitting a one-object GLB that would look like a hierarchy export.
+            return Ok(None);
+        }
         ResourceExportFamily::ShaderText => {
             let view = ShaderView::from_value(request.root)
                 .map_err(|error| ResourceWiringError::Shader(ShaderTextExportError::View(error)))?;
@@ -841,6 +894,69 @@ mod tests {
         // Classes with no primary-content extractor stay unowned.
         assert_eq!(resource_export_family(1), None);
         assert_eq!(resource_export_family(28_000), None);
+    }
+
+    /// The hierarchy GLB family is selected by what the object is, not by its class.
+    ///
+    /// The reference registers `GlbModelExporter` for `GameObjectHierarchyObject`,
+    /// `IGameObject`, `IComponent` and `ILevelGameManager`, so a hierarchy root is chosen by type
+    /// rather than through `resource_export_family`. Keeping the two entry points separate is what
+    /// stops a plain class-1 GameObject from being mistaken for a whole-hierarchy export.
+    #[test]
+    fn the_hierarchy_glb_family_is_selected_by_object_kind_not_class_id() {
+        assert_eq!(
+            hierarchy_glb_family(true),
+            Some(ResourceExportFamily::HierarchyGlb)
+        );
+        assert_eq!(hierarchy_glb_family(false), None);
+
+        // A class-1 GameObject and a class-4 Transform have no class-keyed GLB family; a mesh
+        // does, and it is the single-mesh one.
+        assert_eq!(resource_export_family(1), None);
+        assert_eq!(resource_export_family(4), None);
+        assert_eq!(resource_export_family(43), Some(ResourceExportFamily::Mesh));
+    }
+
+    /// Every family's extension matches the reference's `ExportExtension` override.
+    #[test]
+    fn export_family_extensions_match_the_reference_collections() {
+        assert_eq!(ResourceExportFamily::Mesh.export_extension(), "glb");
+        assert_eq!(ResourceExportFamily::Terrain.export_extension(), "glb");
+        assert_eq!(ResourceExportFamily::NavMesh.export_extension(), "glb");
+        // `GlbSceneModelExportCollection` and `GlbPrefabModelExportCollection` both answer "glb".
+        assert_eq!(ResourceExportFamily::HierarchyGlb.export_extension(), "glb");
+        assert_eq!(ResourceExportFamily::Texture.export_extension(), "png");
+        assert_eq!(ResourceExportFamily::Audio.export_extension(), "wav");
+
+        // Every GLB family reports itself as one, and no other family does.
+        assert!(ResourceExportFamily::Mesh.is_glb());
+        assert!(ResourceExportFamily::Terrain.is_glb());
+        assert!(ResourceExportFamily::NavMesh.is_glb());
+        assert!(ResourceExportFamily::HierarchyGlb.is_glb());
+        assert!(!ResourceExportFamily::Texture.is_glb());
+        assert!(!ResourceExportFamily::Audio.is_glb());
+        assert!(!ResourceExportFamily::ShaderText.is_glb());
+        assert!(!ResourceExportFamily::MaterialText.is_glb());
+    }
+
+    /// A hierarchy root does not go through the per-asset planner.
+    ///
+    /// A whole-hierarchy GLB needs the scene graph and the per-node decoded meshes, so
+    /// `plan_resource_export` reports `None` for the family and the caller routes it to
+    /// `crate::export::scene_glb`. Emitting a one-object GLB here would be a silent degradation
+    /// that looks like a hierarchy export. The family is therefore absent from the class-keyed
+    /// classifier, which is the property that keeps the two paths apart.
+    #[test]
+    fn the_per_asset_planner_does_not_own_the_hierarchy_family() {
+        // Class 29 (a scene's SceneAsset) and class 1001 (a prefab) both resolve through the
+        // hierarchy path, so neither is claimed by the class-keyed classifier.
+        assert_eq!(resource_export_family(29), None);
+        assert_eq!(resource_export_family(1001), None);
+        // A hierarchy root is still recognised as a hierarchy export.
+        assert_eq!(
+            hierarchy_glb_family(true),
+            Some(ResourceExportFamily::HierarchyGlb)
+        );
     }
 
     #[test]
