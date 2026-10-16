@@ -6123,3 +6123,41 @@ These results do not pass the first-phase gate. The reference .NET solution buil
   `/Resources/Data`, `/Assets/*` data routes, `/Search/View` and `/Export/PrimaryContent`
   keep their explicit pending pages. Unity Editor import/runtime and UABEA remain blocked
   (license/tooling), unchanged by this increment.
+## 2026-10-16 - Bundle-tree snapshot renders the bundle pages (`src/web/tree.rs`)
+
+- Scope: new binary module `src/web/tree.rs` (`BundleTree` snapshot over
+  `SerializedFileWorkspace` plus the explicit root resource catalog, mirroring
+  `GameBundle.FromPaths`: root named `GameBundle`, direct files as root collections in
+  workspace order, containers as child bundles with fixed names, mounted resources/failed
+  entries on their owning bundle; out-of-range or inconsistent indexes are projection
+  errors, never silent drops); `WebState` builds it once per load and drops it on reset;
+  `GET /Bundles/View` renders the resolved bundle (parent/children/collections/resources/
+  failed sections, name-sorted display, source-order links, frozen button style);
+  `GET /Collections/Count` answers the asset census as JSON; the other tree routes resolve
+  first (baseline per-kind 404s, including the frozen `FailedFileAPI` resource message and
+  the C# record-`ToString` diagnostic forms now in `web_paths`) and pend only past that.
+  Names follow the frozen `Name`/`NameFixed` rules (fixed collection/container/resource
+  names; failed entries keep the retained source name). No export-path behavior changes;
+  no sample, oracle or third-party code touched.
+- Frozen reference: `AssetRipper.Assets/Bundles/` (`Bundle`, `GameBundle`,
+  `GameBundle.FromPaths`, `SerializedBundle`), `Pages/{Bundles,Collections}/` (`ViewPage`,
+  `BundleAPI`, `CollectionAPI` including `GetCount`), `Pages/Assets|Resources|FailedFiles|
+  Scenes/*API.cs` resolve messages, `AssetRipper.Web/Extensions/HttpResponseExtensions.cs`,
+  `AssetCollection` naming (`Name = file.NameFixed`).
+- Commands run (worktree `main-work`, detached, HEAD == origin/main before this change):
+  1. `cargo test --locked --bin assetripper-rs web::routes::tests::
+     a_loaded_bundle_renders_its_tree_pages` - passed (committed 3,323-byte synthetic
+     nested UnityFS fixture through the real `load -> snapshot -> view` chain: root page,
+     two-level bundle navigation, per-collection counts summing to the 2-object census,
+     sorted display, pending collection view, per-kind 404 bodies).
+  2. `cargo test --locked --workspace` - 1822 library + 191 bin tests, 0 failed, 1 ignored
+     (includes the 7 `web_paths` lib tests with the new record-`ToString` diagnostics and
+     the every-language sweep now rendering the bundle page).
+  3. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+  4. `rustfmt --edition 2021 --check` on each touched file - clean (never on `src/lib.rs`,
+     which follows the module tree); `git diff --check` - exit 0.
+- Open after this increment: the asset/collection-content pages (`/Collections/View`,
+  `/Assets/*`, `/Resources/Data`, `/FailedFiles/StackTrace`, `/Scenes/View`,
+  `/Search/View`, `/Export/PrimaryContent`) still pend past resolution; root-level
+  resource inputs outside the retained catalogs have no listing. Unity Editor
+  import/runtime and UABEA remain blocked (license/tooling), unchanged by this increment.

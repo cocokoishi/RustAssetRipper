@@ -511,6 +511,122 @@ pub fn pending_page(state: &WebState, method: &str, route: &str) -> String {
     layout(state, &t(state, "not_implemented_yet"), inner.as_str())
 }
 
+/// The bundle page: the bundle name plus its parent, child bundles, collections,
+/// resources and failed files, each sorted by name like the frozen `ViewPage`.
+///
+/// `bundle_index` addresses the bundle in `tree` and `path` is its `BundlePath`; every
+/// link carries the position in the tree's source-order lists, never the display order.
+/// A `None` return means the tree disagrees with the resolved index, which the route
+/// reports as an internal error rather than rendering a half page.
+pub fn bundle_page(
+    state: &WebState,
+    tree: &super::tree::BundleTree,
+    bundle_index: usize,
+    path: &assetripper::web_paths::BundlePath,
+) -> Option<String> {
+    use assetripper::web_paths::{
+        bundle_view_url, collection_view_url, failed_file_view_url, resource_view_url,
+        CollectionPath,
+    };
+
+    let bundle = tree.bundle(bundle_index)?;
+    let mut inner = Html::new();
+    inner.element("h1", &[], &bundle.name);
+
+    if let Some(parent_index) = bundle.parent {
+        let parent = tree.bundle(parent_index)?;
+        inner.element("h2", &[], &t(state, "parent"));
+        tree_link(&mut inner, &bundle_view_url(&path.parent()), &parent.name);
+    }
+
+    if !bundle.children.is_empty() {
+        inner.element("h2", &[], &t(state, "bundles"));
+        let mut children: Vec<(usize, usize)> =
+            bundle.children.iter().copied().enumerate().collect();
+        children.sort_by(|left, right| {
+            tree.bundle(left.1)
+                .map(|bundle| &bundle.name)
+                .cmp(&tree.bundle(right.1).map(|bundle| &bundle.name))
+        });
+        inner.open("ul", &[]);
+        for (position, child_index) in children {
+            let child = tree.bundle(child_index)?;
+            inner.open("li", &[]);
+            tree_link(
+                &mut inner,
+                &bundle_view_url(&path.child(position as i32)),
+                &child.name,
+            );
+            inner.close("li");
+        }
+        inner.close("ul");
+    }
+
+    if !bundle.collections.is_empty() {
+        inner.element("h2", &[], &t(state, "collections"));
+        let mut collections: Vec<(usize, &super::tree::TreeCollection)> =
+            bundle.collections.iter().enumerate().collect();
+        collections.sort_by(|left, right| left.1.name.cmp(&right.1.name));
+        inner.open("ul", &[]);
+        for (position, collection) in collections {
+            inner.open("li", &[]);
+            tree_link(
+                &mut inner,
+                &collection_view_url(&CollectionPath {
+                    bundle: path.clone(),
+                    index: position as i32,
+                }),
+                &collection.name,
+            );
+            inner.close("li");
+        }
+        inner.close("ul");
+    }
+
+    if !bundle.resources.is_empty() {
+        inner.element("h2", &[], &t(state, "resources"));
+        let mut resources: Vec<(usize, &String)> = bundle.resources.iter().enumerate().collect();
+        resources.sort_by(|left, right| left.1.cmp(right.1));
+        inner.open("ul", &[]);
+        for (position, name) in resources {
+            inner.open("li", &[]);
+            tree_link(
+                &mut inner,
+                &resource_view_url(&path.resource(position as i32)),
+                name,
+            );
+            inner.close("li");
+        }
+        inner.close("ul");
+    }
+
+    if !bundle.failed.is_empty() {
+        inner.element("h2", &[], &t(state, "failed_files"));
+        let mut failed: Vec<(usize, &String)> = bundle.failed.iter().enumerate().collect();
+        failed.sort_by(|left, right| left.1.cmp(right.1));
+        inner.open("ul", &[]);
+        for (position, name) in failed {
+            inner.open("li", &[]);
+            tree_link(
+                &mut inner,
+                &failed_file_view_url(&path.failed_file(position as i32)),
+                name,
+            );
+            inner.close("li");
+        }
+        inner.close("ul");
+    }
+
+    Some(layout(state, &bundle.name, inner.as_str()))
+}
+
+/// A link to another tree page, matching the frozen `PathLinking` button style.
+fn tree_link(html: &mut Html, href: &str, name: &str) {
+    html.open("a", &[("class", "btn btn-dark p-0 m-0"), ("href", href)]);
+    html.text(name);
+    html.close("a");
+}
+
 /// The OpenAPI document the development menu links to.
 ///
 /// The baseline serves a document generated from its minimal API definitions. The port
@@ -906,13 +1022,14 @@ fn post_form(html: &mut Html, action: &str, label: &str, class: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        commands, confirm_delete, index, licenses, openapi_document, pending_page,
+        bundle_page, commands, confirm_delete, index, licenses, openapi_document, pending_page,
         premium_features, privacy, settings_edit, swagger_page, BOOLEAN_LABELS, LICENSE_TEXTS,
         TEXT_LABELS,
     };
     use crate::web::localization::{Messages, MISSING_MARKER_PREFIX};
     use crate::web::settings_form::BOOLEAN_KEYS;
     use crate::web::state::WebState;
+    use crate::web::tree::BundleTree;
     use assetripper::export::settings::{ExportDefaults, ImportDefaults, ProcessingDefaults};
     use assetripper::export::settings_file::SerializedSettingsFile;
     use assetripper::localization::LANGUAGE_CODES;
@@ -954,6 +1071,21 @@ mod tests {
                 ),
             ),
             ("pending", pending_page(state, "GET", "/Search/View")),
+            (
+                "bundle",
+                bundle_page(
+                    state,
+                    &BundleTree::from_loaded(
+                        &assetripper::serialized_file::workspace::SerializedFileWorkspace::default(
+                        ),
+                        &[],
+                    )
+                    .expect("an empty workspace projects"),
+                    0,
+                    &assetripper::web_paths::BundlePath::root(),
+                )
+                .expect("the root always renders"),
+            ),
         ]
     }
 

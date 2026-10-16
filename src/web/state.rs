@@ -30,6 +30,7 @@ use crate::export_commands::{
 };
 
 use super::localization::{Messages, FALLBACK_LANGUAGE};
+use super::tree::BundleTree;
 
 /// What the export routes should do for one submitted path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -52,6 +53,7 @@ pub struct WebState {
     headless: bool,
     language: String,
     loaded: Option<LoadedGame>,
+    tree: Option<BundleTree>,
     log: Vec<String>,
     static_content: Vec<(String, Vec<u8>)>,
 }
@@ -95,6 +97,7 @@ impl WebState {
             headless,
             language,
             loaded: None,
+            tree: None,
             log: Vec::new(),
             static_content: Vec::new(),
         })
@@ -144,6 +147,11 @@ impl WebState {
     /// Whether a game is loaded.
     pub fn is_loaded(&self) -> bool {
         self.loaded.is_some()
+    }
+
+    /// The bundle-tree snapshot, present exactly when a game is loaded.
+    pub fn tree(&self) -> Option<&BundleTree> {
+        self.tree.as_ref()
     }
 
     /// The loaded game, when one is present.
@@ -235,15 +243,19 @@ impl WebState {
         let game = load_game(&path_bufs, &self.settings, &mut status)
             .map_err(|error| error.to_string())?;
         self.push_status(&status);
+        let tree = BundleTree::from_loaded(&game.workspace, game.root_catalog.files())
+            .map_err(|error| error.to_string())?;
         self.log
             .push(format!("Loaded {} input path(s).", paths.len()));
         self.loaded = Some(game);
+        self.tree = Some(tree);
         Ok(())
     }
 
     /// `GameFileLoader.Reset`: drop the loaded game, logging only when one was present.
     pub fn reset(&mut self) -> bool {
         let had_data = self.loaded.take().is_some();
+        self.tree = None;
         if had_data {
             self.log.push("Data was reset.".to_owned());
         }

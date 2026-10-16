@@ -63,16 +63,53 @@ fn get(state: &mut WebState, request: &Request) -> Response {
         // without one.
         "/Dialogs/SaveFile" | "/Dialogs/OpenFile" | "/Dialogs/OpenFolder" => Response::json("\"\""),
         "/Dialogs/OpenFiles" | "/Dialogs/OpenFolders" => Response::json("[]"),
-        "/Bundles/View" => bundle_tree_view::<BundlePath>(state, request, "/Bundles/View"),
-        "/Collections/View" => {
-            bundle_tree_view::<CollectionPath>(state, request, "/Collections/View")
-        }
-        "/Assets/View" => bundle_tree_view::<AssetPath>(state, request, "/Assets/View"),
-        "/Resources/View" => bundle_tree_view::<ResourcePath>(state, request, "/Resources/View"),
-        "/FailedFiles/View" => {
-            bundle_tree_view::<FailedFilePath>(state, request, "/FailedFiles/View")
-        }
-        "/Scenes/View" => bundle_tree_view::<ScenePath>(state, request, "/Scenes/View"),
+        "/Bundles/View" => bundles_view(state, request),
+        "/Collections/View" => collections_view(state, request),
+        "/Collections/Count" => collections_count(state, request),
+        "/Assets/View" => pending_tree_view::<AssetPath>(
+            state,
+            request,
+            "/Assets/View",
+            |tree, path| tree.asset_exists(path),
+            |path| format!("Asset could not be resolved: {}", path.to_diagnostic()),
+        ),
+        "/Resources/View" => pending_tree_view::<ResourcePath>(
+            state,
+            request,
+            "/Resources/View",
+            |tree, path| tree.resolve_resource(path).is_some(),
+            |path| {
+                format!(
+                    "Resource file could not be resolved: {}",
+                    path.to_diagnostic()
+                )
+            },
+        ),
+        "/FailedFiles/View" => pending_tree_view::<FailedFilePath>(
+            state,
+            request,
+            "/FailedFiles/View",
+            |tree, path| tree.resolve_failed(path).is_some(),
+            // The frozen `FailedFileAPI` reuses the resource message verbatim.
+            |path| {
+                format!(
+                    "Resource file could not be resolved: {}",
+                    path.to_diagnostic()
+                )
+            },
+        ),
+        "/Scenes/View" => pending_tree_view::<ScenePath>(
+            state,
+            request,
+            "/Scenes/View",
+            |tree, path| tree.resolve_collection(&path.first).is_some(),
+            |path| {
+                format!(
+                    "Scene could not be resolved: {}",
+                    path.first.to_diagnostic()
+                )
+            },
+        ),
         "/IO/File/Exists" => probe(request, |path| Path::new(path).is_file()),
         "/IO/Directory/Exists" => probe(request, |path| Path::new(path).is_dir()),
         "/IO/Directory/Empty" => probe(request, |path| !is_non_empty_directory(Path::new(path))),
@@ -179,26 +216,125 @@ fn export(state: &mut WebState, request: &Request) -> Response {
     }
 }
 
-/// One `GET /X/View` bundle-tree page: run the frozen `TryGet*FromQuery` gate sequence.
+/// Run the frozen `TryGet*FromQuery` gates shared by every tree route.
 ///
-/// A missing or malformed `Path` and an unloaded game each answer `404` with the baseline's
-/// message. A well-formed loaded path needs the bundle-tree projection, which is still open,
-/// so it keeps the explicit pending page instead of inventing bundle content.
-fn bundle_tree_view<T: PathDocument>(
+/// A missing or malformed `Path` and an unloaded game each answer `404` with the
+/// baseline's message; the `Ready` case is left to the caller.
+fn tree_gates<T: PathDocument>(state: &WebState, request: &Request) -> Result<T, Response> {
+    match view_gate::<T>(request.query_value("Path"), state.is_loaded()) {
+        ViewGate::MissingPath => {
+            Err(Response::text("The path must be included in the request.").with_status(404))
+        }
+        ViewGate::InvalidPath(diagnostic) => Err(Response::text(diagnostic).with_status(404)),
+        ViewGate::NotLoaded => Err(Response::text("No files loaded.").with_status(404)),
+        ViewGate::Ready(path) => Ok(path),
+    }
+}
+
+/// The snapshot behind a loaded game. A loaded game always carries one; a `None` here
+/// would mean the state invariant broke, which is reported instead of rendered.
+fn loaded_tree(state: &WebState) -> Option<&super::tree::BundleTree> {
+    state.tree()
+}
+
+/// `GET /Bundles/View`: render the resolved bundle from the snapshot.
+fn bundles_view(state: &mut WebState, request: &Request) -> Response {
+    let path = match tree_gates::<BundlePath>(state, request) {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
+    let Some(tree) = loaded_tree(state) else {
+        return Response::internal_error("A game is loaded but its bundle tree is missing.");
+    };
+    let Some(bundle_index) = tree.resolve_bundle(&path) else {
+        return Response::text(format!("Bundle could not be resolved: {path}")).with_status(404);
+    };
+    match pages::bundle_page(state, tree, bundle_index, &path) {
+        Some(page) => Response::html(page),
+        None => Response::internal_error(format!(
+            "The bundle tree disagrees with the resolved path {path}."
+        )),
+    }
+}
+
+/// `GET /Collections/View`: the collection resolves, but its asset page needs the
+/// decoded asset model, which is still open.
+fn collections_view(state: &mut WebState, request: &Request) -> Response {
+    let path = match tree_gates::<CollectionPath>(state, request) {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
+    let resolved = loaded_tree(state)
+        .and_then(|tree| tree.resolve_collection(&path))
+        .is_some();
+    if resolved {
+        return pending_tree_page(state, "/Collections/View");
+    }
+    Response::text(format!(
+        "Asset collection could not be resolved: {}",
+        path.to_diagnostic()
+    ))
+    .with_status(404)
+}
+
+/// `GET /Collections/Count`: the frozen `CollectionAPI.GetCount` answers the asset count
+/// as JSON once the collection resolves.
+fn collections_count(state: &mut WebState, request: &Request) -> Response {
+    let path = match tree_gates::<CollectionPath>(state, request) {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
+    let Some(tree) = loaded_tree(state) else {
+        return Response::internal_error("A game is loaded but its bundle tree is missing.");
+    };
+    let Some((bundle_index, position)) = tree.resolve_collection(&path) else {
+        return Response::text(format!(
+            "Asset collection could not be resolved: {}",
+            path.to_diagnostic()
+        ))
+        .with_status(404);
+    };
+    match tree
+        .bundle(bundle_index)
+        .and_then(|bundle| bundle.collections.get(position))
+        .map(|collection| collection.asset_count)
+    {
+        Some(count) => Response::json(count.to_string()),
+        None => Response::internal_error(format!(
+            "The bundle tree disagrees with the resolved path {}.",
+            path.to_diagnostic()
+        )),
+    }
+}
+
+/// One `GET /X/View` page whose asset model is still open: resolve the path, report an
+/// unresolvable one with the baseline's message, and otherwise keep the explicit pending
+/// page instead of inventing content.
+fn pending_tree_view<T: PathDocument>(
     state: &mut WebState,
     request: &Request,
     route: &'static str,
+    exists: impl FnOnce(&super::tree::BundleTree, &T) -> bool,
+    unresolvable: impl FnOnce(&T) -> String,
 ) -> Response {
-    match view_gate::<T>(request.query_value("Path"), state.is_loaded()) {
-        ViewGate::MissingPath => {
-            Response::text("The path must be included in the request.").with_status(404)
-        }
-        ViewGate::InvalidPath(diagnostic) => Response::text(diagnostic).with_status(404),
-        ViewGate::NotLoaded => Response::text("No files loaded.").with_status(404),
-        ViewGate::Ready(_) => Response::html(pages::pending_page(state, "GET", route))
-            .with_status(501)
-            .with_content_type("text/html; charset=utf-8"),
+    let path = match tree_gates::<T>(state, request) {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
+    let resolved = loaded_tree(state)
+        .map(|tree| exists(tree, &path))
+        .unwrap_or(false);
+    if !resolved {
+        return Response::text(unresolvable(&path)).with_status(404);
     }
+    pending_tree_page(state, route)
+}
+
+/// The explicit pending page for a resolved path whose view model is still open.
+fn pending_tree_page(state: &WebState, route: &str) -> Response {
+    Response::html(pages::pending_page(state, "GET", route))
+        .with_status(501)
+        .with_content_type("text/html; charset=utf-8")
 }
 
 /// A `Path` query probe: `true`/`false` JSON when `Path` is present, otherwise `400`.
@@ -405,6 +541,145 @@ mod tests {
         // The same path with the other method is a method error, not a missing route.
         assert_eq!(status(&mut state, "GET", "/Reset"), 405);
         assert_eq!(status(&mut state, "POST", "/Privacy"), 405);
+    }
+
+    /// Load the committed nested-bundle fixture through the real pipeline and browse it.
+    ///
+    /// The fixture is a synthetic source-runtime UnityFS bundle (3,323 bytes, two
+    /// SerializedFiles); it exercises the whole `load -> snapshot -> view` chain with
+    /// repository data only.
+    #[test]
+    fn a_loaded_bundle_renders_its_tree_pages() {
+        use assetripper::web_paths::url_encode;
+
+        // The probe input lives under the ignored `target/` scratch tree, like the
+        // other repository tests' temporary inputs.
+        let directory =
+            std::path::PathBuf::from("target/tree-e2e").join(std::process::id().to_string());
+        std::fs::create_dir_all(&directory).expect("the probe directory is created");
+        let input = directory.join("workspace.bundle");
+        std::fs::write(
+            &input,
+            include_bytes!("../export/managed_reference_project_fixture/nested_reference.bundle"),
+        )
+        .expect("the probe bundle is written");
+        // A second copy under an earlier-sorting name proves the display sort:
+        // whatever order the mount keeps, the page lists bundles by name.
+        let early_input = directory.join("a-workspace.bundle");
+        std::fs::write(
+            &early_input,
+            include_bytes!("../export/managed_reference_project_fixture/nested_reference.bundle"),
+        )
+        .expect("the probe bundle is copied");
+        let load_and_browse = || {
+            let mut state = state();
+            state
+                .load(&[
+                    input.to_string_lossy().into_owned(),
+                    early_input.to_string_lossy().into_owned(),
+                ])
+                .expect("the probe bundles load");
+            assert!(state.is_loaded());
+
+            let get = |state: &mut WebState, target: &str| dispatch(state, &request("GET", target));
+            let page = |json: &str| format!("/Bundles/View?Path={}", url_encode(json));
+
+            // The root names the game bundle and links both children by name,
+            // even though the later-sorting input was loaded first.
+            let response = get(&mut state, &page("{\"P\":[]}"));
+            assert_eq!(response.status(), 200);
+            let root = String::from_utf8(response.body().to_vec()).expect("pages are UTF-8");
+            assert!(root.contains("<h1>GameBundle</h1>"), "{root}");
+            assert_eq!(
+                anchor_texts(&root, "/Bundles/View?Path="),
+                ["a-workspace.bundle", "workspace.bundle"]
+            );
+            assert!(!root.contains("Collections</h2>"));
+
+            // The outer container names its bundle after the input file, links back
+            // to the root, and holds one child bundle plus one collection.
+            let response = get(&mut state, &page("{\"P\":[0]}"));
+            assert_eq!(response.status(), 200);
+            let child = String::from_utf8(response.body().to_vec()).expect("pages are UTF-8");
+            assert!(child.contains("<h1>workspace.bundle</h1>"), "{child}");
+            assert!(child.contains(&page("{\"P\":[]}")), "{child}");
+            let nested = anchor_texts(&child, "/Bundles/View?Path=");
+            assert_eq!(nested, ["GameBundle", "nested.bundle"], "{child}");
+            let collections = anchor_texts(&child, "/Collections/View?Path=");
+            assert_eq!(collections.len(), 1, "{child}");
+            assert!(collections[0].contains("managed.assets"), "{collections:?}");
+            assert!(!child.contains("Resources</h2>"), "{child}");
+            assert!(!child.contains("FailedFiles</h2>"), "{child}");
+
+            // The nested container holds the second collection; both collections
+            // together census every object in the fixture.
+            let response = get(&mut state, &page("{\"P\":[0,0]}"));
+            assert_eq!(response.status(), 200);
+            let inner = String::from_utf8(response.body().to_vec()).expect("pages are UTF-8");
+            assert!(inner.contains(&page("{\"P\":[0]}")), "{inner}");
+            let inner_collections = anchor_texts(&inner, "/Collections/View?Path=");
+            assert_eq!(inner_collections.len(), 1, "{inner}");
+
+            // Counts are served as JSON like `GetCount` does.
+            let mut total = 0;
+            for collection_json in [
+                "{\"B\":{\"P\":[0]},\"I\":0}",
+                "{\"B\":{\"P\":[0,0]},\"I\":0}",
+            ] {
+                let count = format!("/Collections/Count?Path={}", url_encode(collection_json));
+                let response = get(&mut state, &count);
+                assert_eq!(response.status(), 200, "{count}");
+                let body = String::from_utf8(response.body().to_vec()).expect("counts are UTF-8");
+                total += body.parse::<usize>().expect("counts are JSON numbers");
+            }
+            assert_eq!(total, 2);
+
+            // A resolved collection without an asset model keeps its pending page.
+            let view = format!(
+                "/Collections/View?Path={}",
+                url_encode("{\"B\":{\"P\":[0]},\"I\":0}")
+            );
+            assert_eq!(get(&mut state, &view).status(), 501);
+
+            // Unresolvable paths report the baseline's per-kind message.
+            let response = get(&mut state, &page("{\"P\":[7]}"));
+            assert_eq!(response.status(), 404);
+            assert_eq!(
+                response.body(),
+                b"Bundle could not be resolved: {\"P\":[7]}"
+            );
+            let missing = format!(
+                "/Collections/Count?Path={}",
+                url_encode("{\"B\":{\"P\":[0]},\"I\":9}")
+            );
+            let response = get(&mut state, &missing);
+            assert_eq!(response.status(), 404);
+            assert_eq!(
+                response.body(),
+                b"Asset collection could not be resolved: CollectionPath { BundlePath = {\"P\":[0]}, Index = 9 }"
+            );
+        };
+        load_and_browse();
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    /// Every `NAME</a>` anchor text pointing at `href_prefix`, in document order.
+    fn anchor_texts(page: &str, href_prefix: &str) -> Vec<String> {
+        let mut texts = Vec::new();
+        let mut rest = page;
+        while let Some(start) = rest.find(href_prefix) {
+            let after_href = rest.get(start + href_prefix.len()..).unwrap_or("");
+            let Some(end) = after_href.find("</a>") else {
+                break;
+            };
+            let anchor = after_href.get(..end).unwrap_or("");
+            if let Some(text_start) = anchor.rfind('>') {
+                texts.push(anchor[text_start + 1..].to_owned());
+            }
+            let tail = after_href.get(end..).unwrap_or("");
+            rest = tail.strip_prefix("</a>").unwrap_or(tail);
+        }
+        texts
     }
 
     fn request_with_body(target: &str, body: &str) -> Request {

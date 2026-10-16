@@ -320,6 +320,53 @@ impl From<CollectionPath> for ScenePath {
     }
 }
 
+/// The frozen record-struct `ToString` forms.
+///
+/// The frozen `*API` resolve-failure messages interpolate the path, which for the
+/// record-struct paths renders the synthesized `ToString` (`CollectionPath { BundlePath =
+/// ..., Index = ... }`), not the JSON document. `BundlePath` is the exception: it
+/// overrides `ToString` with its JSON, so its `Display` is already the diagnostic form.
+impl CollectionPath {
+    /// Render the frozen `CollectionPath.ToString()`.
+    pub fn to_diagnostic(&self) -> String {
+        format!(
+            "CollectionPath {{ BundlePath = {}, Index = {} }}",
+            self.bundle, self.index
+        )
+    }
+}
+
+impl AssetPath {
+    /// Render the frozen `AssetPath.ToString()`.
+    pub fn to_diagnostic(&self) -> String {
+        format!(
+            "AssetPath {{ CollectionPath = {}, PathID = {} }}",
+            self.collection.to_diagnostic(),
+            self.path_id
+        )
+    }
+}
+
+impl ResourcePath {
+    /// Render the frozen `ResourcePath.ToString()`.
+    pub fn to_diagnostic(&self) -> String {
+        format!(
+            "ResourcePath {{ BundlePath = {}, Index = {} }}",
+            self.bundle, self.index
+        )
+    }
+}
+
+impl FailedFilePath {
+    /// Render the frozen `FailedFilePath.ToString()`.
+    pub fn to_diagnostic(&self) -> String {
+        format!(
+            "FailedFilePath {{ BundlePath = {}, Index = {} }}",
+            self.bundle, self.index
+        )
+    }
+}
+
 /// One of the six JSON path documents the `*API.TryGet*FromQuery` methods read.
 pub trait PathDocument: Sized {
     /// Read a `ToJson` document the way the frozen `FromJson` does.
@@ -771,6 +818,42 @@ mod tests {
                 index: 0,
             })),
             "/Scenes/View?Path=%7B%22C%22%3A%7B%22B%22%3A%7B%22P%22%3A%5B%5D%7D%2C%22I%22%3A0%7D%7D"
+        );
+    }
+
+    #[test]
+    fn diagnostics_match_the_frozen_record_to_string_forms() {
+        let collection = CollectionPath {
+            bundle: BundlePath::root().child(1),
+            index: 3,
+        };
+        assert_eq!(
+            collection.to_diagnostic(),
+            "CollectionPath { BundlePath = {\"P\":[1]}, Index = 3 }"
+        );
+        assert_eq!(
+            AssetPath {
+                collection,
+                path_id: 42,
+            }
+            .to_diagnostic(),
+            "AssetPath { CollectionPath = CollectionPath { BundlePath = {\"P\":[1]}, Index = 3 }, PathID = 42 }"
+        );
+        assert_eq!(
+            ResourcePath {
+                bundle: BundlePath::root(),
+                index: 1,
+            }
+            .to_diagnostic(),
+            "ResourcePath { BundlePath = {\"P\":[]}, Index = 1 }"
+        );
+        assert_eq!(
+            FailedFilePath {
+                bundle: BundlePath::root(),
+                index: 1,
+            }
+            .to_diagnostic(),
+            "FailedFilePath { BundlePath = {\"P\":[]}, Index = 1 }"
         );
     }
 

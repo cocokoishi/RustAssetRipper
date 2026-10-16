@@ -1,5 +1,27 @@
 # RustAssetRipper hand-off — 2026-10-16
 
+## Latest current checkpoint - 2026-10-16 (bundle pages render from a live snapshot)
+
+- Worktree: `main-work` detached; HEAD == origin/main before this slice. New binary module
+  `src/web/tree.rs` (`BundleTree` snapshot mirroring `GameBundle.FromPaths`, built once per
+  load from the workspace inventory plus the root resource catalog, dropped on reset);
+  `GET /Bundles/View` renders the resolved bundle and `GET /Collections/Count` answers the
+  census as JSON; the other tree routes resolve first (baseline per-kind 404s, with the C#
+  record-`ToString` diagnostic forms added to `web_paths`) and pend only past that.
+- Verification evidence: fixture end-to-end
+  (`web::routes::tests::a_loaded_bundle_renders_its_tree_pages`, committed 3,323-byte
+  synthetic nested UnityFS bundle, no layout guard needed) plus the every-language sweep now
+  rendering the bundle page; full `cargo test --locked --workspace` **1822 lib + 191 bin,
+  0 failed**, 1 ignored; `cargo clippy --workspace --all-targets --locked -- -D warnings`
+  exit 0; per-file rustfmt (never bare `src/lib.rs`) and `git diff --check` clean. Full
+  evidence in `docs/validation-log.md`.
+- Privacy: no sample content/paths/names in code, tests, docs or commit text. Mapping table
+  stays outside the repo; history untouched.
+- Next move: the collection-content pages (`/Collections/View` asset lists need decoded
+  asset names; `/Assets/*` data routes; `/Resources/Data`; `/FailedFiles/StackTrace`;
+  `/Scenes/View`; `/Search/View`; `/Export/PrimaryContent`). Then re-run the Phase-1 gap
+  rules (9 `实现中` + 1 blocked + 16 `已实现但未验证`).
+
 ## Latest current checkpoint - 2026-10-16 (bundle-tree path values landed; tree projection is next)
 
 - Worktree: `main-work` detached; HEAD == origin/main before this slice, working tree holds only

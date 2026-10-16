@@ -20,6 +20,7 @@
 //! [`assetripper::web_paths`], beside the shared JSON reader they are built on.
 //! * [`server`] - binding, logging, the banner and the connection loop.
 //! * [`state`] - the loaded game, the settings record and the log tail.
+//! * [`tree`] - the read-only bundle-tree snapshot the tree pages render.
 
 pub mod arguments;
 pub mod html;
@@ -30,6 +31,7 @@ pub mod routes;
 pub mod server;
 pub mod settings_form;
 pub mod state;
+pub mod tree;
 
 use std::error::Error;
 use std::ffi::OsString;
