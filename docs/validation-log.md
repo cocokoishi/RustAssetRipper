@@ -1,5 +1,34 @@
 # Validation log
 
+## 2026-10-16 - A baseline capability that is not in the baseline source: C# decompilation
+
+- Outcome: investigated what the primary-content script export actually requires, and found that the
+  decompilation half is a **package reference**, not AssetRipper code. Recorded as a blocked row
+  (`TYPE-SCRIPT-DECOMPILE-001`) rather than omitted. Ledger now 409 rows.
+- **The evidence.** `AssetRipper.Export.csproj` line 9 references
+  `AssetRipper.ICSharpCode.Decompiler` version `11.0.0.9495` - a **fork of ILSpy**. Every
+  AssetRipper-side class in that path is thin: `ILSpyWholeProjectDecompiler` is 30 lines wrapping
+  `WholeProjectDecompiler`, `ProjectFileWriter` is 55 lines of XML. The capability being ported is
+  therefore mostly a third-party library.
+- **Searched for a Rust equivalent rather than assuming none exists.** Web search is unavailable in
+  this session, so the check went through crates.io directly. Two crates are relevant and neither
+  closes the gap: `backtrip` 0.1.4 (Apache-2.0), a Rust .NET-to-C# decompiler that at `0.1.x` cannot
+  be assumed to match a mature decompiler on arbitrary assemblies - and matching output is precisely
+  what acceptance compares - and `dotscope` 0.9.1 (Apache-2.0), which analyses .NET PE metadata and
+  does not emit C# source.
+- **This is the first finding of its kind, and the distinction matters.** Every previous gap was a
+  port that had not been written yet; this one cannot be closed by porting, because the code is not
+  in the repository. The Unity-project path already has a decompiler-free script route
+  (`EmptyScript` templates), so project export still yields script assets; full script **source**
+  export, and with it the primary-content scripts directory, needs a decompiler or an accepted
+  dependency.
+- **Recorded as 受外部条件阻塞 and counted**, per the rule that a required check which cannot be
+  performed is "not verified" or "blocked", never "passed". Choosing between a Rust decompiler and an
+  accepted third-party dependency is the user's call, and the row now makes the choice visible with
+  the licence and build requirements of either option still to be recorded.
+- Evidence: ledger 409 rows, 已验证 380, 受外部条件阻塞 2, MALFORMED=0, DUPES=0. Test suite unchanged
+  at 1897 library + 199 bin, 0 failed.
+
 ## 2026-10-16 - The handler stack runs backwards, and the port said otherwise
 
 - Outcome: measured the primary-content handler stack's order, found the port's documentation

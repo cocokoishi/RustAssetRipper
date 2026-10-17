@@ -1,5 +1,43 @@
 # Source behavior and differential findings
 
+## SCOPE-SCRIPT-DECOMPILER-001 - the script export's decompilation half is a third-party library, and no mature Rust equivalent exists (blocked, recorded rather than omitted)
+
+Every other gap this log records is a port that was missing. This one is different: part of the
+baseline capability **does not live in the AssetRipper source at all**.
+
+`AssetRipper.Export.PrimaryContent/Scripts/ScriptExportCollection.Export` decompiles assemblies to C#
+and writes a `.csproj` and a `.slnx`. The AssetRipper-side code is thin and fully readable:
+`ILSpyWholeProjectDecompiler` is 30 lines wrapping
+`ICSharpCode.Decompiler.CSharp.WholeProjectDecompiler`, and `ProjectFileWriter` is 55 lines of XML.
+The decompilation itself comes from a package reference, not from this repository:
+
+```
+AssetRipper.Export.csproj:9:
+  <PackageReference Include="AssetRipper.ICSharpCode.Decompiler" Version="11.0.0.9495" />
+```
+
+That is a **fork** of ILSpy, so even depending on the upstream ILSpy would not reproduce the
+baseline's exact output.
+
+**Why this is recorded as blocked rather than planned.** Producing C# source from IL is a project of
+its own, and the honest question is whether a pure-Rust component of comparable quality exists.
+Searching crates.io finds two relevant crates and neither closes the gap:
+
+- `backtrip` 0.1.4 (Apache-2.0, github.com/yingkitw/backtrip) - a Rust .NET-to-C# decompiler. At
+  `0.1.x` it cannot be assumed to match a mature decompiler's output on arbitrary assemblies, and
+  matching output is exactly what the acceptance criteria compare.
+- `dotscope` 0.9.1 (Apache-2.0) - a .NET PE analysis framework. It reads metadata and IL and does not
+  emit C# source.
+
+**What this means for the objective.** The Unity-project script export has a decompiler-free path
+already ported (`EmptyScript` templates, `EXP-EMPTY-SCRIPT-001`), so a project export still produces
+script assets. Full script **source** export, and therefore the primary-content scripts directory,
+cannot be completed by porting further; it needs either a Rust decompiler of comparable quality or an
+explicitly accepted third-party dependency with its licence and build requirements recorded. That
+decision is the user's, not the porter's, so the row is marked 受外部条件阻塞 and counted in the
+non-verified queue rather than hidden. This is the one place where "the baseline implements it" and
+"the port can implement it by porting" come apart.
+
 ## DIFF-PRIMARY-HANDLER-ORDER-001 - the primary-content handler stack runs in reverse registration order, and the port documented it the other way round
 
 `ObjectHandlerStack<T>.OverrideHandler` **appends** to a `List<(Type, T, bool)>`, and
