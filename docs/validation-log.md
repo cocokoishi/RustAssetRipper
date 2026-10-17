@@ -1,5 +1,35 @@
 # Validation log
 
+## 2026-10-16 - RES-TEXTURE-001: "platform format branches pending" was false
+
+- Outcome: audited the texture row against the code and re-statused it from 实现中 to 已实现但未验证.
+  The row's verification cell claimed "Platform format branches pending"; the branches are
+  implemented. Ledger 实现中 now 7.
+- **The measurement, so the claim is not another assertion.** The port's format dispatch has **126
+  arms** covering every family the reference handles: ASTC at all six block sizes, ATC RGB4 and
+  RGBA8, BC4, BC5, BC6H and BC7, DXT1, DXT3 and DXT5, ETC1, the four EAC variants, ETC2, ETC2A1 and
+  ETC2A8, PVRTC 2bpp and 4bpp, YUY2, the uncompressed, half, float, signed and `r32` families, and
+  the Crunch container modes. Reading `TextureConverter.cs` confirms those are exactly the reference's
+  arms. Every one of the nine exporters in the reference `Textures` directory also has port code:
+  `RawTextureExporter` 8 references, `TextureArrayAssetExporter` 21, `LightmapTextureAssetExporter`
+  11, `TextureAssetExporter` 47, `TextureExportCollection` 26, `YamlSpriteExporter` 14,
+  `ImporterFactory` 20.
+- **What remains is comparison, not code, and the row now says which is which.** Project export is
+  source-matched only for a generated class-28 Texture2D at two Unity versions with BMP; lightmap
+  Image/BMP is matched across ten bounded generated fixtures. Everything still open - other lightmap
+  entries and modes, other image classes end to end, asset-copied importer fields, Unity-produced
+  payloads, Editor import and runtime - is a comparison that has not been run. Writing that
+  distinction into the row is the point of the audit: 实现中 implied missing branches, and a reader
+  planning work would have gone looking for code that already exists.
+- **Two of the three priority rows are now off 实现中** (`RES-MODEL-001` and `RES-TEXTURE-001`), both
+  for the same reason: the status was set when the row was opened and never revisited as the port
+  caught up. Both audits found at least one cell that was false rather than merely stale.
+- **A self-inflicted error the tooling caught.** My first edit set the verification, evidence and gap
+  cells but omitted the Status cell, so the row still read 实现中 and the parity report said so. The
+  report is run after every ledger edit for exactly this reason, and it earned its place again.
+- Evidence: ledger 409 rows, 已验证 380, 实现中 7, 已实现但未验证 20, 受外部条件阻塞 2, MALFORMED=0,
+  DUPES=0. Test suite unchanged at 1897 library + 199 CLI, 0 failed.
+
 ## 2026-10-16 - An escaped pipe inside a code span, and a misdiagnosis of my own making
 
 - Outcome: repaired a rendering defect in the texture row, and corrected my own wrong diagnosis of it.
