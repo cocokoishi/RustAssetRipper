@@ -8,12 +8,14 @@
   `collection_page` now takes the scene definition's display name and renders the same section,
   with `scene_name_for_collection` resolving it from the cached scene-definition pass that
   `collections_view` now triggers on first use (it was only triggered by `/Scenes/View` before).
-- **The web e2e fixture carries a real scene collection.** `make_occlusion_settings_file` in
-  `crate::tests` was promoted to `pub(super)` and its payload corrected to the **production**
-  class-29 release layout (36 bytes: GUID + `m_OcclusionCullingData` + two empty pointer vectors).
-  A shorter 16-byte payload decodes as truncated under the source TPK tree the factory prefers over
-  any file TypeTree, so the scene GUID read as absent; the embedded file TypeTree now mirrors the
-  36-byte shape for the synthetic-layout tests.
+- **The web e2e fixture carries a real scene collection.** `crate::tests` gained a
+  `pub(super) make_production_occlusion_settings_file` whose payload is the **production** class-29
+  release layout (36 bytes: GUID + `m_OcclusionCullingData` + two empty pointer vectors) with an
+  embedded file TypeTree mirroring that shape. The pre-existing private `make_occlusion_settings_file`
+  stays the short 16-byte hand-written form on purpose: under the source TPK tree the factory prefers
+  over any file TypeTree, that payload decodes as truncated, which is exactly what
+  `workspace_summary_refuses_handbuilt_game_object_data_that_conflicts_with_source_factory` asserts.
+  The web test holds the source-factory guard, so it needs the production builder instead.
 - **The e2e test asserts the whole path**: the `z-zone.assets` collection page renders
   `<h2>Scene</h2>` and one `/Scenes/View?Path=` link named after the definition; the resolved scene
   page renders the name, the `Assets/Scenes/z-zone.assets` collection-name-fallback path, the

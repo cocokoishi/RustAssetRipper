@@ -1592,15 +1592,84 @@
     ///
     /// The collection it forms is a scene (the class ID is one of the four
     /// `LevelGameManager` classes), and its `m_SceneGUID` words are what the scene
-    /// definition preserves. Shared with the web scene-view coverage, which needs a
-    /// committed scene collection to render the definition page.
+    /// definition preserves. The payload and the embedded file TypeTree are both the short
+    /// 16-byte hand-written shape, so the schema-conflict tests that hold the source-factory
+    /// guard see the payload truncated under the production class-29 layout (which needs the
+    /// 36-byte release shape) exactly as intended; the fixture below is the production one.
+    fn make_occlusion_settings_file(scene_guid: [u32; 4]) -> Vec<u8> {
+        let mut string_buffer = Vec::new();
+        let root_type = push_type_tree_string(&mut string_buffer, "OcclusionCullingSettings");
+        let empty_name = push_type_tree_string(&mut string_buffer, "");
+        let guid_type = push_type_tree_string(&mut string_buffer, "GUID");
+        let scene_guid_name = push_type_tree_string(&mut string_buffer, "m_SceneGUID");
+        let uint32_type = push_type_tree_string(&mut string_buffer, "UInt32");
+        let word_names = [
+            push_type_tree_string(&mut string_buffer, "m_Data_0_"),
+            push_type_tree_string(&mut string_buffer, "m_Data_1_"),
+            push_type_tree_string(&mut string_buffer, "m_Data_2_"),
+            push_type_tree_string(&mut string_buffer, "m_Data_3_"),
+        ];
+
+        let mut metadata = Vec::new();
+        metadata.extend_from_slice(b"2019.4.0f1\0");
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 1);
+        put_i32_le(&mut metadata, 29);
+        put_i32_le(&mut metadata, 6);
+        put_i32_le(&mut metadata, i32::try_from(string_buffer.len()).unwrap());
+        put_node(&mut metadata, 0, root_type, empty_name, -1, 0);
+        put_node(&mut metadata, 1, guid_type, scene_guid_name, 16, 1);
+        for (index, name) in word_names.into_iter().enumerate() {
+            put_node(
+                &mut metadata,
+                2,
+                uint32_type,
+                name,
+                4,
+                i32::try_from(index + 2).unwrap(),
+            );
+        }
+        metadata.extend_from_slice(&string_buffer);
+
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 1);
+        put_i32_le(&mut metadata, 42);
+        put_u32_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 16);
+        put_i32_le(&mut metadata, 29);
+        put_u16_le(&mut metadata, 29);
+        put_u16_le(&mut metadata, 0);
+        put_i32_le(&mut metadata, 0);
+        metadata.push(0);
+
+        let data_offset = 20usize + metadata.len();
+        let mut payload = Vec::new();
+        for word in scene_guid {
+            put_u32_le(&mut payload, word);
+        }
+        let file_size = data_offset + payload.len();
+        let mut file = Vec::with_capacity(file_size);
+        file.extend_from_slice(&i32::try_from(metadata.len()).unwrap().to_be_bytes());
+        file.extend_from_slice(&u32::try_from(file_size).unwrap().to_be_bytes());
+        file.extend_from_slice(&10i32.to_be_bytes());
+        file.extend_from_slice(&u32::try_from(data_offset).unwrap().to_be_bytes());
+        file.push(0);
+        file.extend_from_slice(&[0; 3]);
+        file.extend_from_slice(&metadata);
+        file.extend_from_slice(&payload);
+        file
+    }
+
+    /// Build a class-29 `OcclusionCullingSettings` SerializedFile in the **production**
+    /// 2019.4 release shape, for fixtures that hold the source-factory guard.
     ///
-    /// The payload follows the **production** class-29 release layout (36 bytes: the GUID, the
-    /// occlusion-data pointer, and the two renderer/portal pointer vectors). The asset factory
-    /// prefers the source TPK tree over any file TypeTree, so a shorter hand-written payload
-    /// decodes as truncated and the GUID reads as absent; the embedded file TypeTree mirrors the
-    /// same 36-byte shape for the synthetic-layout tests that use it instead.
-    pub(super) fn make_occlusion_settings_file(scene_guid: [u32; 4]) -> Vec<u8> {
+    /// The payload is the 36-byte production layout (the 16-byte GUID, the
+    /// `m_OcclusionCullingData` pointer, and the two empty renderer/portal pointer
+    /// vectors), and the embedded file TypeTree mirrors the same shape. The web scene-view
+    /// coverage needs this form: the factory prefers the source TPK class layout over any
+    /// file TypeTree, so the short [`make_occlusion_settings_file`] payload decodes as
+    /// truncated and its GUID reads as absent under the guard.
+    pub(super) fn make_production_occlusion_settings_file(scene_guid: [u32; 4]) -> Vec<u8> {
         let mut string_buffer = Vec::new();
         let root_type = push_type_tree_string(&mut string_buffer, "OcclusionCullingSettings");
         let empty_name = push_type_tree_string(&mut string_buffer, "");
@@ -1622,8 +1691,7 @@
         let vector_type = push_type_tree_string(&mut string_buffer, "vector");
         let array_type = push_type_tree_string(&mut string_buffer, "Array");
         let size_name = push_type_tree_string(&mut string_buffer, "size");
-        let static_renderers_name =
-            push_type_tree_string(&mut string_buffer, "m_StaticRenderers");
+        let static_renderers_name = push_type_tree_string(&mut string_buffer, "m_StaticRenderers");
         let portals_name = push_type_tree_string(&mut string_buffer, "m_Portals");
 
         let mut metadata = Vec::new();

@@ -482,7 +482,14 @@ fn scene_name_for_collection(
     let file_index = tree.collection_file_index(bundle_index, position)?;
     let definitions = state.scene_definitions()?;
     let scene_index = definitions.scene_index_for_collection(file_index)?;
-    Some(definitions.definitions().get(scene_index)?.plan.name.clone())
+    Some(
+        definitions
+            .definitions()
+            .get(scene_index)?
+            .plan
+            .name
+            .clone(),
+    )
 }
 
 /// `GET /Assets/View`: render the resolved asset's information section.
@@ -1265,8 +1272,9 @@ mod tests {
         // The probe input lives under the ignored `target/` scratch tree, like the
         // other repository tests' temporary inputs.
         use crate::tests::{
-            make_font_file, make_generated_audio_clip_file, make_occlusion_settings_file,
-            make_production_mesh_file, make_reference_texture_file, make_video_clip_file,
+            make_font_file, make_generated_audio_clip_file, make_production_mesh_file,
+            make_production_occlusion_settings_file, make_reference_texture_file,
+            make_video_clip_file,
         };
 
         /// The video clip's external-resource range points at the probe resource input, so the
@@ -1365,14 +1373,19 @@ mod tests {
         let mesh_input = directory.join("z-mesh.assets");
         std::fs::write(&mesh_input, make_production_mesh_file())
             .expect("the mesh asset is written");
-        // A class-29 `OcclusionCullingSettings` file: its collection is a scene, so the
-        // collection page renders the Scene section and `/Scenes/View` renders the definition
-        // with the preserved GUID. The name sorts last, so it appends to the root collection list
-        // without shifting the other fixtures' indices.
+        // A class-29 `OcclusionCullingSettings` file in the production 36-byte release shape:
+        // its collection is a scene, so the collection page renders the Scene section and
+        // `/Scenes/View` renders the definition with the preserved GUID. The name sorts last, so
+        // it appends to the root collection list without shifting the other fixtures' indices.
         let scene_input = directory.join("z-zone.assets");
         std::fs::write(
             &scene_input,
-            make_occlusion_settings_file([0x1122_3344, 0x5566_7788, 0x99aa_bbcc, 0xddee_ff00]),
+            make_production_occlusion_settings_file([
+                0x1122_3344,
+                0x5566_7788,
+                0x99aa_bbcc,
+                0xddee_ff00,
+            ]),
         )
         .expect("the scene asset is written");
         // A VideoClip whose external-resource range names the probe resource input, so the
@@ -1757,7 +1770,10 @@ mod tests {
             let response = get(&mut state, &scene_hrefs[0]);
             assert_eq!(response.status(), 200);
             let scene_page = String::from_utf8(response.body().to_vec()).expect("pages are UTF-8");
-            assert!(scene_page.contains("<h1>z-zone.assets</h1>"), "{scene_page}");
+            assert!(
+                scene_page.contains("<h1>z-zone.assets</h1>"),
+                "{scene_page}"
+            );
             // Without BuildSettings the path falls back to the collection name under Assets/Scenes.
             assert!(
                 scene_page.contains("Assets/Scenes/z-zone.assets"),
