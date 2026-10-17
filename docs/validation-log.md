@@ -1,5 +1,34 @@
 # Validation log
 
+## 2026-10-16 - The four GLB extractors' gates, and the composite `Mesh.IsSet`
+
+- Outcome: extended the primary-content extractor layer with the GLB family's admission rules, and
+  added the one mesh predicate that was genuinely missing. 1887 library tests.
+- **The GLB extractors are now ported as decisions**, so the existing GLB builders have a ported
+  gate even though nothing calls them in production yet:
+  - `GlbMeshExporter` gates on `MeshExtensions.IsSet()`, **not** on "is a mesh". That distinction is
+    load-bearing: a mesh carrying a vertex count but no backing bytes is not set, and admitting it
+    would emit a GLB with no geometry.
+  - `GlbNavMeshExporter` tests `HeightMeshes` for **null**, so a present-but-**empty** list is
+    admitted - which reads like an oversight in the source but is the behaviour, and porting the
+    "obviously intended" emptiness test instead would have been a silent divergence.
+  - `GlbTerrainExporter` has **no condition at all**.
+  - `GlbModelExporter` decides on `asset.MainAsset`: only a scene or prefab hierarchy is admitted, and
+    a bare GameObject declines and falls through. The port records *which* of the two collections
+    would be built, because they gather their assets differently.
+  - All four report the shared `GlbExportCollection` extension, `glb`.
+- **Only one predicate was actually missing, and the rest was already there.** `CompressedMesh::is_set`
+  (line 283 of `compressed_mesh.rs`), `vertex_data_extensions::is_set` (with its own branch test),
+  `StreamingInfoView::is_set`, `mesh::has_any_vertices` and even `GlbExportCollection`'s extension were
+  all already ported. The new `mesh::is_set` therefore **composes** the two halves rather than
+  restating the rule, and its test pins the case that separates it from `has_any_vertices` - a vertex
+  count with no backing bytes, which `HasAnyVertices` accepts and `IsSet` rejects. Running the
+  duplication check *before* writing is what turned this into a three-line function instead of a
+  second copy of the streaming rule.
+- Evidence: `cargo test --locked --workspace` - **1887** library (up from 1883) + 199 bin tests,
+  0 failed, 1 ignored. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+  Ledger `PRODUCT-PRIMARY-CONTENT-EXTRACTORS-001` updated; 408 rows, DUPES=0, MALFORMED=0.
+
 ## 2026-10-16 - The primary-content extractor layer starts, and a host-dependent path rule is fixed
 
 - Outcome: ported `BinaryAssetContentExtractor`'s decisions into `src/export/primary_extractors.rs`,

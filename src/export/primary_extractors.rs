@@ -30,6 +30,8 @@ pub const TEXT_ASSET_EXTENSION: &str = "bytes";
 pub const MOVIE_TEXTURE_EXTENSION: &str = "ogv";
 /// `JsonExportCollection.ExportExtension`.
 pub const JSON_EXTENSION: &str = "json";
+/// `GlbExportCollection.ExportExtension`, shared by all four GLB extractors.
+pub const GLB_EXTENSION: &str = "glb";
 /// `VideoClipExtensions.GetExtensionFromPath`'s fallback when the original path has no extension.
 pub const VIDEO_CLIP_FALLBACK_EXTENSION: &str = "bytes";
 /// `FontExtensions.GetFontExtension`'s fallback for data too short to carry a four-character code.
@@ -112,6 +114,166 @@ pub fn binary_asset_claim(
 // both, which is exactly the duplication this repository has now been bitten by twice: the second
 // copy is where the harder half of a rule goes missing, and its own tests will not notice. They are
 // imported above and reused here.
+
+/// The asset facts the four GLB extractors' `TryCreateCollection` calls read.
+///
+/// One variant per extractor, because each has its own gate and they are registered in a fixed
+/// order. Every admitted collection is a `GlbExportCollection`, so the extension is always `glb` and
+/// the variant carries only the decision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GlbAssetFacts {
+    /// `GlbMeshExporter`: an `IMesh` whose `MeshExtensions.IsSet()` holds. The caller resolves
+    /// `IsSet` through `mesh::is_set`, so the compressed/streaming detail stays with the mesh reader.
+    Mesh { mesh_is_set: bool },
+    /// `GlbNavMeshExporter`: an `INavMeshData` whose `HeightMeshes` is non-null. A present-but-empty
+    /// list is admitted by the source - only `null` declines.
+    NavMesh { height_meshes_present: bool },
+    /// `GlbTerrainExporter`: an `ITerrainData`, with **no** further check.
+    Terrain,
+    /// `GlbModelExporter`: it decides on `asset.MainAsset`, admitting only a scene or prefab
+    /// hierarchy and declining everything else - so a bare GameObject falls through to a later
+    /// handler rather than exporting an empty model.
+    Model { main_asset: GlbModelMainAsset },
+}
+
+/// `GlbModelExporter`'s `MainAsset` switch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GlbModelMainAsset {
+    /// `SceneHierarchyObject`, which routes to `GlbSceneModelExportCollection`.
+    SceneHierarchy,
+    /// `PrefabHierarchyObject`, which routes to `GlbPrefabModelExportCollection`.
+    PrefabHierarchy,
+    /// Anything else, which declines.
+    Other,
+}
+
+/// `TryCreateCollection` for one of the four GLB extractors.
+///
+/// `None` means that extractor declines and the stack continues. The two model variants report which
+/// collection they would build, because the scene and prefab collections differ in how they gather
+/// their assets even though both export `glb`.
+pub fn glb_asset_claim(facts: GlbAssetFacts) -> Option<GlbAssetCollection> {
+    match facts {
+        GlbAssetFacts::Mesh { mesh_is_set } => mesh_is_set.then_some(GlbAssetCollection {
+            extension: GLB_EXTENSION,
+            model_main_asset: None,
+        }),
+        GlbAssetFacts::NavMesh {
+            height_meshes_present,
+        } => height_meshes_present.then_some(GlbAssetCollection {
+            extension: GLB_EXTENSION,
+            model_main_asset: None,
+        }),
+        // `GlbTerrainExporter` admits every `ITerrainData` unconditionally.
+        GlbAssetFacts::Terrain => Some(GlbAssetCollection {
+            extension: GLB_EXTENSION,
+            model_main_asset: None,
+        }),
+        GlbAssetFacts::Model { main_asset } => main_asset.admits().then_some(GlbAssetCollection {
+            extension: GLB_EXTENSION,
+            model_main_asset: Some(main_asset),
+        }),
+    }
+}
+
+impl GlbModelMainAsset {
+    /// Whether `GlbModelExporter` admits this main asset.
+    const fn admits(self) -> bool {
+        matches!(self, Self::SceneHierarchy | Self::PrefabHierarchy)
+    }
+}
+
+/// What a GLB extractor decided for one asset.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GlbAssetCollection {
+    /// Always `glb`; kept as a field so a caller reads the extension from the decision rather than
+    /// assuming it.
+    pub extension: &'static str,
+    /// Set only for `GlbModelExporter`, which is the one that builds two different collections.
+    pub model_main_asset: Option<GlbModelMainAsset>,
+}
+
+#[cfg(test)]
+mod glb_tests {
+    use super::{glb_asset_claim, GlbAssetFacts, GlbModelMainAsset, GLB_EXTENSION};
+
+    /// Each GLB extractor's gate, including the two that admit unconditionally.
+    #[test]
+    fn glb_extractor_gates_match_the_source() {
+        // `GlbMeshExporter` follows `IMesh.IsSet()` rather than merely "is a mesh".
+        assert!(glb_asset_claim(GlbAssetFacts::Mesh { mesh_is_set: true }).is_some());
+        assert_eq!(
+            glb_asset_claim(GlbAssetFacts::Mesh { mesh_is_set: false }),
+            None,
+            "an unset mesh declines so a later handler can claim it"
+        );
+
+        // `GlbNavMeshExporter` tests `HeightMeshes` for null, so a present empty list is admitted.
+        assert!(glb_asset_claim(GlbAssetFacts::NavMesh {
+            height_meshes_present: true
+        })
+        .is_some());
+        assert_eq!(
+            glb_asset_claim(GlbAssetFacts::NavMesh {
+                height_meshes_present: false
+            }),
+            None
+        );
+
+        // `GlbTerrainExporter` has no condition at all.
+        assert!(glb_asset_claim(GlbAssetFacts::Terrain).is_some());
+    }
+
+    /// `GlbModelExporter` admits only a scene or prefab hierarchy main asset.
+    #[test]
+    fn glb_model_admits_only_hierarchy_main_assets() {
+        let scene = glb_asset_claim(GlbAssetFacts::Model {
+            main_asset: GlbModelMainAsset::SceneHierarchy,
+        })
+        .expect("a scene hierarchy is admitted");
+        assert_eq!(scene.extension, GLB_EXTENSION);
+        assert_eq!(
+            scene.model_main_asset,
+            Some(GlbModelMainAsset::SceneHierarchy)
+        );
+
+        let prefab = glb_asset_claim(GlbAssetFacts::Model {
+            main_asset: GlbModelMainAsset::PrefabHierarchy,
+        })
+        .expect("a prefab hierarchy is admitted");
+        assert_eq!(
+            prefab.model_main_asset,
+            Some(GlbModelMainAsset::PrefabHierarchy),
+            "the two hierarchies build different collections"
+        );
+
+        assert_eq!(
+            glb_asset_claim(GlbAssetFacts::Model {
+                main_asset: GlbModelMainAsset::Other
+            }),
+            None,
+            "a bare GameObject declines rather than exporting an empty model"
+        );
+    }
+
+    /// Every admitted GLB collection reports the same extension.
+    #[test]
+    fn every_glb_collection_uses_the_glb_extension() {
+        let claims = [
+            glb_asset_claim(GlbAssetFacts::Mesh { mesh_is_set: true }),
+            glb_asset_claim(GlbAssetFacts::NavMesh {
+                height_meshes_present: true,
+            }),
+            glb_asset_claim(GlbAssetFacts::Terrain),
+            glb_asset_claim(GlbAssetFacts::Model {
+                main_asset: GlbModelMainAsset::SceneHierarchy,
+            }),
+        ];
+        for claim in claims {
+            assert_eq!(claim.expect("admitted").extension, GLB_EXTENSION);
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

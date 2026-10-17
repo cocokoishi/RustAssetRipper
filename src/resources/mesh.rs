@@ -413,6 +413,32 @@ pub fn has_any_vertices(compressed_vertex_items: u32, vertex_count: u32) -> bool
     compressed_vertex_items > 0 || vertex_count > 0
 }
 
+/// `MeshExtensions.IsSet`: the mesh carries geometry, either compressed or plain.
+///
+/// The source reads `mesh.CompressedMesh.IsSet || mesh.VertexData.IsSet(mesh.StreamData)`, and both
+/// halves are already ported - [`super::compressed_mesh::CompressedMesh::is_set`] and
+/// [`super::vertex_data_extensions::is_set`] - so this composes them rather than restating the rule.
+/// Composing matters because the two predicates differ: `HasAnyVertices` above accepts a mesh whose
+/// vertex data has a count but no backing bytes, while `IsSet` rejects it.
+///
+/// `GlbMeshExporter.TryCreateCollection` gates on this, so a mesh that fails it falls through to the
+/// next handler instead of producing a GLB with no geometry.
+///
+/// `streaming_info_is_set` is `None` when the mesh has no `m_StreamData`.
+pub fn is_set(
+    compressed_mesh_is_set: bool,
+    vertex_count: u32,
+    vertex_data_len: usize,
+    streaming_info_is_set: Option<bool>,
+) -> bool {
+    compressed_mesh_is_set
+        || super::vertex_data_extensions::is_set(
+            vertex_count,
+            vertex_data_len,
+            streaming_info_is_set,
+        )
+}
+
 fn read_u16(bytes: &[u8], endian: EndianType) -> u16 {
     let pair = [bytes[0], bytes[1]];
     match endian {
@@ -937,6 +963,36 @@ fn index_field_name(lane: usize) -> &'static str {
 mod tests {
     use super::*;
     use crate::serialized_file::object::SerializedFieldValue;
+
+    /// `MeshExtensions.IsSet` composes the compressed and vertex-data halves, and differs from
+    /// `HasAnyVertices` on the case that runs them apart: a vertex count with no backing bytes.
+    #[test]
+    fn is_set_composes_the_compressed_and_vertex_data_halves() {
+        // Compressed geometry alone is enough.
+        assert!(is_set(true, 0, 0, None));
+        // Plain inline vertex data needs a count and bytes.
+        assert!(is_set(false, 3, 36, None));
+        assert!(
+            !is_set(false, 3, 0, None),
+            "a count with no bytes is not set"
+        );
+        assert!(
+            !is_set(false, 0, 36, None),
+            "bytes with no count are not set"
+        );
+        // Streamed data substitutes for inline bytes, and only when the descriptor is set.
+        assert!(is_set(false, 3, 0, Some(true)));
+        assert!(!is_set(false, 3, 0, Some(false)));
+        assert!(
+            !is_set(false, 0, 0, Some(true)),
+            "a count is still required"
+        );
+        // Absent and unset streaming info behave the same when there are no bytes.
+        assert!(!is_set(false, 3, 0, None));
+        // The distinction from `HasAnyVertices`: that predicate accepts this, `IsSet` does not.
+        assert!(has_any_vertices(0, 3));
+        assert!(!is_set(false, 3, 0, None));
+    }
 
     fn field(name: &str, value: SerializedValue) -> SerializedFieldValue {
         SerializedFieldValue {

@@ -21,9 +21,14 @@
   `GetFontExtension` and `GetExtensionFromPath`; `resource_extensions` already ported both. Replaced
   with imports. **Rule: before porting a reference behaviour, grep the tree for the reference symbol
   name.** Both duplicates were caught by exactly that search.
-- **Remaining for `/Export/PrimaryContent` (still 501):** the audio, texture, script, GLB
-  model/mesh/terrain/navmesh and deleted-asset extractors, plus a production caller for
-  `binary_asset_claim` and for `json_walker::write_json_body`.
+- **The four GLB extractors' gates are ported too.** `GlbMeshExporter` follows `MeshExtensions.IsSet()`
+  (not "is a mesh"), `GlbNavMeshExporter` tests `HeightMeshes` for **null** so a present-but-empty
+  list is admitted, `GlbTerrainExporter` has no condition, `GlbModelExporter` admits only a scene /
+  prefab hierarchy main asset. `mesh::is_set` was the only genuinely missing predicate and it
+  **composes** the already-ported `CompressedMesh::is_set` and `vertex_data_extensions::is_set`.
+- **Remaining for `/Export/PrimaryContent` (still 501):** the audio, texture, script and
+  deleted-asset extractors, plus a production caller for `binary_asset_claim`, `glb_asset_claim` and
+  `json_walker::write_json_body`.
 - **Next steps, in order:** finish the extractor layer (texture + script + GLB are the largest
   remaining), then wire the route, then the 9 `实现中` rows (`RES-TEXTURE-001`, `RES-MODEL-001`,
   `EXPORT-UNITY-001` first).
