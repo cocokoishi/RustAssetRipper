@@ -1,5 +1,36 @@
 # Validation log
 
+## 2026-10-16 - The caller's half of the scene geometry: MeshFilter, mesh facts, renderer fields
+
+- Outcome: `resolve_attached_meshes` reads each Transform's `MeshFilter`, resolves its mesh and yields
+  the facts the walk needs; the dynamic/static decision moved into one public function so the caller
+  does not restate it. 1934 library tests (up from 1933).
+- **The gates are the source's `&&` chain, and their order matters.** `TryGetComponent<MeshFilter>`,
+  then `TryGetMesh`, then `mesh.IsSet()`, then `TryGetOrMakeMeshData`, and only then
+  `TryGetComponent<IRenderer>`. A GameObject whose mesh is unset attaches nothing **even when a
+  Renderer is present**, which is why the mesh gate is checked first and why the test asserts that
+  ordering rather than just the outcome.
+- **The renderer set is reused, not written.** `RENDERER_CLASS_IDS` already exists, derived from the
+  shipped generated assembly through a probe, and `anim_wiring` already uses it for the same kind of
+  check. A hand-written list of renderer class ids would have been a second, drift-prone copy.
+- **One nearby rule was deliberately not reused.** `workspace_yaml`'s `renderer_static_batch_marks`
+  reads the same two fields but answers a **different question** - the editor-format converter's
+  static flag, where a present-and-non-default `m_StaticBatchInfo` marks - while the GLB builder asks
+  whether `SubMeshCount == 0` or `SubsetIndices.Count == 0`. Same fields, different predicates; using
+  the first here would have been silently wrong, and it is the kind of reuse that looks like tidiness.
+- **A mesh in another file is not resolved and yields nothing**, because reaching it needs the bundle
+  walk this path does not do. Returning no facts keeps the node without geometry instead of inventing
+  one, and the doc says so.
+- **What is not verified, stated plainly.** The positive path - a valid mesh payload yielding
+  `MeshData` - needs a vertex-blob fixture that does not exist yet, so it is uncovered; the test covers
+  the gate ordering and the small readers, which is what a synthetic payload can decide. And
+  `resolve_attached_meshes` has **no production caller yet**: `export_plan_as_glb` takes geometry by
+  node position while this resolves it by Transform, so the plan has to be keyed by the source mesh
+  before the driver can use it.
+- Evidence: `cargo test --locked --workspace` - **1934** library + 206 CLI tests, 0 failed, 1 ignored.
+  `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0. The staged numstat showed
+  three files and no whole-file rewrites.
+
 ## 2026-10-16 - The scene GLB can attach geometry now, and the plan says which mesh
 
 - Outcome: `SceneGlbExportInput::attached_meshes` carries the geometry the caller resolved, indexed by

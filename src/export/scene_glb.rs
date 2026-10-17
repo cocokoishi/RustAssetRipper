@@ -24,15 +24,25 @@
 //! mesh could not be built is skipped with a warning, exactly as the reference skips one whose
 //! `TryGetOrMakeMeshData` returns false.
 
-use crate::export::scene_wiring::MaterializedSceneCollection;
-use crate::processing::scene::{SceneRelationshipTarget, SceneTransformValues};
+use crate::export::scene_wiring::{
+    MaterializedComponentSlot, MaterializedComponentTarget, MaterializedSceneCollection,
+};
+use crate::processing::scene::{SceneRelationship, SceneRelationshipTarget, SceneTransformValues};
+use crate::resources::animation::converter::RENDERER_CLASS_IDS;
 use crate::resources::glb::{
     attach_plan_geometry, GlbBuildLimits, GlbError, GlbLevelLimits, GlbMeshExport,
 };
 use crate::resources::glb_level::{
     build_scene_document, build_scene_plan_with_limits, GlbLevelAttachedMesh,
-    GlbLevelLocalTransform, GlbLevelPlan, SceneCollectionGraph,
+    GlbLevelLocalTransform, GlbLevelMesh, GlbLevelPlan, GlbSourceMesh, SceneCollectionGraph,
 };
+use crate::resources::mesh::MeshView;
+use crate::resources::packed_bit_vector::PackedBitVectorLimits;
+use crate::resources::sub_mesh_data::IndexFormat;
+use crate::resources::vertex_data_blob::{EndianType, UnityVersion};
+use crate::serialized_file::object::SerializedValue;
+use crate::serialized_file::object_workspace::ObjectWorkspace;
+use crate::serialized_file::workspace::LoadedSerializedFile;
 
 /// Why a scene-level GLB export could not be produced.
 #[derive(Clone, Debug, PartialEq)]
@@ -107,20 +117,21 @@ pub struct MaterializedSceneGraphView<'a> {
     fathers: Vec<Option<usize>>,
     /// For each Transform, the indexes of its children in source order.
     children: Vec<Vec<usize>>,
-    /// The geometry the caller resolved for each Transform, indexed by Transform position.
+    /// The mesh and renderer facts the caller resolved, indexed by Transform position.
     ///
     /// The materialized collection records each GameObject's component slots but not the fields of
     /// those components, so the MeshFilter's mesh reference and the Renderer's batching fields are
-    /// read by the caller and handed in here. An empty slice means the caller resolved nothing, which
-    /// `export_scene_glb` refuses for a collection that has MeshFilters.
-    attached_meshes: &'a [Option<GlbLevelAttachedMesh>],
+    /// read by the caller and handed in here. The geometry decision itself stays in
+    /// `glb_level::attached_mesh_for`, so this view does not restate it. An empty slice means the
+    /// caller resolved nothing, which `export_scene_glb` refuses for a collection with MeshFilters.
+    attached_meshes: &'a [Option<GlbLevelMesh>],
 }
 
 impl<'a> MaterializedSceneGraphView<'a> {
     /// Index a materialized collection by Transform position, with caller-resolved geometry.
     pub fn new(
         collection: &'a MaterializedSceneCollection,
-        attached_meshes: &'a [Option<GlbLevelAttachedMesh>],
+        attached_meshes: &'a [Option<GlbLevelMesh>],
     ) -> Self {
         // A relationship resolves to a local object index; the Transform that owns that object is
         // the edge target.
@@ -261,8 +272,8 @@ impl SceneCollectionGraph for MaterializedSceneGraphView<'_> {
     fn mesh(&self, index: usize) -> Option<GlbLevelAttachedMesh> {
         // Geometry selection depends on the MeshFilter's and Renderer's fields, which the
         // materialized collection does not carry, so the caller resolves them per Transform and
-        // supplies them here.
-        self.attached_meshes.get(index).cloned().flatten()
+        // supplies them here. The dynamic/static decision is the walk's, not the caller's.
+        crate::resources::glb_level::attached_mesh_for(self.attached_meshes.get(index)?.as_ref()?)
     }
 
     fn has_game_object(&self, index: usize) -> bool {
@@ -277,6 +288,239 @@ impl SceneCollectionGraph for MaterializedSceneGraphView<'_> {
                     )
                 })
             })
+    }
+}
+
+/// What resolving a collection's per-Transform geometry needs.
+pub struct SceneMeshResolution<'a> {
+    /// The decoded object payloads.
+    pub objects: &'a ObjectWorkspace,
+    /// The workspace files, for each file's Unity version and endianness.
+    pub files: &'a [LoadedSerializedFile],
+    /// The packed-vector decode bounds the mesh reader uses.
+    pub limits: PackedBitVectorLimits,
+}
+
+/// Resolve each Transform's mesh and renderer facts from the workspace.
+///
+/// This is the caller's half of `GlbLevelBuilder.AddGameObjectToScene`'s component gates: a
+/// `MeshFilter` whose `m_Mesh` resolves to a mesh that `IsSet` and yields `MeshData`, plus a
+/// `Renderer` for geometry to be attached at all. The materialized collection records the component
+/// slots but not their fields, which is why the payloads are read here rather than in the scene pass.
+///
+/// **A mesh referenced from another file is not resolved and yields no facts.** The reference reaches
+/// such a mesh through the bundle; this path does not, and returning `None` keeps the node without
+/// geometry instead of inventing one. That is a caller-visible gap rather than a silent one.
+pub fn resolve_attached_meshes(
+    collection: &MaterializedSceneCollection,
+    context: &SceneMeshResolution<'_>,
+) -> Vec<Option<GlbLevelMesh>> {
+    collection
+        .transforms
+        .iter()
+        .map(|transform| resolve_one(collection, transform, context))
+        .collect()
+}
+
+/// One Transform's facts, or `None` when the source's gates do not attach geometry.
+fn resolve_one(
+    collection: &MaterializedSceneCollection,
+    transform: &crate::export::scene_wiring::MaterializedTransform,
+    context: &SceneMeshResolution<'_>,
+) -> Option<GlbLevelMesh> {
+    let game_object_index = local_object_index(transform.game_object.as_ref()?)?;
+    let game_object = collection
+        .game_objects
+        .iter()
+        .find(|object| object.identity.object_index == game_object_index)?;
+
+    // The MeshFilter's mesh, resolved through its own payload.
+    let mesh_filter = game_object
+        .components
+        .iter()
+        .find(|slot| slot.class_id == Some(MESH_FILTER_CLASS_ID))?;
+    let mesh_filter_index = component_object_index(mesh_filter)?;
+    let mesh_filter_root = payload(context, collection.file_index, mesh_filter_index)?;
+    let (file_id, path_id) = pptr_field(mesh_filter_root, "m_Mesh")?;
+    if file_id != 0 {
+        // Another file's mesh needs the bundle, which this path does not walk.
+        return None;
+    }
+    let mesh_index = find_object_by_path_id(context, collection.file_index, path_id)?;
+    let mesh_root = payload(context, collection.file_index, mesh_index)?;
+    let file = context.files.get(collection.file_index)?;
+    let version = file
+        .metadata
+        .prefix
+        .unity_version_text
+        .as_deref()
+        .and_then(UnityVersion::parse)?;
+    let endian = if file.metadata.prefix.body_endian == crate::io::binary::Endian::Little {
+        EndianType::Little
+    } else {
+        EndianType::Big
+    };
+    // The Renderer decides whether geometry is attached at all, and how it is batched.
+    let renderer = game_object.components.iter().find(|slot| {
+        slot.class_id
+            .is_some_and(|class_id| RENDERER_CLASS_IDS.contains(&class_id))
+    })?;
+    let renderer_root = component_object_index(renderer)
+        .and_then(|index| payload(context, collection.file_index, index));
+
+    attached_mesh_facts(
+        mesh_root,
+        renderer_root,
+        version,
+        endian,
+        context.limits,
+        GlbSourceMesh { file_id, path_id },
+    )
+}
+
+/// The mesh and renderer facts of one GameObject, from the two payloads.
+///
+/// Split from the workspace lookup so the gates are testable from synthetic payloads: the mesh must
+/// `IsSet` and yield `MeshData` **before** the Renderer is consulted, because the source's `&&`
+/// chain checks the mesh first and a GameObject whose mesh is unset attaches nothing even when a
+/// Renderer is present.
+pub fn attached_mesh_facts(
+    mesh_root: &SerializedValue,
+    renderer_root: Option<&SerializedValue>,
+    version: UnityVersion,
+    endian: EndianType,
+    limits: PackedBitVectorLimits,
+    source: GlbSourceMesh,
+) -> Option<GlbLevelMesh> {
+    let view = MeshView::from_value(mesh_root, version, endian).ok()?;
+    if !crate::resources::mesh::is_set(
+        view.compressed_mesh
+            .as_ref()
+            .is_some_and(|mesh| mesh.is_set()),
+        view.vertex_data
+            .as_ref()
+            .map_or(0, |data| data.vertex_count),
+        view.vertex_data.as_ref().map_or(0, |data| data.data.len()),
+        view.stream_data.as_ref().map(|info| info.is_set()),
+    ) {
+        return None;
+    }
+    let mesh_data = view.read_mesh_data(limits).ok()??;
+    // A Renderer is required for geometry to be attached at all.
+    let renderer_root = renderer_root?;
+
+    let (has_static_batch_info, static_batch_sub_mesh_count, static_batch_info) =
+        match field(renderer_root, "m_StaticBatchInfo") {
+            Some(value) => {
+                let first = field(value, "firstSubMesh")
+                    .and_then(int_field)
+                    .unwrap_or(0);
+                let count = field(value, "subMeshCount")
+                    .and_then(int_field)
+                    .unwrap_or(0);
+                let count_u32 = u32::try_from(count).unwrap_or(0);
+                let first_u32 = u32::try_from(first).unwrap_or(0);
+                (true, count_u32, Some((first_u32, count_u32)))
+            }
+            None => (false, 0, None),
+        };
+    let subset_indices = field(renderer_root, "m_SubsetIndices").and_then(|value| match value {
+        SerializedValue::Array(items) => Some(
+            items
+                .iter()
+                .filter_map(int_field)
+                .filter_map(|value| u32::try_from(value).ok())
+                .collect::<Vec<u32>>(),
+        ),
+        _ => None,
+    });
+
+    Some(GlbLevelMesh {
+        sub_mesh_count: mesh_data.sub_meshes.len(),
+        is_16_bit_indices: mesh_data.index_format() == IndexFormat::UInt16,
+        mesh_type: Some(crate::resources::glb::get_mesh_type(&mesh_data)),
+        has_renderer: true,
+        has_static_batch_info,
+        static_batch_sub_mesh_count,
+        has_subset_indices: subset_indices.is_some(),
+        subset_indices_count: subset_indices.as_ref().map_or(0, Vec::len),
+        subset_indices,
+        static_batch_info,
+        source: Some(source),
+    })
+}
+
+/// The local object index a Transform's GameObject relationship resolves to.
+fn local_object_index(relationship: &SceneRelationship) -> Option<usize> {
+    match &relationship.target {
+        SceneRelationshipTarget::LocalObject { object_index } => Some(*object_index),
+        _ => None,
+    }
+}
+
+/// The local object index a component slot names.
+fn component_object_index(slot: &MaterializedComponentSlot) -> Option<usize> {
+    match &slot.target {
+        MaterializedComponentTarget::Source { target, .. } => match target {
+            SceneRelationshipTarget::LocalObject { object_index } => Some(*object_index),
+            _ => None,
+        },
+        MaterializedComponentTarget::Generated { .. } => None,
+    }
+}
+
+/// A decoded object's payload root.
+fn payload<'a>(
+    context: &'a SceneMeshResolution<'a>,
+    file_index: usize,
+    object_index: usize,
+) -> Option<&'a SerializedValue> {
+    context
+        .objects
+        .get(file_index, object_index)
+        .and_then(|object| object.payload.as_ref().ok())
+        .map(|payload| &payload.root)
+}
+
+/// The object table index of the object with `path_id` in `file_index`.
+fn find_object_by_path_id(
+    context: &SceneMeshResolution<'_>,
+    file_index: usize,
+    path_id: i64,
+) -> Option<usize> {
+    context
+        .objects
+        .objects_for_file(file_index)
+        .iter()
+        .find(|object| object.path_id == path_id)
+        .map(|object| object.object_index)
+}
+
+/// A uniquely named field of a decoded payload.
+fn field<'a>(root: &'a SerializedValue, name: &str) -> Option<&'a SerializedValue> {
+    root.unique_field_in_base_chain(name).ok().flatten()
+}
+
+/// A decoded `PPtr` field's `(file_id, path_id)`.
+fn pptr_field(root: &SerializedValue, name: &str) -> Option<(i32, i64)> {
+    match field(root, name)? {
+        SerializedValue::PPtr { file_id, path_id } => Some((*file_id, *path_id)),
+        _ => None,
+    }
+}
+
+/// A decoded integer field as `i64`.
+fn int_field(value: &SerializedValue) -> Option<i64> {
+    match value {
+        SerializedValue::I8(value) => Some(i64::from(*value)),
+        SerializedValue::U8(value) => Some(i64::from(*value)),
+        SerializedValue::I16(value) => Some(i64::from(*value)),
+        SerializedValue::U16(value) => Some(i64::from(*value)),
+        SerializedValue::I32(value) => Some(i64::from(*value)),
+        SerializedValue::U32(value) => Some(i64::from(*value)),
+        SerializedValue::I64(value) => Some(*value),
+        SerializedValue::U64(value) => i64::try_from(*value).ok(),
+        _ => None,
     }
 }
 
@@ -302,11 +546,11 @@ pub struct SceneGlbExportInput<'a> {
     /// The reference builds these on demand and caches them; the caller does the same, because
     /// `MeshData` construction needs the mesh pipeline rather than the scene graph.
     pub meshes: &'a [Option<crate::resources::mesh_data::MeshData>],
-    /// The geometry the caller resolved, indexed by Transform position.
+    /// The mesh and renderer facts the caller resolved, indexed by Transform position.
     ///
     /// Empty means nothing was resolved; a collection whose GameObjects carry a `MeshFilter` is then
     /// refused rather than exported with no geometry.
-    pub attached_meshes: &'a [Option<GlbLevelAttachedMesh>],
+    pub attached_meshes: &'a [Option<GlbLevelMesh>],
     /// Bounds for the walk.
     pub level_limits: GlbLevelLimits,
     /// Bounds for the GLB container.

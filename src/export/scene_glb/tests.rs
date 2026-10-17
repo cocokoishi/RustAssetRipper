@@ -404,9 +404,7 @@ fn supplied_geometry_is_attached_to_the_plan() {
     use crate::export::scene_wiring::MaterializedComponentSlot;
     use crate::export::scene_wiring::MaterializedComponentTarget;
     use crate::processing::scene::SceneRelationshipTarget;
-    use crate::resources::glb_level::{
-        GlbLevelAccumulatedTransform, GlbLevelAttachedMesh, GlbSourceMesh,
-    };
+    use crate::resources::glb_level::{GlbLevelMesh, GlbSourceMesh};
 
     let mut collection = hierarchy();
     let mut with_filter = game_object(50, "WithGeometry");
@@ -423,19 +421,21 @@ fn supplied_geometry_is_attached_to_the_plan() {
     collection.game_objects.push(with_filter);
     collection.transforms.push(transform(51, 50, None, None));
 
-    let mesh = GlbLevelAttachedMesh {
-        dynamic: false,
-        subset_indices: vec![0],
+    // The facts the caller resolved: one sub-mesh, a renderer, and a subset list that names it.
+    let mesh = GlbLevelMesh {
+        sub_mesh_count: 1,
         is_16_bit_indices: true,
-        mesh_type: None,
+        has_renderer: true,
+        has_subset_indices: true,
+        subset_indices_count: 1,
+        subset_indices: Some(vec![0]),
         source: Some(GlbSourceMesh {
             file_id: 0,
             path_id: 7,
         }),
-        global_inverse_transform: GlbLevelAccumulatedTransform::IDENTITY,
-        global_transform: GlbLevelAccumulatedTransform::IDENTITY,
+        ..GlbLevelMesh::default()
     };
-    let mut attached: Vec<Option<GlbLevelAttachedMesh>> = vec![None; collection.transforms.len()];
+    let mut attached: Vec<Option<GlbLevelMesh>> = vec![None; collection.transforms.len()];
     let position = collection.transforms.len() - 1;
     attached[position] = Some(mesh);
     let meshes: Vec<Option<crate::resources::mesh_data::MeshData>> =
@@ -458,6 +458,74 @@ fn supplied_geometry_is_attached_to_the_plan() {
         json.contains("\"mesh\":"),
         "the node carries a mesh reference: {json}"
     );
+}
+
+/// The mesh gate runs before the renderer gate, and the small payload readers agree with the fields.
+///
+/// The positive path - a valid mesh payload yielding `MeshData` - needs a vertex blob fixture that
+/// does not exist yet, so it is **not** covered here. What is covered is the ordering the source's
+/// `&&` chain encodes and the small readers, which is what a synthetic payload can decide.
+#[test]
+fn the_mesh_gate_runs_before_the_renderer_gate() {
+    use crate::resources::glb_level::GlbSourceMesh;
+    use crate::resources::packed_bit_vector::PackedBitVectorLimits;
+    use crate::resources::vertex_data_blob::{EndianType, UnityVersion};
+    use crate::serialized_file::object::{SerializedFieldValue, SerializedValue};
+
+    let payload = |fields: Vec<(&str, SerializedValue)>| {
+        SerializedValue::Struct(
+            fields
+                .into_iter()
+                .map(|(name, value)| SerializedFieldValue {
+                    name: name.to_owned(),
+                    value,
+                })
+                .collect(),
+        )
+    };
+    let version = UnityVersion {
+        major: 2019,
+        minor: 4,
+        patch: 40,
+    };
+    let source = GlbSourceMesh {
+        file_id: 0,
+        path_id: 7,
+    };
+
+    // A mesh payload with no vertex data is not set, so nothing is attached even with a renderer.
+    let unset_mesh = payload(vec![]);
+    let renderer = payload(vec![(
+        "m_SubsetIndices",
+        SerializedValue::Array(vec![SerializedValue::U32(0)]),
+    )]);
+    assert_eq!(
+        attached_mesh_facts(
+            &unset_mesh,
+            Some(&renderer),
+            version,
+            EndianType::Little,
+            PackedBitVectorLimits::default(),
+            source,
+        ),
+        None,
+        "an unset mesh attaches nothing"
+    );
+
+    // The readers themselves.
+    assert_eq!(int_field(&SerializedValue::U32(7)), Some(7));
+    assert_eq!(int_field(&SerializedValue::I64(-3)), Some(-3));
+    assert_eq!(int_field(&SerializedValue::Bool(true)), None);
+    let pptr = payload(vec![(
+        "m_Mesh",
+        SerializedValue::PPtr {
+            file_id: 0,
+            path_id: 42,
+        },
+    )]);
+    assert_eq!(pptr_field(&pptr, "m_Mesh"), Some((0, 42)));
+    assert_eq!(pptr_field(&pptr, "m_Other"), None);
+    assert!(field(&pptr, "m_Mesh").is_some());
 }
 
 #[test]

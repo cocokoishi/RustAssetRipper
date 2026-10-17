@@ -266,7 +266,17 @@ fn add_game_object(
 
 /// The geometry decision for one GameObject, mirroring the source's component gates.
 fn attached_mesh(transform: &GlbLevelTransform) -> Option<GlbLevelAttachedMesh> {
-    let mesh = transform.mesh.as_ref()?;
+    attached_mesh_for(transform.mesh.as_ref()?)
+}
+
+/// The geometry decision for a GameObject's resolved mesh and renderer facts.
+///
+/// Split out from [`attached_mesh`] so a caller that resolved the facts itself - the scene-level
+/// export does, because the materialized collection carries component slots and not their fields -
+/// gets the same decision rather than a second copy of it. The source attaches geometry only when a
+/// Renderer is present even if a mesh resolved, and the dynamic/static choice reads the Renderer's
+/// batching fields.
+pub fn attached_mesh_for(mesh: &GlbLevelMesh) -> Option<GlbLevelAttachedMesh> {
     // The source attaches geometry only when a Renderer is present, even if a mesh resolved.
     if !mesh.has_renderer {
         return None;
