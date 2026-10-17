@@ -1,5 +1,40 @@
 # Validation log
 
+## 2026-10-16 - The primary-content export driver, and two probe contracts found by testing it
+
+- Outcome: added `src/export/primary_export.rs`, the step that connects the ported loop, destination
+  planner and extractor decisions so a collection can actually reach a file. 1908 library tests (up
+  from 1902).
+- **What was missing was the connection, not any part.** The loop was ported, the destination planner
+  was ported, and every extractor's decision was ported - but nothing called them in sequence, so no
+  collection could be written. The driver fixes the extractor-to-payload mapping, plans the
+  destination, shares one unique-name state across the run, emits the progress and failure events, and
+  accounts for every collection that did not produce a file.
+- **The two caller boundaries are deliberate.** Producing a payload needs decoded asset data - a
+  `MeshData`, a bitmap, a serialized document - which lives with the asset model, so the producer is a
+  caller closure; writing needs a real disk, which the port keeps out of the export layer for
+  testability, so the write is a caller closure too. Everything between them is fixed here.
+- **An extractor with no producer fails its collection rather than disappearing.** The script case has
+  no C# decompiler in the port, so it reports `Unimplemented` and produces a failed export event.
+  Dropping it silently would be indistinguishable from a successful export, which is the degradation
+  the project forbids; a test asserts that the producer is never even called for a non-exportable
+  collection, and that an unimplemented one never writes.
+- **Two probe contracts surfaced while writing the tests, and my first version asserted the wrong one.**
+  `get_unique_name` returns the plain name **without probing `File.Exists` at all** when
+  `Directory.Exists` is false - which is the reference's own ordering, since `SingleExportCollection`
+  resolves the unique name and only then creates the directory. So a probe that always answers
+  "nothing exists" disables conflict resolution completely, and two assets silently collide. My test
+  used exactly that probe and asserted the collision as correct. With the probe modelling the real
+  ordering - the directory appears with the first write - the second asset correctly resolves a
+  distinct name. The probe must also reflect the writes the same run has already made.
+- **One self-inflicted detour worth recording.** I wrote a `plan_failure_reason` mapping for
+  `AssetPathError`, then found the error already implements `Display` and removed it: the mapping was a
+  second phrasing of messages that already existed, which is the duplication pattern this project has
+  now hit three times.
+- Evidence: `cargo test --locked --workspace` - **1908** library + 199 CLI tests, 0 failed, 1 ignored.
+  `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0. Ledger 409 rows,
+  已验证 380, 实现中 7, 已实现但未验证 20, 受外部条件阻塞 2, MALFORMED=0, DUPES=0.
+
 ## 2026-10-16 - The per-object handler stack, and the assembly rule over it
 
 - Outcome: first implementation step toward the primary-content route. The pipeline could previously
