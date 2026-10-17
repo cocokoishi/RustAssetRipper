@@ -37,6 +37,7 @@ use super::primary_extractors::{
     image_texture_check_asset_integrity, BinaryAssetFacts, GlbAssetFacts, GlbModelMainAsset,
     ScriptClaim, ScriptExtractorState,
 };
+use super::project_exporter::{class_satisfies_target, ObjectClassFacts};
 use crate::resources::vertex_data_blob::{EndianType, UnityVersion};
 use crate::serialized_file::object::SerializedValue;
 
@@ -340,6 +341,30 @@ pub struct PrimaryContentObjectContext {
     pub endian: EndianType,
 }
 
+/// The caller's answer for `asset.MainAsset`, which `GlbModelExporter` decides on.
+///
+/// The baseline registers the model exporter for `GameObjectHierarchyObject`, `IGameObject`,
+/// `IComponent` and `ILevelGameManager`, and its gate is `asset.MainAsset` being a
+/// `SceneHierarchyObject` or a `PrefabHierarchyObject`. **Every component's main asset is its
+/// hierarchy**, so this is not a property of the object's own class and cannot be derived from the
+/// payload - the caller has to supply it.
+///
+/// `Unknown` exists because a caller that has not computed the relation must not guess: guessing
+/// `NotAHierarchy` sends a hierarchy object to the JSON fallback, and guessing `Scene` sends a
+/// non-hierarchy object to a GLB producer. Both export something the reference never would, so an
+/// unknown answer makes the object undecidable and reported instead.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MainAssetFacts {
+    /// The object's main asset is a scene hierarchy.
+    Scene,
+    /// The object's main asset is a prefab hierarchy.
+    Prefab,
+    /// The object is not part of any hierarchy, so the model extractor declines it.
+    NotAHierarchy,
+    /// The caller has not computed this object's main asset.
+    Unknown,
+}
+
 /// The claim-dispatch facts for one object, or the reason they cannot be determined.
 pub enum PrimaryContentObjectFactsOutcome<'a> {
     /// The facts are determined, so [`claim_for_extractor`] can run.
@@ -356,11 +381,24 @@ pub enum PrimaryContentObjectFactsOutcome<'a> {
     },
 }
 
-/// Class-1 `GameObject`, class-2 `Component`, class-4 `Transform`.
+/// Whether a class can reach `GlbModelExporter`, so an unknown main asset matters for it.
 ///
-/// These are the objects `GlbModelExporter` is registered for, and it decides on `asset.MainAsset`,
-/// which is a scene- or prefab-hierarchy relation.
-const MODEL_EXTRACTOR_CLASS_IDS: [i32; 3] = [1, 2, 4];
+/// The baseline registers the exporter for four targets, so a class reaches it when it satisfies any
+/// of them. This is asked of the generated-class interface table rather than of a hand-written class
+/// list: `IComponent` covers hundreds of classes, and a list of three would have missed every one of
+/// them.
+fn is_model_extractor_class(class_id: i32) -> bool {
+    const MODEL_TARGETS: [&str; 4] = [
+        "GameObjectHierarchyObject",
+        "IGameObject",
+        "IComponent",
+        "ILevelGameManager",
+    ];
+    let facts = ObjectClassFacts::new(class_id, false);
+    MODEL_TARGETS
+        .iter()
+        .any(|target| class_satisfies_target(facts, target))
+}
 /// Class-49 `TextAsset`.
 const TEXT_ASSET_CLASS_ID: i32 = 49;
 /// Class-115 `MonoScript`.
@@ -395,6 +433,7 @@ pub fn object_facts_from_payload<'a>(
     class_id: i32,
     root: &'a SerializedValue,
     context: PrimaryContentObjectContext,
+    main_asset: MainAssetFacts,
     stream_check: impl FnOnce() -> Option<bool>,
 ) -> PrimaryContentObjectFactsOutcome<'a> {
     use crate::export::res_wiring::{resource_export_family, ResourceExportFamily};
@@ -413,10 +452,18 @@ pub fn object_facts_from_payload<'a>(
         binary: None,
     };
 
-    if MODEL_EXTRACTOR_CLASS_IDS.contains(&class_id) {
-        return PrimaryContentObjectFactsOutcome::Undecidable {
-            reason: HIERARCHY_REASON,
-        };
+    // The model extractor's gate, for every class that satisfies `IComponent` and not just the
+    // three named ones: a component's main asset is its hierarchy too.
+    match main_asset {
+        MainAssetFacts::Scene => facts.model_main_asset = GlbModelMainAsset::SceneHierarchy,
+        MainAssetFacts::Prefab => facts.model_main_asset = GlbModelMainAsset::PrefabHierarchy,
+        MainAssetFacts::NotAHierarchy => facts.model_main_asset = GlbModelMainAsset::Other,
+        MainAssetFacts::Unknown if is_model_extractor_class(class_id) => {
+            return PrimaryContentObjectFactsOutcome::Undecidable {
+                reason: HIERARCHY_REASON,
+            }
+        }
+        MainAssetFacts::Unknown => {}
     }
 
     match resource_export_family(class_id) {
@@ -544,7 +591,7 @@ fn string_field<'a>(root: &'a SerializedValue, name: &'static str) -> Option<&'a
 mod tests {
     use super::{
         claim_for_extractor, export_primary_content, json_content_document,
-        object_facts_from_payload, payload_kind, PrimaryContentFailure,
+        object_facts_from_payload, payload_kind, MainAssetFacts, PrimaryContentFailure,
         PrimaryContentObjectContext, PrimaryContentObjectFacts, PrimaryContentPayload,
         PrimaryContentPayloadKind, PrimaryContentProduced,
     };
@@ -1254,7 +1301,13 @@ mod tests {
         // generic over the lifetime it returns.
         macro_rules! known {
             ($class_id:expr, $root:expr) => {
-                match object_facts_from_payload($class_id, $root, context(), || None) {
+                match object_facts_from_payload(
+                    $class_id,
+                    $root,
+                    context(),
+                    MainAssetFacts::NotAHierarchy,
+                    || None,
+                ) {
                     PrimaryContentObjectFactsOutcome::Known(facts) => facts,
                     PrimaryContentObjectFactsOutcome::Undecidable { reason } => {
                         panic!("class {} should be decidable: {reason}", $class_id)
@@ -1296,7 +1349,13 @@ mod tests {
 
         macro_rules! binary {
             ($class_id:expr, $root:expr) => {
-                match object_facts_from_payload($class_id, $root, context(), || None) {
+                match object_facts_from_payload(
+                    $class_id,
+                    $root,
+                    context(),
+                    MainAssetFacts::NotAHierarchy,
+                    || None,
+                ) {
                     PrimaryContentObjectFactsOutcome::Known(facts) => facts.binary,
                     PrimaryContentObjectFactsOutcome::Undecidable { reason } => {
                         panic!("class {} should be decidable: {reason}", $class_id)
@@ -1357,13 +1416,57 @@ mod tests {
         );
     }
 
-    /// The model and non-`Texture2D` image classes are reported rather than guessed.
+    /// An unknown main asset makes a model-extractor class undecidable, and a known one decides it.
+    ///
+    /// The distinction is the whole point of `MainAssetFacts`: `Unknown` must not be guessed in
+    /// either direction, because `NotAHierarchy` would send a hierarchy object to the JSON fallback
+    /// and `Scene` would send a non-hierarchy object to a GLB producer.
     #[test]
-    fn the_undecidable_classes_are_reported_with_a_reason() {
+    fn the_main_asset_decides_the_model_classes_and_unknown_is_reported() {
         use crate::export::primary_export::PrimaryContentObjectFactsOutcome;
 
-        for class_id in [1, 2, 4] {
-            match object_facts_from_payload(class_id, &payload(vec![]), context(), || None) {
+        // Bound outside the closure: the facts borrow the payload.
+        let empty = payload(vec![]);
+        let facts = |class_id: i32, main_asset: MainAssetFacts| match object_facts_from_payload(
+            class_id,
+            &empty,
+            context(),
+            main_asset,
+            || None,
+        ) {
+            PrimaryContentObjectFactsOutcome::Known(facts) => facts,
+            PrimaryContentObjectFactsOutcome::Undecidable { reason } => {
+                panic!("class {class_id} should be decidable: {reason}")
+            }
+        };
+
+        // The three named classes, and a component class that reaches the extractor through
+        // `IComponent` rather than through a list of three.
+        for class_id in [1, 2, 4, 23, 33] {
+            assert_eq!(
+                facts(class_id, MainAssetFacts::Scene).model_main_asset,
+                GlbModelMainAsset::SceneHierarchy,
+                "{class_id}"
+            );
+            assert_eq!(
+                facts(class_id, MainAssetFacts::Prefab).model_main_asset,
+                GlbModelMainAsset::PrefabHierarchy,
+                "{class_id}"
+            );
+            // A known "not in a hierarchy" answer declines the model extractor, which is correct.
+            assert_eq!(
+                facts(class_id, MainAssetFacts::NotAHierarchy).model_main_asset,
+                GlbModelMainAsset::Other,
+                "{class_id}"
+            );
+            // Only the unknown answer is reported.
+            match object_facts_from_payload(
+                class_id,
+                &empty,
+                context(),
+                MainAssetFacts::Unknown,
+                || None,
+            ) {
                 PrimaryContentObjectFactsOutcome::Undecidable { reason } => {
                     assert!(reason.contains("hierarchy"), "{reason}");
                 }
@@ -1372,6 +1475,12 @@ mod tests {
                 }
             }
         }
+
+        // A class that cannot reach the model extractor is unaffected by an unknown main asset: its
+        // own extractor does not depend on the relation.
+        let texture = facts(28, MainAssetFacts::Unknown);
+        assert_eq!(texture.model_main_asset, GlbModelMainAsset::Other);
+        assert!(!texture.image_texture_intact);
     }
 
     /// An image texture's integrity is the ported rule, fed by the caller's stream check.
@@ -1384,6 +1493,7 @@ mod tests {
             28,
             root,
             context(),
+            MainAssetFacts::NotAHierarchy,
             || stream,
         ) {
             PrimaryContentObjectFactsOutcome::Known(facts) => facts.image_texture_intact,

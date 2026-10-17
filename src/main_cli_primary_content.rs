@@ -31,7 +31,7 @@ use assetripper::export::primary_content::{
 };
 use assetripper::export::primary_export::{
     claim_for_extractor, export_primary_content, json_content_document, object_facts_from_payload,
-    payload_kind, PrimaryContentObjectContext, PrimaryContentObjectFacts,
+    payload_kind, MainAssetFacts, PrimaryContentObjectContext, PrimaryContentObjectFacts,
     PrimaryContentObjectFactsOutcome, PrimaryContentPayload, PrimaryContentPayloadKind,
     PrimaryContentProduced, PrimaryContentRun,
 };
@@ -46,6 +46,13 @@ use assetripper::export::res_wiring::{
 use assetripper::export::settings_file::SerializedSettingsFile;
 use assetripper::resources::vertex_data_blob::{EndianType, UnityVersion};
 use assetripper::serialized_file::object::SerializedValue;
+
+use assetripper::export::scene_wiring::{
+    process_workspace_scenes_and_prefabs, WorkspaceSceneProcessingLimits,
+};
+use assetripper::processing::prefab_processing::WorkspaceProcessedCollectionKind;
+use assetripper::processing::prefab_processing::WorkspaceProcessedPrefabAssetKind;
+use assetripper::serialized_file::reference_graph::MultiFileReferenceGraphLimits;
 
 use super::export_commands::LoadedGame;
 
@@ -87,6 +94,13 @@ pub(super) fn export_loaded_primary_content<W: io::Write>(
     )?;
     let objects = game.objects.objects();
     let files = game.workspace.files();
+
+    // `GlbModelExporter` decides on `asset.MainAsset`, which is a scene- or prefab-hierarchy
+    // relation, so the relation has to be computed before any object's facts can be decided.
+    let (main_asset_of, scene_note) = main_asset_classification(game);
+    if let Some(note) = &scene_note {
+        writeln!(status_output, "{note}")?;
+    }
 
     // The adapter's parallel pieces. `names` and `members` must outlive the objects that borrow
     // them, so they are built completely before the objects are constructed.
@@ -156,7 +170,11 @@ pub(super) fn export_loaded_primary_content<W: io::Write>(
         }
 
         let context = PrimaryContentObjectContext { version, endian };
-        match object_facts_from_payload(class_id, &payload.root, context, || None) {
+        let main_asset = main_asset_of
+            .get(&identity)
+            .copied()
+            .unwrap_or(MainAssetFacts::NotAHierarchy);
+        match object_facts_from_payload(class_id, &payload.root, context, main_asset, || None) {
             PrimaryContentObjectFactsOutcome::Known(facts) => {
                 names.push(best_name(&named_name, class_id, None));
                 // A single-asset collection claims only its primary. The hierarchy collections,
@@ -534,6 +552,106 @@ impl ExportFileSystem for RunFileSystem {
         };
         self.written.borrow().contains(&relative) || self.resolve(&relative).is_file()
     }
+}
+
+/// `asset.MainAsset` for every object that has one, from the scene and prefab processing.
+///
+/// The baseline's gate is `asset.MainAsset is SceneHierarchyObject or PrefabHierarchyObject`, and
+/// every component's main asset is its hierarchy, so this cannot be read from an object's own
+/// payload - it is a relation the scene processor computes.
+///
+/// **The prefab half is deliberately conservative.** A scene hierarchy's member list is available in
+/// full (`game_objects`, `components`, `managers`, `prefab_instances`), so a scene member is
+/// classified exactly. A prefab hierarchy's members are not derived on this path yet, so every object
+/// in a file that holds one is left `Unknown` rather than called `NotAHierarchy`: the latter would
+/// hand prefab objects to the JSON fallback, which the reference never does for them.
+///
+/// The second return value is a note for the run's log, present only when the relation could not be
+/// computed at all.
+fn main_asset_classification(game: &LoadedGame) -> (HashMap<u64, MainAssetFacts>, Option<String>) {
+    let Ok(references) = game
+        .workspace
+        .reference_graph(MultiFileReferenceGraphLimits::default())
+    else {
+        return (
+            HashMap::new(),
+            Some(
+                "The reference graph could not be built, so no object's main asset is known and \
+                 every hierarchy object will be reported as undecidable."
+                    .to_owned(),
+            ),
+        );
+    };
+    let processing = match process_workspace_scenes_and_prefabs(
+        &game.filesystem,
+        &game.workspace,
+        &game.objects,
+        &references,
+        WorkspaceSceneProcessingLimits::default(),
+    ) {
+        Ok(processing) => processing,
+        Err(error) => {
+            return (
+                HashMap::new(),
+                Some(format!(
+                    "Scene and prefab processing failed ({error}), so no object's main asset is \
+                     known and every hierarchy object will be reported as undecidable."
+                )),
+            );
+        }
+    };
+
+    let mut classification: HashMap<u64, MainAssetFacts> = HashMap::new();
+    for hierarchy in &processing.scene_hierarchies {
+        for member in hierarchy
+            .game_objects
+            .iter()
+            .chain(&hierarchy.components)
+            .chain(&hierarchy.managers)
+            .chain(&hierarchy.prefab_instances)
+        {
+            classification.insert(
+                object_identity(member.file_index, member.object_index),
+                MainAssetFacts::Scene,
+            );
+        }
+    }
+
+    // Files that hold a prefab hierarchy: their unclassified objects stay unknown.
+    let mut prefab_files: HashSet<usize> = HashSet::new();
+    for collection in processing.processed_assets.collections() {
+        if collection.kind != WorkspaceProcessedCollectionKind::PrefabHierarchies {
+            continue;
+        }
+        for asset in &collection.assets {
+            if let WorkspaceProcessedPrefabAssetKind::PrefabHierarchy {
+                root_game_object, ..
+            } = &asset.kind
+            {
+                prefab_files.insert(root_game_object.file_index);
+            }
+        }
+    }
+
+    let mut unknown_in_prefab_files = 0usize;
+    for object in game.objects.objects() {
+        let identity = object_identity(object.file_index, object.object_index);
+        if classification.contains_key(&identity) {
+            continue;
+        }
+        if prefab_files.contains(&object.file_index) {
+            classification.insert(identity, MainAssetFacts::Unknown);
+            unknown_in_prefab_files += 1;
+        }
+    }
+
+    let note = (unknown_in_prefab_files > 0).then(|| {
+        format!(
+            "{unknown_in_prefab_files} objects live in a file that holds a prefab hierarchy whose \
+             members are not derived on this path yet, so they are reported rather than guessed."
+        )
+    });
+    (classification, note)
 }
 
 #[cfg(test)]

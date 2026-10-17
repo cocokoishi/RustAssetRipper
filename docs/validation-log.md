@@ -1,5 +1,35 @@
 # Validation log
 
+## 2026-10-16 - The main-asset relation, so the hierarchy classes stop being undecidable
+
+- Outcome: added `MainAssetFacts` and the parameter that carries it into
+  `object_facts_from_payload`, and wired the scene/prefab processing into the primary-content driver so
+  it can supply the relation. 1926 library tests (unchanged count, one test replaced by a stronger
+  one).
+- **Why the relation is a parameter and not a payload read.** `GlbModelExporter`'s gate is
+  `asset.MainAsset is SceneHierarchyObject or PrefabHierarchyObject`, and the baseline registers it for
+  `GameObjectHierarchyObject`, `IGameObject`, **`IComponent`** and `ILevelGameManager`. A component's
+  main asset is its hierarchy, so **every component class is affected, not three of them** - the
+  previous code's three-class list (`1`, `2`, `4`) was the visible part of a much larger set. The new
+  helper asks the generated-class interface table through `class_satisfies_target`, so `IComponent`'s
+  hundreds of classes are covered by the rule rather than by a list.
+- **`Unknown` is the variant that matters.** A caller that has not computed the relation must not
+  guess: `NotAHierarchy` sends a hierarchy object to the JSON fallback and `Scene` sends a
+  non-hierarchy object to a GLB producer, and both write files the reference never writes. So the
+  tri-state answer makes an object **undecidable and reported** instead, and only for classes that can
+  actually reach the model extractor - a texture's extractor does not care, and is unaffected.
+- **The prefab half is deliberately conservative.** A scene hierarchy's member list is available in
+  full, so scene members are classified exactly. A prefab hierarchy's members are not derived on this
+  path yet, so every object in a file that holds one is left `Unknown` **rather than called
+  `NotAHierarchy`**, and the count is printed. That is the difference between an honest gap and a
+  silent one: the conservative answer keeps prefab objects out of the JSON fallback, which the
+  reference never sends them to.
+- **The scene processing failure path is reported, not swallowed.** If the reference graph or the
+  scene/prefab pass fails, every object's main asset is unknown, the run says so in one line, and the
+  hierarchy objects are reported as undecidable - the previous behaviour, now with a stated reason.
+- Evidence: `cargo test --locked --workspace` - **1926** library + 204 CLI tests, 0 failed, 1 ignored.
+  `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+
 ## 2026-10-16 - An extractor I invented from a class's existence: the terrain heatmap
 
 - Outcome: removed the `TerrainHeatmapExporter` arms from `payload_kind`, the claim dispatch and
