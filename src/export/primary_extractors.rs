@@ -517,9 +517,11 @@ pub const fn deleted_assets_claim(main_asset_is_deleted_information: bool) -> bo
 
 /// The extension `TerrainHeatmapExportCollection` reports: the configured image format's.
 ///
-/// `TerrainHeatmapExporter` itself claims **every** `ITerrainData` with no condition, so there is no
-/// gate to port; what is worth recording is that the heatmap and the GLB terrain extractors accept
-/// exactly the same set of assets, and only the handler order decides which one runs.
+/// **This function has no caller in the baseline.** `TerrainHeatmapExporter` is complete and
+/// claims every `ITerrainData` with no condition, but `PrimaryContentExporter.CreateDefault` never
+/// registers it and nothing constructs it, so a terrain asset always reaches `GlbTerrainExporter`.
+/// The function is kept because it is a real ported rule, and marked because its only user is a
+/// preview path rather than the primary-content pipeline.
 pub fn terrain_heatmap_extension(format: ImageExportFormat) -> &'static str {
     format.file_extension()
 }

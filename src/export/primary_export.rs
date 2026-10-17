@@ -54,8 +54,6 @@ pub enum PrimaryContentPayloadKind {
     Audio,
     /// `ImageExportCollection`: an image in the configured format.
     Image,
-    /// `TerrainHeatmapExportCollection`: a heatmap image in the configured format.
-    TerrainHeatmap,
     /// `ScriptExportCollection`: assemblies, decompiled sources and a solution file.
     Scripts,
 }
@@ -74,7 +72,6 @@ pub fn payload_kind(extractor: &str) -> Option<PrimaryContentPayloadKind> {
         "BinaryAssetContentExtractor" => PrimaryContentPayloadKind::Binary,
         "AudioContentExtractor" => PrimaryContentPayloadKind::Audio,
         "TextureExporter" => PrimaryContentPayloadKind::Image,
-        "TerrainHeatmapExporter" => PrimaryContentPayloadKind::TerrainHeatmap,
         "ScriptContentExtractor" => PrimaryContentPayloadKind::Scripts,
         _ => return None,
     })
@@ -247,7 +244,7 @@ pub struct PrimaryContentObjectFacts<'a> {
     pub mesh_is_set: bool,
     /// `GlbNavMeshExporter`: `HeightMeshes` is non-null.
     pub height_meshes_present: bool,
-    /// `GlbTerrainExporter` and `TerrainHeatmapExporter`: `asset is ITerrainData`.
+    /// `GlbTerrainExporter`: `asset is ITerrainData`.
     pub is_terrain_data: bool,
     /// `TextureExporter`: `ImageTextureExtensions.CheckAssetIntegrity()`.
     pub image_texture_intact: bool,
@@ -322,7 +319,6 @@ pub fn claim_for_extractor(
         "BinaryAssetContentExtractor" => claimed(facts.binary.is_some_and(binary_asset_claims)),
         "AudioContentExtractor" => claimed(facts.is_audio_clip),
         "TextureExporter" => claimed(facts.image_texture_intact),
-        "TerrainHeatmapExporter" => claimed(facts.is_terrain_data),
         "ScriptContentExtractor" => match script_state.claim(facts.is_mono_script) {
             None => PrimaryContentClaim::Declined,
             Some(ScriptClaim::ScriptCollection) => PrimaryContentClaim::Claimed,
@@ -589,6 +585,63 @@ mod tests {
         }
     }
 
+    /// Every extractor `payload_kind` names must be one the handler table can actually select.
+    ///
+    /// **This is the invariant that was missing.** `payload_kind` once answered for
+    /// `TerrainHeatmapExporter`, which the table does not contain because
+    /// `PrimaryContentExporter.CreateDefault` never registers it and nothing constructs it - the
+    /// class exists and is complete, but it is dead in the frozen baseline. A name no registration
+    /// can select is a capability the port appears to have and does not, so the two lists are
+    /// checked against each other instead of being kept in step by hand.
+    #[test]
+    fn every_payload_kind_name_is_a_registered_extractor() {
+        use crate::export::primary_content::PRIMARY_HANDLERS;
+        use std::collections::HashSet;
+
+        let registered: HashSet<&str> = PRIMARY_HANDLERS.iter().map(|row| row.extractor).collect();
+        for name in [
+            "JsonContentExtractor",
+            "GlbModelExporter",
+            "GlbMeshExporter",
+            "GlbNavMeshExporter",
+            "GlbTerrainExporter",
+            "BinaryAssetContentExtractor",
+            "AudioContentExtractor",
+            "TextureExporter",
+            "ScriptContentExtractor",
+        ] {
+            assert!(payload_kind(name).is_some(), "{name} has no payload kind");
+            assert!(registered.contains(name), "{name} is not registered");
+        }
+        // The empty handlers and the deleted-assets exporter cannot reach the loop.
+        assert!(payload_kind("EmptyContentExtractor").is_none());
+        assert!(payload_kind("DeletedAssetsExporter").is_none());
+        // The heatmap exporter is a real class the baseline never registers, so it must have no
+        // payload kind and must not be in the table.
+        assert!(
+            payload_kind("TerrainHeatmapExporter").is_none(),
+            "an unregistered exporter must not look supported"
+        );
+        assert!(!registered.contains("TerrainHeatmapExporter"));
+    }
+
+    /// The table is the baseline's registration list, counted by kind.
+    ///
+    /// The twenty empty handlers are the baseline's `RegisterEmptyHandler` calls; the rest are the
+    /// explicit registrations. A count is a crude check, but it is the one that catches a row being
+    /// dropped or invented while editing.
+    #[test]
+    fn the_handler_table_matches_the_baseline_registrations() {
+        use crate::export::primary_content::PRIMARY_HANDLERS;
+
+        let empty = PRIMARY_HANDLERS
+            .iter()
+            .filter(|row| row.is_empty_handler)
+            .count();
+        assert_eq!(empty, 20, "the baseline registers twenty empty handlers");
+        assert_eq!(PRIMARY_HANDLERS.len(), 36);
+    }
+
     /// The extractor-to-payload mapping, including the two that cannot reach the loop.
     #[test]
     fn payload_kind_covers_every_extractor_that_can_reach_the_loop() {
@@ -619,10 +672,6 @@ mod tests {
         assert_eq!(
             payload_kind("TextureExporter"),
             Some(PrimaryContentPayloadKind::Image)
-        );
-        assert_eq!(
-            payload_kind("TerrainHeatmapExporter"),
-            Some(PrimaryContentPayloadKind::TerrainHeatmap)
         );
         assert_eq!(
             payload_kind("ScriptContentExtractor"),
@@ -912,7 +961,6 @@ mod tests {
             "GlbMeshExporter" => "IMesh",
             "GlbNavMeshExporter" => "INavMeshData",
             "GlbTerrainExporter" => "ITerrainData",
-            "TerrainHeatmapExporter" => "ITerrainData",
             "BinaryAssetContentExtractor" => "ITextAsset",
             "AudioContentExtractor" => "IAudioClip",
             "TextureExporter" => "IImageTexture",
@@ -1013,21 +1061,6 @@ mod tests {
                 "TextureExporter",
                 PrimaryContentObjectFacts {
                     image_texture_intact: true,
-                    ..no_facts()
-                }
-            ),
-            PrimaryContentClaim::Claimed
-        );
-        // The heatmap claims any terrain data, like the GLB terrain extractor.
-        assert_eq!(
-            claim("TerrainHeatmapExporter", no_facts()),
-            PrimaryContentClaim::Declined
-        );
-        assert_eq!(
-            claim(
-                "TerrainHeatmapExporter",
-                PrimaryContentObjectFacts {
-                    is_terrain_data: true,
                     ..no_facts()
                 }
             ),

@@ -1,5 +1,32 @@
 # Source behavior and differential findings
 
+## DIFF-HEATMAP-UNREGISTERED-001 - the baseline's terrain heatmap exporter is complete and never registered (port corrected to match)
+
+`TerrainHeatmapExporter` and `TerrainHeatmapExportCollection` exist in
+`AssetRipper.Export.PrimaryContent/Textures/`, and the exporter is complete: it claims every
+`ITerrainData`, calls `TerrainHeatmap.GetBitmap`, and saves the bitmap in the configured format.
+
+**Nothing constructs it.** `new TerrainHeatmapExporter` appears nowhere in the baseline, and
+`PrimaryContentExporter.CreateDefault` registers only `GlbTerrainExporter` for `ITerrainData`
+(`PrimaryContentExporter.cs:108`). So a terrain asset always reaches the GLB terrain exporter, and the
+heatmap path is dead - the same shape as `isScene` and `ExportCollectionBase.ExportAsset`, which are
+also complete and unreachable.
+
+**The port had it wrong, and this is the finding.** The port's handler table correctly omits the
+exporter, but `payload_kind` and the claim dispatch both answered for `TerrainHeatmapExporter`, and
+`PrimaryContentPayloadKind` carried a `TerrainHeatmap` variant. Those came from reading the exporter's
+*existence* rather than its *registration*, so the port advertised a capability the baseline never
+exercises - and because the table has no such row, the arms were unreachable and could never have been
+caught by running anything. The arms are removed, and two tests now hold the two lists against each
+other: every name `payload_kind` answers for must be in `PRIMARY_HANDLERS`, and the table must be 36
+rows with exactly 20 empty handlers.
+
+`terrain_heatmap_extension` stays: it is a real ported rule with a real user in the preview path, and
+its doc now says plainly that the primary-content pipeline is not that user.
+
+**Independent evidence.** `PrimaryContentExporter.cs:76-123` lists every registration; the list has
+sixteen entries and no heatmap. `Get-ChildItem -Recurse -Filter *.cs | Select-String 'new
+TerrainHeatmapExporter'` returns nothing outside the generated tree.
 ## SCOPE-GLB-RIGID-MESH-001 - the baseline emits rigid meshes only, so an exported GLB has no skeleton (baseline boundary, reproduced deliberately)
 
 A GLB produced by either the baseline or the port carries per-vertex `JOINTS_0` and `WEIGHTS_0`

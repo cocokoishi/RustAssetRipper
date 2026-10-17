@@ -1,5 +1,39 @@
 # Validation log
 
+## 2026-10-16 - An extractor I invented from a class's existence: the terrain heatmap
+
+- Outcome: removed the `TerrainHeatmapExporter` arms from `payload_kind`, the claim dispatch and
+  `PrimaryContentPayloadKind`, corrected the doc that claimed the heatmap and the GLB terrain
+  exporter compete on handler order, and added two tests that hold `payload_kind` against the handler
+  table. 1926 library tests (up from 1924).
+- **What I found, and how.** I went in to build the scene graph and started by reading the baseline's
+  `PrimaryContentExporter.cs` registrations to see where the hierarchy exporter sits. The registration
+  list has sixteen entries and **no heatmap** - and the port's own table has 36 rows and no heatmap
+  either, which is correct. What is wrong is my own dispatch: `payload_kind` and `claim_for_extractor`
+  both answered for `TerrainHeatmapExporter`, and `PrimaryContentPayloadKind` had a `TerrainHeatmap`
+  variant, all of which I wrote in round 9.
+- **Where the invention came from.** `TerrainHeatmapExporter` is a real, complete class in the
+  baseline - it claims every `ITerrainData` and saves `TerrainHeatmap.GetBitmap` in the configured
+  format - so reading the class list suggests it runs. It does not: `new TerrainHeatmapExporter`
+  appears nowhere, `CreateDefault` registers only `GlbTerrainExporter` for `ITerrainData`, and the
+  heatmap path is dead in the frozen baseline, exactly like `isScene` and
+  `ExportCollectionBase.ExportAsset`. **I ported a capability from its existence rather than from its
+  registration.**
+- **Why nothing caught it.** The table has no such row, so the arms were unreachable: no test could
+  fail, no run could differ. A dead arm that names a real class is worse than an obvious omission,
+  because it reads as support. That is what the new tests are for - every name `payload_kind` answers
+  for must appear in `PRIMARY_HANDLERS`, and the table must be 36 rows with exactly 20 empty handlers.
+  The first would have failed the moment I wrote the arm.
+- **The doc was wrong too, in the same direction.** `terrain_heatmap_extension`'s comment said the
+  heatmap and the GLB terrain extractors accept the same assets and "only the handler order decides
+  which one runs". No order decides it, because only one of them is registered. The function stays -
+  it is a real rule with a real user in the preview path - and its doc now says the primary-content
+  pipeline is not that user.
+- Recorded as `DIFF-HEATMAP-UNREGISTERED-001` with the registration list and the empty
+  `new TerrainHeatmapExporter` search as independent evidence.
+- Evidence: `cargo test --locked --workspace` - **1926** library + 204 CLI tests, 0 failed, 1 ignored.
+  `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+
 ## 2026-10-16 - `/Export/PrimaryContent` is wired: the route that was a 501
 
 - Outcome: added `src/main_cli_primary_content.rs` (the driver), `WebState::export_primary_content`,

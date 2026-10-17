@@ -338,9 +338,7 @@ fn produce(
         }
         // The script producer waits on the decompiler decision, and the heatmap producer needs the
         // bitmap joined to the image writer.
-        PrimaryContentPayloadKind::Scripts | PrimaryContentPayloadKind::TerrainHeatmap => {
-            PrimaryContentPayload::Unimplemented
-        }
+        PrimaryContentPayloadKind::Scripts => PrimaryContentPayload::Unimplemented,
     }
 }
 
