@@ -1,6 +1,36 @@
 # RustAssetRipper hand-off — 2026-10-16
 
-## Latest current checkpoint - 2026-10-16 (primary-content assembly ported; scene GLB's home corrected)
+## Latest current checkpoint - 2026-10-16 (primary-content export loop ported)
+
+- **Ported `PrimaryContentExporter.Export`** as `run_primary_content_export_loop`. The
+  primary-content control flow is now complete end to end: handler table -> collection assembly ->
+  export loop.
+- **The counter is the subtle part:** progress is emitted **only** for exportable collections but
+  indexed over **all** of them, so a run whose first two collections are not exportable opens at
+  `(3/4)`. The project pipeline counts only what it exports. A test builds exactly that shape and
+  asserts the emitted lines, so this cannot silently drift.
+- The loop takes an `export_one` callback and returns an ordered `Progress`/`Failed` event list, so
+  its logging is testable without a file system. A failed write emits progress **then** failure; a
+  non-exportable collection emits nothing, not even a skip notice.
+- `ExportCollectionBase.Name` is abstract in the source with a different derivation per collection
+  type, so the name is a **caller-supplied field** rather than a rule this module invents.
+- **Next concrete step for the scene GLB:** give `export_scene_glb` a caller reachable from the
+  primary-content path, and resolve per-node geometry (the reference reaches a mesh through
+  `BuildParameters.TryGetOrMakeMeshData`, so the caller resolves each GameObject's
+  `MeshFilter`/`Renderer` and passes per-node `MeshData`). `EXP-GLB-001` and `EXP-GLB-SCENE-001`
+  share this work. Remember the scene GLB belongs to the **primary-content** path
+  (`GameFileLoader.cs:96`, `/Export/PrimaryContent`), **not** the Unity project export.
+- **Never format `src/resources/glb_tests_01.rs`** (nor `main_tests_01.rs`/`main_tests_03.rs`).
+- **A GLB is binary: decode the JSON chunk before asserting on text** (12-byte header, then the
+  chunk header).
+- **When a feature a gap cell calls unported lands, re-check that cell in the same round** - four
+  cells have been wrong this way (`EXP-GLB-001` twice, `RES-MODEL-001`, `RES-BLENDSHAPE-001`).
+- Parity ledger: 407 rows, 381 verified, 26 non-verified, DUPES=0, MALFORMED=0, gate OPEN.
+- `/Scenes/View` and `/Export/PrimaryContent` both still return 501.
+- Corpus replays are local-only and have not run in these rounds.
+- Verified: **1868** library + 199 bin tests, 0 failed; warnings-denied Clippy exit 0.
+
+## Previous checkpoint - 2026-10-16 (primary-content assembly ported; scene GLB's home corrected)
 
 - **Ported `PrimaryContentExporter.CreateCollections`** into
   `create_primary_content_collections` (`src/export/primary_content.rs`). The port already had the

@@ -1,5 +1,29 @@
 # Validation log
 
+## 2026-10-16 - The primary-content export loop lands, with its counter semantics pinned
+
+- Outcome: ported `PrimaryContentExporter.Export` as `run_primary_content_export_loop`, completing
+  the primary-content pipeline's control flow (handler table -> assembly -> export loop). Three
+  new tests, 1868 library tests total.
+- **The loop's counter is the subtle part, and it is now asserted rather than described.** Progress
+  is reported **only** for exportable collections, but indexed over **all** of them: a run whose
+  first two collections are not exportable opens at `(3/4)`, not `(1/2)`. The test builds exactly
+  that shape and asserts the two emitted lines, so the distinction from the project pipeline - which
+  counts only what it exports - cannot silently drift back.
+- **The event list makes the loop testable without a file system.** The caller supplies
+  `export_one`; the loop returns an ordered `Progress`/`Failed` stream. A failed write is asserted to
+  emit the progress line **first** and the failure warning **second**, which is the source's order.
+  A non-exportable collection is asserted to emit nothing at all - not even a skip notice.
+- **`ExportCollectionBase.Name` is abstract in the source**, so each collection derives it
+  differently (a single-asset collection uses the asset's best name, `EmptyExportCollection` uses
+  its own type name). Rather than invent a rule, the name is a caller-supplied field, and the test
+  helper takes it explicitly so an assertion on a progress line says what it expects instead of
+  depending on a naming rule hidden in a helper.
+- Evidence: `cargo test --locked --workspace` - **1868** library (up from 1865) + 199 bin tests,
+  0 failed, 1 ignored. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+  `rustfmt --edition 2021 --check` on the changed file - clean. Parity: TOTAL=407, NONVERIFIED=26,
+  DUPES=0, MALFORMED=0, GATE=OPEN.
+
 ## 2026-10-16 - The primary-content collection assembly lands, and the scene GLB's real home is found
 
 - Outcome: ported `PrimaryContentExporter.CreateCollections`, the loop that decides which fetched

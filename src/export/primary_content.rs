@@ -268,6 +268,8 @@ pub struct PrimaryContentAsset<'a> {
     /// `MultipleExportCollection` reports the primary asset first and then its secondaries; the
     /// caller supplies the same list the extractor's collection would expose.
     pub collection_assets: &'a [u64],
+    /// `ExportCollectionBase.Name` for the collection this asset produces.
+    pub collection_name: &'a str,
 }
 
 /// One collection `CreateCollections` produced.
@@ -279,6 +281,19 @@ pub struct PrimaryContentCollection {
     pub primary: u64,
     /// Every asset the collection claims, primary first, in the order the extractor reported.
     pub assets: Vec<u64>,
+    /// `ExportCollectionBase.Name`.
+    ///
+    /// The source declares this abstract and each collection derives it differently - a single
+    /// asset collection uses the asset's best name, `EmptyExportCollection` uses its own type
+    /// name - so the caller supplies the resolved name rather than this module guessing a rule.
+    pub name: String,
+}
+
+impl PrimaryContentCollection {
+    /// `ExportCollectionBase.Name`.
+    pub fn collection_name(&self) -> String {
+        self.name.clone()
+    }
 }
 
 /// `PrimaryContentExporter.CreateCollections` over caller-resolved assets.
@@ -325,6 +340,7 @@ pub fn create_primary_content_collections(
             extractor,
             primary: asset.identity,
             assets: members,
+            name: asset.collection_name.to_owned(),
         });
     }
     collections
@@ -336,6 +352,81 @@ pub fn create_primary_content_collections(
 /// the exportable ones, which is the second documented difference from the project pipeline.
 pub fn primary_content_progress_total(collections: &[PrimaryContentCollection]) -> usize {
     collections.len()
+}
+
+/// One collection as the export loop sees it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PrimaryContentExportStep<'a> {
+    pub collection: &'a PrimaryContentCollection,
+    /// `ExportCollectionBase.Exportable`: false collections are skipped without a progress line.
+    pub exportable: bool,
+}
+
+/// One line the export loop emits, in the order it emits it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PrimaryContentExportEvent {
+    /// `(i + 1)/count` over **all** collections, then the collection name.
+    Progress {
+        /// One-based index over all collections, including the skipped ones.
+        one_based_index: usize,
+        /// The total number of collections, including the skipped ones.
+        total: usize,
+        /// The collection name.
+        name: String,
+        /// The exact line the source logs, produced by [`format_export_progress`].
+        line: String,
+    },
+    /// `collection.Export` returned false.
+    Failed { name: String },
+}
+
+/// `PrimaryContentExporter.Export` over already-assembled collections.
+///
+/// The loop, in source order:
+///
+/// ```text
+/// for i in 0..collections.Count:
+///     collection = collections[i]
+///     if collection.Exportable:
+///         log((i + 1)/collections.Count, collection.Name)
+///         if !collection.Export(root, fileSystem):
+///             log warning "Failed to export '<name>'"
+/// ```
+///
+/// Note what the index means: it counts **every** collection produced by `CreateCollections`,
+/// including ones this loop skips, so a run whose first three collections are not exportable
+/// still starts reporting at `(4/N)`. The project pipeline instead counts only the collections it
+/// exports, which is why the two loops cannot share a counter.
+///
+/// The caller supplies `export_one`, which performs the write and reports whether it succeeded.
+/// Returns the events in order so the loop's logging is testable without a file system.
+pub fn run_primary_content_export_loop<F>(
+    collections: &[PrimaryContentCollection],
+    steps: &[PrimaryContentExportStep<'_>],
+    mut export_one: F,
+) -> Vec<PrimaryContentExportEvent>
+where
+    F: FnMut(&PrimaryContentCollection) -> bool,
+{
+    let total = collections.len();
+    let mut events = Vec::new();
+    for (index, step) in steps.iter().enumerate() {
+        if !step.exportable {
+            continue;
+        }
+        let name = step.collection.collection_name();
+        let line = format_export_progress(index + 1, total, &name);
+        events.push(PrimaryContentExportEvent::Progress {
+            one_based_index: index + 1,
+            total,
+            name: name.clone(),
+            line,
+        });
+        if !export_one(step.collection) {
+            events.push(PrimaryContentExportEvent::Failed { name });
+        }
+    }
+    events
 }
 
 /// Destinations selected by `SingleExportCollection.Export`, which writes no `.meta` sidecar.
@@ -397,8 +488,8 @@ pub fn plan_single_export_paths(
 mod tests {
     use super::{
         create_primary_content_collections, format_export_progress, handlers_for_target,
-        plan_single_export_paths, primary_content_progress_total, PrimaryContentAsset,
-        PRIMARY_HANDLERS,
+        plan_single_export_paths, primary_content_progress_total, run_primary_content_export_loop,
+        PrimaryContentAsset, PrimaryContentExportEvent, PrimaryContentExportStep, PRIMARY_HANDLERS,
     };
     use crate::export::asset_path::{
         join_path, ExportAssetPathIdentity, ExportFileSystem, HostPathPlatform, UniqueNameState,
@@ -407,18 +498,22 @@ mod tests {
 
     /// A collection that claims only `identity`, which is what the single-asset extractors do.
     ///
-    /// The member slice is `static` so the helper needs no allocation: the assembly loop only
-    /// reads these lists.
-    fn solo(identity: u64, extractor: &'static str) -> PrimaryContentAsset<'static> {
-        const ONE_7: [u64; 1] = [7];
+    /// The name is explicit so a test that asserts on a progress line says what it expects instead
+    /// of depending on a naming rule hidden in this helper.
+    fn solo(
+        identity: u64,
+        extractor: &'static str,
+        name: &'static str,
+    ) -> PrimaryContentAsset<'static> {
         const ONE_2: [u64; 1] = [2];
         const ONE_3: [u64; 1] = [3];
-        const ONE_4: [u64; 1] = [4];
+        const ONE_6: [u64; 1] = [6];
+        const ONE_7: [u64; 1] = [7];
         let members: &'static [u64] = match identity {
-            7 => &ONE_7,
             2 => &ONE_2,
             3 => &ONE_3,
-            4 => &ONE_4,
+            6 => &ONE_6,
+            7 => &ONE_7,
             _ => &[],
         };
         PrimaryContentAsset {
@@ -426,6 +521,7 @@ mod tests {
             extractor: Some(extractor),
             is_empty_collection: false,
             collection_assets: members,
+            collection_name: name,
         }
     }
 
@@ -440,8 +536,9 @@ mod tests {
                 extractor: Some("GlbModelExporter"),
                 is_empty_collection: true,
                 collection_assets: &[7],
+                collection_name: "Empty",
             },
-            solo(7, "JsonContentExtractor"),
+            solo(7, "JsonContentExtractor", "Seven"),
         ];
         assert!(
             create_primary_content_collections(&empty_then_retry).is_empty(),
@@ -457,10 +554,11 @@ mod tests {
                 extractor: Some("GlbModelExporter"),
                 is_empty_collection: false,
                 collection_assets: &members,
+                collection_name: "Model",
             },
-            solo(2, "JsonContentExtractor"),
-            solo(3, "JsonContentExtractor"),
-            solo(4, "JsonContentExtractor"),
+            solo(2, "JsonContentExtractor", "Two"),
+            solo(3, "JsonContentExtractor", "Three"),
+            solo(4, "JsonContentExtractor", "Four"),
         ];
         let collections = create_primary_content_collections(&claiming);
         let primaries: Vec<u64> = collections
@@ -482,6 +580,7 @@ mod tests {
             extractor: None,
             is_empty_collection: false,
             collection_assets: &[9],
+            collection_name: "Unclaimed",
         }];
         assert!(create_primary_content_collections(&assets).is_empty());
     }
@@ -494,11 +593,102 @@ mod tests {
             extractor: Some("AudioContentExtractor"),
             is_empty_collection: false,
             collection_assets: &[5, 6],
+            collection_name: "Audio",
         }];
         let collections = create_primary_content_collections(&assets);
         assert_eq!(collections.len(), 1);
         assert_eq!(collections[0].primary, 5);
         assert_eq!(collections[0].assets, [5, 6]);
+        assert_eq!(collections[0].collection_name(), "Audio");
+    }
+
+    /// The export loop's progress counter spans **all** collections, not the exportable ones.
+    #[test]
+    fn primary_content_export_loop_indexes_over_every_collection() {
+        let collections = create_primary_content_collections(&[
+            solo(1, "JsonContentExtractor", "One"),
+            solo(2, "JsonContentExtractor", "Two"),
+            solo(3, "JsonContentExtractor", "Three"),
+            solo(4, "JsonContentExtractor", "Four"),
+        ]);
+        assert_eq!(collections.len(), 4);
+        // Skip the first two: the loop still reports the third as (3/4), not (1/2).
+        let steps: Vec<PrimaryContentExportStep<'_>> = collections
+            .iter()
+            .enumerate()
+            .map(|(index, collection)| PrimaryContentExportStep {
+                collection,
+                exportable: index >= 2,
+            })
+            .collect();
+        let mut exported = 0;
+        let events = run_primary_content_export_loop(&collections, &steps, |_| {
+            exported += 1;
+            true
+        });
+        assert_eq!(exported, 2, "only the exportable collections were written");
+        let lines: Vec<(usize, usize, &str)> = events
+            .iter()
+            .map(|event| match event {
+                PrimaryContentExportEvent::Progress {
+                    one_based_index,
+                    total,
+                    line,
+                    ..
+                } => (*one_based_index, *total, line.as_str()),
+                PrimaryContentExportEvent::Failed { .. } => panic!("no failures expected"),
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                (3, 4, "(3/4) Exporting 'Three'"),
+                (4, 4, "(4/4) Exporting 'Four'"),
+            ],
+            "the index counts skipped collections, and the line is the source format"
+        );
+    }
+
+    /// A failed write emits the progress line and then the failure warning, in that order.
+    #[test]
+    fn primary_content_export_loop_reports_a_failed_collection() {
+        let collections =
+            create_primary_content_collections(&[solo(7, "JsonContentExtractor", "Seven")]);
+        let steps = [PrimaryContentExportStep {
+            collection: &collections[0],
+            exportable: true,
+        }];
+        let events = run_primary_content_export_loop(&collections, &steps, |_| false);
+        assert_eq!(
+            events,
+            [
+                PrimaryContentExportEvent::Progress {
+                    one_based_index: 1,
+                    total: 1,
+                    name: "Seven".into(),
+                    line: "(1/1) Exporting 'Seven'".into(),
+                },
+                PrimaryContentExportEvent::Failed {
+                    name: "Seven".into(),
+                },
+            ],
+            "progress is logged first, then the failure warning"
+        );
+    }
+
+    /// A non-exportable collection produces no events at all, not even a skip notice.
+    #[test]
+    fn primary_content_export_loop_is_silent_for_skipped_collections() {
+        let collections =
+            create_primary_content_collections(&[solo(7, "JsonContentExtractor", "Seven")]);
+        let steps = [PrimaryContentExportStep {
+            collection: &collections[0],
+            exportable: false,
+        }];
+        let events = run_primary_content_export_loop(&collections, &steps, |_| {
+            panic!("a non-exportable collection must not be written")
+        });
+        assert!(events.is_empty());
     }
     use std::collections::BTreeSet;
 
