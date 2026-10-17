@@ -23,7 +23,7 @@ use std::error::Error;
 use std::fmt::{self, Display};
 
 use crate::resource::{
-    StreamedResourceInfo, StreamedResourceInfoError, extract_streamed_resource_info,
+    extract_streamed_resource_info, StreamedResourceInfo, StreamedResourceInfoError,
 };
 use crate::serialized_file::object::{SerializedValue, SerializedValueLookupError};
 

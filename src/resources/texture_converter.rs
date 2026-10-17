@@ -992,7 +992,9 @@ mod tests {
             // path cannot handle must be recorded as such, so the branch's value is visible.
             if decoder != selected {
                 match name {
-                    "unity_etc1.crn" => assert_eq!(outcome, "threw NullReferenceException", "{line}"),
+                    "unity_etc1.crn" => {
+                        assert_eq!(outcome, "threw NullReferenceException", "{line}")
+                    }
                     "unity_etc2a.crn" => assert_eq!(outcome, "failed", "{line}"),
                     // The DXT payloads are handled by both paths, to different bytes.
                     _ => assert_eq!(outcome, "ok", "{line}"),

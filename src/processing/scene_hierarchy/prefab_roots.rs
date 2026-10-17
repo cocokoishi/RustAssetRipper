@@ -10,9 +10,7 @@ pub(super) fn resolve_transform_game_object(
         walk.issue = Some(WorkspaceGetRootGameObjectIssue::MissingCollectionGraph);
         return Ok(None);
     };
-    if !graph.source_graph_complete()
-        || !graph.source_prefab_processor_reference_scans_complete()
-    {
+    if !graph.source_graph_complete() || !graph.source_prefab_processor_reference_scans_complete() {
         walk.issue = Some(WorkspaceGetRootGameObjectIssue::IncompleteCollectionGraph {
             file_index: transform.file_index,
         });

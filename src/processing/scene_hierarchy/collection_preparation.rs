@@ -308,8 +308,7 @@ fn prefab_processor_reference_scans_complete(
     objects.into_iter().all(|(object_index, class_id)| {
         let prefab_processor_input = scene_asset_category(class_id).is_some()
             || matches!(class_id, Some(TRANSFORM_CLASS_ID | RECT_TRANSFORM_CLASS_ID));
-        !prefab_processor_input
-            || object_scan_is_complete(file_index, object_index) == Some(true)
+        !prefab_processor_input || object_scan_is_complete(file_index, object_index) == Some(true)
     })
 }
 
@@ -322,9 +321,7 @@ fn scene_membership_reference_scans_complete(
     scene_assets
         .iter()
         .filter(|asset| asset.identity.file_index == file_index)
-        .all(|asset| {
-            object_scan_is_complete(file_index, asset.identity.object_index) == Some(true)
-        })
+        .all(|asset| object_scan_is_complete(file_index, asset.identity.object_index) == Some(true))
         && component_candidates
             .iter()
             .filter(|candidate| candidate.identity.file_index == file_index)
@@ -353,15 +350,12 @@ mod tests {
         ];
         let mut scanned = Vec::new();
 
-        let complete = prefab_processor_reference_scans_complete(
-            7,
-            objects,
-            |file_index, object_index| {
+        let complete =
+            prefab_processor_reference_scans_complete(7, objects, |file_index, object_index| {
                 assert_eq!(file_index, 7);
                 scanned.push(object_index);
                 Some(matches!(object_index, 1 | 5))
-            },
-        );
+            });
 
         assert!(complete);
         assert_eq!(scanned, [1, 5]);

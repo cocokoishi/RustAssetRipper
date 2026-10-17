@@ -35,10 +35,10 @@ use super::texture_converter::{
     try_convert_to_bitmap, try_convert_to_bitmap_with_unity_version, TextureConvertError,
     TextureImage,
 };
-use super::vertex_data_blob::UnityVersion;
 use super::texture_format::{
     is_swap_bytes, swap_adjacent_bytes, SwapBytesError, SWITCH_BUILD_TARGET,
 };
+use super::vertex_data_blob::UnityVersion;
 
 /// `TextureUsageMode.NormalmapDXT5nm`; the only lightmap format that triggers `UnpackNormal`.
 /// The value is pinned by frozen behavior on real bundles: a Texture2D storing
@@ -467,12 +467,8 @@ pub fn export_texture2d_image_with_unity_version(
     let data = view.resolved_image_data(platform, platform_blob_little_endian, stream_content)?;
     let image = view.to_texture_image(&data);
     let unpack_normal = view.lightmap_format == TEXTURE_USAGE_MODE_NORMALMAP_DXT5NM;
-    let bitmap = try_convert_to_bitmap_with_unity_version(
-        &image,
-        flip_y,
-        unpack_normal,
-        unity_version,
-    )?;
+    let bitmap =
+        try_convert_to_bitmap_with_unity_version(&image, flip_y, unpack_normal, unity_version)?;
     let mut output = Vec::new();
     bitmap.save(&mut output, format)?;
     Ok(output)
