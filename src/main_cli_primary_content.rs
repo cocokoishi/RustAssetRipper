@@ -8,11 +8,13 @@
 //!
 //! Two things here are deliberate and worth reading before changing them.
 //!
-//! **Objects whose facts cannot be determined are reported, not exported.** The model extractor
-//! decides on the scene-or-prefab hierarchy relation, which this path does not compute, and a
-//! streamed texture needs a resource lookup that is not wired here. Both are counted and printed. The
-//! alternative - declining them into the JSON fallback - would write files the reference never writes
-//! and call the run a success, which is exactly the silent degradation the acceptance rules forbid.
+//! **Objects whose facts cannot be determined are reported, not exported.** An object whose payload
+//! did not decode, whose SerializedFile carries no readable Unity version, or whose streamed
+//! resource could not be read is counted and printed. The alternative - declining them into the JSON
+//! fallback - would write files the reference never writes and call the run a success, which is
+//! exactly the silent degradation the acceptance rules forbid. A streamed texture the reference
+//! *does* decline (a missing resource, a zero-length range) is declined here too, because that is
+//! what `ImageTextureExtensions.CheckAssetIntegrity` answers.
 //!
 //! **A collection whose extractor has no producer is counted as unimplemented, never as written.**
 //! The script extractor waits on the decompiler decision, and the terrain heatmap needs the image
@@ -44,8 +46,15 @@ use assetripper::export::res_wiring::{
     TEXTURE2D_CLASS_ID,
 };
 use assetripper::export::settings_file::SerializedSettingsFile;
+use assetripper::io::platform_structure::PlatformResourceProvider;
+use assetripper::resource::{
+    extract_streamed_resource_info, resolve_and_read_streamed_resource_info,
+    InvalidStreamedResourceRange, StreamedResourceContentError, StreamedResourceContentLimits,
+    StreamedResourceContentResolution, StreamedResourceError, StreamedResourceInfo,
+};
 use assetripper::resources::vertex_data_blob::{EndianType, UnityVersion};
 use assetripper::serialized_file::object::SerializedValue;
+use assetripper::serialized_file::workspace::LoadedSerializedFile;
 
 use assetripper::export::scene_glb::{
     export_scene_glb, resolve_scene_meshes, ResolvedSceneMeshes, SceneGlbExportInput,
@@ -76,9 +85,13 @@ struct ObjectEntry {
 }
 
 /// One object the driver could not decide, with the reason.
+///
+/// The reason is owned because a resource failure carries the resource path and the underlying
+/// error, and dropping that detail to fit a `&'static str` would make the report useless for exactly
+/// the cases it exists for.
 struct UndecidableObject {
     name: String,
-    reason: &'static str,
+    reason: String,
 }
 
 /// Export the loaded game's primary content to `output_root`.
@@ -142,6 +155,9 @@ pub(super) fn export_loaded_primary_content<W: io::Write>(
     let mut entries: HashMap<u64, ObjectEntry> = HashMap::new();
     let mut facts_by_identity: HashMap<u64, PrimaryContentObjectFacts> = HashMap::new();
     let mut payloads: HashMap<u64, &SerializedValue> = HashMap::new();
+    // Streamed pixel ranges this path resolved, keyed like the payloads: the producer cannot read a
+    // resource file, so the caller that can hands it the bytes.
+    let mut stream_contents: HashMap<u64, Vec<u8>> = HashMap::new();
     let mut undecidable: Vec<UndecidableObject> = Vec::new();
 
     for object in objects {
@@ -156,7 +172,7 @@ pub(super) fn export_loaded_primary_content<W: io::Write>(
             // fields cannot be trusted to mean what they meant when written.
             undecidable.push(UndecidableObject {
                 name: object_class_name(class_id, None),
-                reason: "the owning SerializedFile has no readable Unity version",
+                reason: "the owning SerializedFile has no readable Unity version".to_owned(),
             });
             continue;
         };
@@ -185,31 +201,45 @@ pub(super) fn export_loaded_primary_content<W: io::Write>(
         let Some(payload) = object.payload.as_ref().ok() else {
             undecidable.push(UndecidableObject {
                 name: best_name(&named_name, class_id, None),
-                reason: "the object's payload did not decode",
+                reason: "the object's payload did not decode".to_owned(),
             });
             continue;
         };
 
-        // `Texture2DExtensions.CheckAssetIntegrity` - and its `ImageTextureExtensions` twin - reads
-        // the inline `ImageData` first and only consults `m_StreamData` when there is none:
-        // `Has_StreamData` plus `StreamingInfo.IsSet` plus a resolvable resource. `m_StreamData` is
-        // present in every 2019.4-and-later tree, so reading its mere presence as "streamed" refused
-        // textures whose pixels are inline; the order inside the rule is what decides. An unset
-        // stream fails the check outright, and a set one needs the resource lookup this path does
-        // not perform yet, so only that case is reported.
+        // `ImageTextureExtensions.CheckAssetIntegrity` reads the inline `ImageData` first and only
+        // consults `m_StreamData` when there is none: `Has_StreamData` plus
+        // `StreamedResourceExtensions.CheckIntegrity`, which is true for an empty path without any
+        // lookup, false for a missing resource, a zero-length range or a range outside its file, and
+        // a resolved bounded read otherwise. `m_StreamData` is present in every 2019.4-and-later
+        // tree, so answering from the field's mere presence refused textures whose pixels are
+        // inline; the rule's own answer is what the gate needs.
         let mut texture_stream: Option<bool> = None;
+        let mut stream_bytes: Option<Vec<u8>> = None;
         if class_id == TEXTURE2D_CLASS_ID {
-            if let Some(is_set) = texture2d_stream_is_set(&payload.root) {
-                if is_set {
+            match texture2d_stream_data(&payload.root) {
+                // The payload has no `m_StreamData` field: the rule's stream branch is never
+                // reached, so the caller has no answer to give it.
+                Ok(None) => {}
+                Ok(Some(info)) => match read_texture_stream(game, file, &info) {
+                    Ok((is_intact, bytes)) => {
+                        texture_stream = Some(is_intact);
+                        stream_bytes = bytes;
+                    }
+                    Err(reason) => {
+                        undecidable.push(UndecidableObject {
+                            name: best_name(&named_name, class_id, None),
+                            reason,
+                        });
+                        continue;
+                    }
+                },
+                Err(reason) => {
                     undecidable.push(UndecidableObject {
                         name: best_name(&named_name, class_id, None),
-                        reason: "the texture streams its pixels and the resource lookup is not wired here",
+                        reason,
                     });
                     continue;
                 }
-                // Present with an empty path: `CheckIntegrity` answers false without any lookup, so
-                // the texture is not intact and the stack continues to the JSON fallback.
-                texture_stream = Some(false);
             }
         }
 
@@ -228,6 +258,9 @@ pub(super) fn export_loaded_primary_content<W: io::Write>(
                 members.push(vec![identity]);
                 facts_by_identity.insert(identity, facts);
                 payloads.insert(identity, &payload.root);
+                if let Some(bytes) = stream_bytes.take() {
+                    stream_contents.insert(identity, bytes);
+                }
                 entries.insert(
                     identity,
                     ObjectEntry {
@@ -244,7 +277,7 @@ pub(super) fn export_loaded_primary_content<W: io::Write>(
             PrimaryContentObjectFactsOutcome::Undecidable { reason } => {
                 undecidable.push(UndecidableObject {
                     name: best_name(&named_name, class_id, None),
-                    reason,
+                    reason: reason.to_owned(),
                 });
             }
         }
@@ -313,6 +346,7 @@ pub(super) fn export_loaded_primary_content<W: io::Write>(
                 collection,
                 &entries,
                 &payloads,
+                &stream_contents,
                 export_settings,
                 limits,
                 &SceneState {
@@ -366,6 +400,7 @@ fn produce(
     collection: &PrimaryContentCollection,
     entries: &HashMap<u64, ObjectEntry>,
     payloads: &HashMap<u64, &SerializedValue>,
+    stream_contents: &HashMap<u64, Vec<u8>>,
     settings: &assetripper::export::settings_file::ExportSettingsFile,
     limits: ResourceExportLimits,
     scene: &SceneState<'_>,
@@ -379,6 +414,9 @@ fn produce(
     let Some(kind) = payload_kind(collection.extractor) else {
         return PrimaryContentPayload::Unimplemented;
     };
+    // Only a texture resolves a streamed range on this path, so this is `None` for every other
+    // family, which is what the planners already expect.
+    let stream_content = stream_contents.get(&collection.primary).map(Vec::as_slice);
 
     match kind {
         PrimaryContentPayloadKind::Json => {
@@ -386,7 +424,12 @@ fn produce(
             produced(collection, entry, "json", bytes)
         }
         PrimaryContentPayloadKind::Binary => {
-            match plan_binary_export(&collection.collection_name(), entry.class_id, root, None) {
+            match plan_binary_export(
+                &collection.collection_name(),
+                entry.class_id,
+                root,
+                stream_content,
+            ) {
                 Ok(Some(planned)) => planned_payload(collection, entry, &planned),
                 // A declined binary arm is a gate the reference also declines; the collection would
                 // not have been created for it, so this is a planner/caller disagreement.
@@ -432,7 +475,7 @@ fn produce(
                 root,
                 version: entry.version,
                 endian: entry.endian,
-                stream_content: None,
+                stream_content,
                 platform: entry.platform,
                 platform_blob_little_endian: entry.platform_blob_little_endian,
                 image_format:
@@ -491,6 +534,86 @@ fn produced(
         extension: extension.to_owned(),
         bytes,
     }))
+}
+
+/// A class-28 `Texture2D`'s decoded `m_StreamData`, when the payload declares the field.
+///
+/// `Has_StreamData_C28()` is the field's presence, so a descriptor that is present but cannot be
+/// read is an error rather than an absent stream: folding it into `None` would let the texture fall
+/// to the JSON fallback on a field the reference reads.
+fn texture2d_stream_data(root: &SerializedValue) -> Result<Option<StreamedResourceInfo>, String> {
+    // The same two spellings `Texture2DView` reads: the release tree names the field `m_StreamData`,
+    // and the generated class adds the `_C28` variant.
+    let mut value = None;
+    for name in ["m_StreamData", "m_StreamData_C28"] {
+        value = root
+            .unique_field_in_base_chain(name)
+            .map_err(|error| error.to_string())?;
+        if value.is_some() {
+            break;
+        }
+    }
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    extract_streamed_resource_info(value)
+        .map(Some)
+        .map_err(|error| {
+            format!("its m_StreamData descriptor is not a valid streamed resource: {error}")
+        })
+}
+
+/// Reads a class-28 texture's streamed pixel range: the rule's answer, plus the bytes when intact.
+///
+/// The answer is `StreamedResourceExtensions.CheckIntegrity`, which is what
+/// `ImageTextureExtensions.CheckAssetIntegrity` feeds into the `Has_StreamData` branch when the
+/// texture has no inline pixels:
+///
+/// - an empty path is intact without any lookup, and `GetImageData` then yields no bytes, so the
+///   export fails afterwards exactly as the reference's does;
+/// - a missing resource is not intact, which is the reference's `false` for a name its bundle
+///   cannot resolve, and which sends the object to the JSON fallback;
+/// - a zero-length range and a range outside its file are the reference's own `false` too, so those
+///   two read failures are classified here rather than reported;
+/// - a resolved bounded read is intact and carries the bytes the producer must be given.
+///
+/// Anything else is reported: a lookup or read error the port cannot tell from the reference's
+/// decline must not be silently turned into one.
+fn read_texture_stream(
+    game: &LoadedGame,
+    file: &LoadedSerializedFile,
+    info: &StreamedResourceInfo,
+) -> Result<(bool, Option<Vec<u8>>), String> {
+    if !info.is_set() {
+        return Ok((true, None));
+    }
+    let provider = PlatformResourceProvider::with_mixed_data_paths(None, Some(&game.data_paths));
+    let resolution = resolve_and_read_streamed_resource_info(
+        &game.filesystem,
+        &game.workspace,
+        file.container_bundle_index,
+        info,
+        &game.root_catalog,
+        &provider,
+        StreamedResourceContentLimits::default(),
+    );
+    match resolution {
+        Ok(StreamedResourceContentResolution::Resolved { bytes, .. }) => Ok((true, Some(bytes))),
+        Ok(StreamedResourceContentResolution::Missing { .. }) => Ok((false, None)),
+        // Only an empty path resolves to `Unset`, and that is answered above.
+        Ok(StreamedResourceContentResolution::Unset) => Ok((false, None)),
+        Err(StreamedResourceContentError::Read(
+            StreamedResourceError::InvalidRange {
+                reason: InvalidStreamedResourceRange::ZeroLength,
+                ..
+            }
+            | StreamedResourceError::RangeOutsideResource { .. },
+        )) => Ok((false, None)),
+        Err(error) => Err(format!(
+            "its streamed resource '{}' could not be read: {error}",
+            info.path
+        )),
+    }
 }
 
 /// Facts for an object the driver decided against; unreachable in a well-formed run.
@@ -554,11 +677,11 @@ fn report_undecidable<W: io::Write>(
          exporting them as something the reference never would:",
         undecidable.len()
     )?;
-    let mut reasons: HashMap<&'static str, usize> = HashMap::new();
+    let mut reasons: HashMap<&str, usize> = HashMap::new();
     for object in undecidable {
-        *reasons.entry(object.reason).or_default() += 1;
+        *reasons.entry(&object.reason).or_default() += 1;
     }
-    let mut reasons: Vec<(&'static str, usize)> = reasons.into_iter().collect();
+    let mut reasons: Vec<(&str, usize)> = reasons.into_iter().collect();
     reasons.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(right.0)));
     for (reason, count) in reasons {
         writeln!(status_output, "  {count} x {reason}")?;
@@ -585,23 +708,6 @@ fn object_name(root: &SerializedValue) -> Option<String> {
         SerializedValue::StringBytes(bytes) => std::str::from_utf8(bytes).ok().map(str::to_owned),
         _ => None,
     }
-}
-
-/// Whether a class-28 `m_StreamData` is set, or `None` when the payload has no readable one.
-///
-/// `Has_StreamData` and `StreamingInfoExtensions.IsSet` (a non-empty `path`) are the reference's two
-/// gates, so they are read from the payload rather than through a decoded view, which demands more
-/// fields than either gate does.
-fn texture2d_stream_is_set(root: &SerializedValue) -> Option<bool> {
-    let field = root
-        .struct_fields()?
-        .iter()
-        .find(|field| field.name == "m_StreamData")?;
-    Some(
-        assetripper::resource::extract_streamed_resource_info(&field.value)
-            .ok()?
-            .is_set(),
-    )
 }
 
 /// `AssetBase.GetBestName()`: the name, or the class name when the asset has none.
@@ -787,8 +893,9 @@ fn main_asset_classification(
 
 #[cfg(test)]
 mod tests {
-    use super::{best_name, object_identity, object_name, texture2d_stream_is_set, RunFileSystem};
+    use super::{best_name, object_identity, object_name, texture2d_stream_data, RunFileSystem};
     use assetripper::export::asset_path::ExportFileSystem;
+    use assetripper::resource::StreamedResourceInfo;
     use assetripper::serialized_file::object::{SerializedFieldValue, SerializedValue};
 
     fn payload(fields: Vec<(&str, SerializedValue)>) -> SerializedValue {
@@ -846,9 +953,9 @@ mod tests {
         assert_eq!(best_name("", 28, None), "Texture2D");
     }
 
-    /// `Has_StreamData` asks whether the field is there; `IsSet` asks whether it names a resource.
+    /// `Has_StreamData` asks whether the field is there; the descriptor is read when it is.
     #[test]
-    fn a_stream_field_is_set_only_when_it_names_a_resource() {
+    fn the_stream_descriptor_is_read_or_reported() {
         let stream = |path: &[u8]| {
             SerializedValue::Struct(vec![
                 SerializedFieldValue {
@@ -865,22 +972,37 @@ mod tests {
                 },
             ])
         };
-        // The field is present in every 2019.4-and-later tree; only a non-empty path makes it a
-        // stream, which is what keeps a texture with inline pixels on the integrity rule's first arm.
+        let descriptor = |path: &str| StreamedResourceInfo {
+            path: path.to_owned(),
+            offset: 0,
+            size: 4,
+        };
+        // The field is present in every 2019.4-and-later tree, and a present descriptor is read even
+        // when its path is empty: the integrity rule decides what an unset one means, not this
+        // reader, which must not fold "unset" into "absent".
         assert_eq!(
-            texture2d_stream_is_set(&payload(vec![("m_StreamData", stream(b""))])),
-            Some(false)
+            texture2d_stream_data(&payload(vec![("m_StreamData", stream(b""))])),
+            Ok(Some(descriptor("")))
         );
         assert_eq!(
-            texture2d_stream_is_set(&payload(vec![("m_StreamData", stream(b"archive.resS"))])),
-            Some(true)
+            texture2d_stream_data(&payload(vec![("m_StreamData", stream(b"archive.resS"))])),
+            Ok(Some(descriptor("archive.resS")))
         );
-        // An absent field and a field that is not a streaming struct are both unanswered rather than
-        // set, so neither can be mistaken for a stream.
-        assert_eq!(texture2d_stream_is_set(&payload(vec![])), None);
+        // The generated class's own spelling is read too.
         assert_eq!(
-            texture2d_stream_is_set(&payload(vec![("m_StreamData", SerializedValue::I32(0))])),
-            None
+            texture2d_stream_data(&payload(vec![(
+                "m_StreamData_C28",
+                stream(b"archive.resS")
+            )])),
+            Ok(Some(descriptor("archive.resS")))
+        );
+        // An absent field is `Has_StreamData` false; a present value that is not a descriptor is
+        // reported, because dropping it would hand the texture to the JSON fallback on a field the
+        // reference reads.
+        assert_eq!(texture2d_stream_data(&payload(vec![])), Ok(None));
+        assert!(
+            texture2d_stream_data(&payload(vec![("m_StreamData", SerializedValue::I32(0))]))
+                .is_err()
         );
     }
 

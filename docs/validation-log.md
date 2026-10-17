@@ -8977,3 +8977,57 @@ These results do not pass the first-phase gate. The reference .NET solution buil
   in the committed fixtures (the pieces are tested, the composition is not), and the script producer,
   the movie/video streamed ranges, the class-89/117/187/188 image classes and a genuinely streamed
   `Texture2D` remain unimplemented or reported.
+
+## 2026-10-17 - The primary-content driver resolves a streamed texture's pixels
+
+- Outcome: a class-28 `Texture2D` whose pixels live in a `.resS` exports from
+  `/Export/PrimaryContent`, and both branches of the reference's stream gate are pinned end to end.
+  Two new regressions in `src/web/routes.rs`; the driver's own descriptor test was rewritten.
+- **The gate this unit answers, read from the reference.** `TextureExporter.TryCreateCollection` admits
+  `asset is IImageTexture texture && texture.CheckAssetIntegrity()`. For a statically-`IImageTexture`
+  receiver that is `ImageTextureExtensions.CheckAssetIntegrity`: inline `ImageData.Length > 0` answers
+  true; otherwise `Has_StreamData()` feeds `StreamData.CheckIntegrity(collection)`, which is
+  `StreamedResourceExtensions.CheckIntegrity(path, offset, size, collection)` - an **empty path is
+  true without any lookup**, an overflowing offset/size or a **zero size is false**, an unresolvable
+  resource is false, and otherwise the range must fit the resource file. The old driver answered from
+  the field's *presence* instead ("present with an empty path -> false -> JSON"), which is the opposite
+  of the reference on the one case 2019.4 trees hit constantly, and it reported a genuinely set stream
+  as undecidable rather than resolving it.
+- **The lookup is the project pipeline's own.** `read_texture_stream` calls
+  `resolve_and_read_streamed_resource_info` - the same function, provider and limits
+  `main_cli_export.rs` uses for the Unity-project export - and returns `(intact, bytes)`. The bytes are
+  threaded into `plan_resource_export`'s existing `stream_content`, so the producer path did not
+  change; only the caller that can read files now supplies what it reads.
+- **Three outcomes, each the reference's own.** An empty path -> intact, no bytes, and the producer
+  fails loudly (the port reports the collection as failed, the analogue of the reference's `Export`
+  returning false and `PrimaryContentExporter` logging `Warning "Failed to export '{name}'"`). A
+  missing resource, a zero-length range and a range outside the resource -> not intact, so the object
+  declines to the JSON fallback the reference writes for it. Any other lookup/read error -> reported
+  as undecidable with the resource path and the underlying error, because the port must not flatten an
+  error it cannot distinguish from the reference's decline. `UndecidableObject.reason` became an owned
+  `String` for exactly that reason.
+- **The descriptor reader replaced the presence helper.** `texture2d_stream_data` reads
+  `m_StreamData` (and the generated `_C28` spelling) through the base-chain lookup and validates it
+  with `extract_streamed_resource_info`, returning `None` only when the field is absent - a present
+  descriptor that cannot be read is an error, not an absent stream - and
+  `the_stream_descriptor_is_read_or_reported` pins absent / present-but-unset / alias / unreadable.
+- **Coverage.** `the_primary_content_export_reads_a_streamed_texture_from_its_resource` extends the
+  end-to-end export regression with a new `make_streamed_reference_texture_file` fixture: the release
+  2019.4 tree with **empty** `image data` and `m_StreamData` naming offset 3 and length 8 of
+  `streamed.resS`, whose first three bytes are `xyz`. The PNG's 2x1 pixels are asserted equal to the
+  resource's bytes at that offset, so neither an inline fallback (there is none) nor offset 0 could
+  produce them; the same texture loaded without its resource must write the JSON document and no PNG.
+  The fixture was refactored into a parameterized core with `make_reference_texture_file` delegating
+  to it, and that function's bytes are unchanged: `reference_texture_typetree_decodes_through_the_file_route`
+  and `a_loaded_bundle_renders_its_tree_pages` both still pass.
+- Commands run locally: `cargo check --locked --all-targets` (no warnings),
+  `cargo clippy --workspace --all-targets --locked -- -D warnings` (exit 0), `rustfmt --edition 2021
+  --check` on the three changed Rust files (exit 0), and the two focused regressions plus the driver's
+  unit tests (`cargo test --bin assetripper-rs -- primary_content` and
+  `... -- the_primary_content_export`, 8 and 2 tests, exit 0). The full suite runs on GitHub Actions,
+  not this machine. The parity ledger is unchanged by this unit (409 rows, 29 non-verified): the two
+  `PRODUCT-PRIMARY-CONTENT-*` rows keep their statuses, with the stale "the resource lookup is not
+  wired here" claims replaced by what the unit now does.
+- What remains unverified on this path: the movie/video streamed ranges (same helper, one more
+  descriptor field), the hierarchy GLB for prefab members through the driver, the script producer
+  (blocked on the decompiler decision) and the class-89/117/187/188 image classes.

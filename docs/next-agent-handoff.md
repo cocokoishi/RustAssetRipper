@@ -1,6 +1,39 @@
 # RustAssetRipper hand-off — 2026-10-17
 
-## Latest current checkpoint - 2026-10-17 (the primary-content export is verified end to end)
+## Latest current checkpoint - 2026-10-17 (a streamed texture's pixels are resolved on the primary-content path)
+
+- **The primary-content driver now resolves class-28 streamed resources.** `read_texture_stream`
+  (`src/main_cli_primary_content.rs`) answers `ImageTextureExtensions.CheckAssetIntegrity`'s stream
+  branch with the ported `StreamedResourceExtensions.CheckIntegrity`: an empty path is intact without
+  any lookup, a missing resource, a zero-length range and a range outside its file are not (so the
+  object reaches the JSON fallback the reference writes for it), and a resolved bounded read carries
+  its bytes. Those bytes are threaded into `plan_resource_export`'s `stream_content`, which
+  `Texture2DView` already accepted, so a 2019.4 texture whose pixels live in a `.resS` exports as a
+  PNG instead of being reported. The lookup is the same `resolve_and_read_streamed_resource_info`
+  the Unity-project pipeline uses.
+- **The old presence-based gate is gone.** `texture2d_stream_is_set` (field present -> `Some(false)`)
+  became `texture2d_stream_data`, which reads and validates the descriptor and reports one it cannot
+  read, and the driver's unit test now pins absent / present-but-unset / `_C28` alias / unreadable.
+  `UndecidableObject.reason` is an owned `String`, so a resource failure can carry the resource path
+  and the underlying error instead of being flattened to one line.
+- **Both branches are pinned end to end** by
+  `the_primary_content_export_reads_a_streamed_texture_from_its_resource` (`src/web/routes.rs`), on a
+  new `make_streamed_reference_texture_file` fixture (the release 2019.4 tree with empty `image data`
+  and a descriptor pointing three bytes into `streamed.resS`): the PNG's pixels are the resource's
+  own bytes at that offset, and the same texture loaded without its resource writes the JSON
+  fallback and no PNG. The fixture was refactored into a parameterized core, and
+  `make_reference_texture_file`'s bytes are unchanged (the texture-decode and asset-page regressions
+  pass).
+- Verified by GitHub Actions (locally this unit ran only `cargo check`, `clippy -D warnings`,
+  `rustfmt` and the two focused regressions, because the new fixture and the driver cannot be
+  validated by inspection alone): the `Rust CI` run for this commit must be green before the unit
+  counts.
+- **Next:** the movie/video streamed ranges (same helper, one more field), the `EXP-GLB-*` hierarchy
+  path through the driver (needs a scene-collection fixture), then `RES-TEXTURE-001` /
+  `EXPORT-UNITY-001`, `PRODUCT-CONFIG-001`'s data-set subsystem, and finally the 22-sample local
+  replay with the `docs/acceptance-corpus.md` refresh.
+
+## Previous checkpoint - 2026-10-17 (the primary-content export is verified end to end)
 
 - **The primary-content export has an end-to-end regression.**
   `the_primary_content_export_writes_one_file_per_producer_family` (`src/web/routes.rs`) loads one
@@ -13,8 +46,10 @@
   class-28 field `image data`, so the ported integrity rule saw no inline pixels; and the driver
   refused every texture whose payload merely *had* `m_StreamData`, because it used the field's
   presence instead of `Has_StreamData` + `StreamingInfo.IsSet`. `CheckAssetIntegrity` reads the
-  inline `ImageData` first and only then the stream, so `texture2d_stream_is_set` now answers those
-  two gates, an unset stream answers `Some(false)`, and only a genuinely set one is reported. The
+  inline `ImageData` first and only then the stream, so `texture2d_stream_is_set` answered those
+  two gates, an unset stream answered `Some(false)`, and only a genuinely set one was reported.
+  (Superseded by the checkpoint above: the presence-based helper is gone and the stream itself is now
+  resolved.) The
   dead `has_field` helper and its "presence is the gate" test were removed rather than kept as a
   second rule. The third rule is the binary arms: their facts read `m_Script`/`m_FontData`/`m_MovieData`
   through a packed-bytes-only helper while the producers also accept an element list, and a small
@@ -26,8 +61,9 @@
 - **The two rows' stale claims were corrected** (`PRODUCT-PRIMARY-CONTENT-001`,
   `PRODUCT-PRIMARY-CONTENT-EXTRACTORS-001`): both said no production caller existed and that
   `/Export/PrimaryContent` still answered 501. Their statuses stay `已实现但未验证`, because the
-  script producer, the movie/video streamed ranges, the image classes other than 28 and a genuinely
-  streamed `Texture2D` still have no producer on this path; the evidence now says exactly that.
+  script producer, the movie/video streamed ranges and the image classes other than 28 still had no
+  producer on this path; the evidence now says exactly that. (The streamed `Texture2D` in that list
+  was closed by the checkpoint above.)
 - Verified by GitHub Actions (the local machine ran only `cargo check`, `clippy`, `rustfmt` and the
   ledger script): the `Rust CI` run for this commit must be green before the unit counts.
 - **Next:** still the wrap-up plan - the `EXP-GLB-*` hierarchy path through the driver (needs a

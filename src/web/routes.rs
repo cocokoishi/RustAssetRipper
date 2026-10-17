@@ -1409,6 +1409,117 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
     }
 
+    /// `PRODUCT-PRIMARY-CONTENT-001`: a streamed texture's pixels come from its `.resS`.
+    ///
+    /// The 2019.4 tree carries `m_StreamData` on every texture, so "streamed" is a question of where
+    /// the pixels live, not of whether the field exists. This fixture has no inline pixels at all
+    /// and a descriptor naming a range, so a PNG whose pixels match the resource's bytes at that
+    /// offset proves the lookup ran and reached the producer; and the same texture with no resource
+    /// to resolve must fall back to the JSON document the reference writes for a texture its
+    /// integrity rule declines.
+    #[test]
+    fn the_primary_content_export_reads_a_streamed_texture_from_its_resource() {
+        use crate::tests::make_streamed_reference_texture_file;
+
+        const PIXELS: &[u8] = &[10, 20, 30, 255, 40, 50, 60, 255];
+        // The descriptor names offset 3 and length 8 into a file whose first three bytes are not
+        // pixels, so neither an inline fallback (there is none) nor offset 0 could produce them.
+        const STREAM_PATH: &str = "streamed.resS";
+        const STREAM_OFFSET: u32 = 3;
+
+        let directory = PathBuf::from("target/primary-content-streamed-e2e")
+            .join(std::process::id().to_string());
+        std::fs::create_dir_all(&directory).expect("the probe directory is created");
+
+        let mut resource = b"xyz".to_vec();
+        resource.extend_from_slice(PIXELS);
+        let streamed_input = directory.join("s-texture.assets");
+        std::fs::write(
+            &streamed_input,
+            make_streamed_reference_texture_file(2, 1, STREAM_PATH, STREAM_OFFSET, 8),
+        )
+        .expect("the streamed texture is written");
+        let resource_input = directory.join(STREAM_PATH);
+        std::fs::write(&resource_input, &resource).expect("the resource is written");
+
+        let export_root = directory.join("primary-content-streamed");
+        let _layouts = crate::SourceFactoryLayoutGuard::use_source_factory();
+        let mut streamed_state = state();
+        streamed_state
+            .load(&[
+                streamed_input.to_string_lossy().into_owned(),
+                resource_input.to_string_lossy().into_owned(),
+            ])
+            .expect("the streamed inputs load");
+        assert!(streamed_state.is_loaded());
+
+        let submitted = export_root.to_string_lossy().replace('\\', "/");
+        let response = dispatch(
+            &mut streamed_state,
+            &request_with_body(
+                "/Export/PrimaryContent",
+                &format!("Path={submitted}&ConfirmDelete=true"),
+            ),
+        );
+        assert_eq!(response.status(), 302);
+        let log = streamed_state.take_log().join("\n");
+        assert!(log.contains("Wrote 1 primary-content files to"), "{log}");
+        assert!(!log.contains("could not be decided"), "{log}");
+        assert!(!log.contains("collections failed:"), "{log}");
+
+        let mut files: Vec<(PathBuf, Vec<u8>)> = Vec::new();
+        collect_export_files(&export_root, &mut files);
+        assert_eq!(files.len(), 1, "{log}");
+        assert_eq!(
+            files[0].0.extension().and_then(|value| value.to_str()),
+            Some("png"),
+            "{log}"
+        );
+        assert_png_pixels(&files[0].1, 2, 1, PIXELS);
+
+        // The same texture with no resource to resolve. `CheckAssetIntegrity`'s stream branch is
+        // false for a name the bundle cannot resolve, so the texture is not intact and the stack
+        // continues to the JSON fallback - which is the file the reference writes for it.
+        let missing_directory = directory.join("streamed-missing");
+        std::fs::create_dir_all(&missing_directory).expect("the missing-resource directory exists");
+        let missing_input = missing_directory.join("s-texture.assets");
+        std::fs::write(
+            &missing_input,
+            make_streamed_reference_texture_file(2, 1, STREAM_PATH, STREAM_OFFSET, 8),
+        )
+        .expect("the streamed texture is written");
+
+        let missing_root = missing_directory.join("primary-content");
+        let mut missing_state = state();
+        missing_state
+            .load(&[missing_input.to_string_lossy().into_owned()])
+            .expect("the missing-resource input loads");
+        let submitted = missing_root.to_string_lossy().replace('\\', "/");
+        let response = dispatch(
+            &mut missing_state,
+            &request_with_body(
+                "/Export/PrimaryContent",
+                &format!("Path={submitted}&ConfirmDelete=true"),
+            ),
+        );
+        assert_eq!(response.status(), 302);
+        let log = missing_state.take_log().join("\n");
+        assert!(log.contains("Wrote 1 primary-content files to"), "{log}");
+        assert!(!log.contains("could not be decided"), "{log}");
+        assert!(!log.contains("collections failed:"), "{log}");
+
+        let mut files: Vec<(PathBuf, Vec<u8>)> = Vec::new();
+        collect_export_files(&missing_root, &mut files);
+        assert_eq!(files.len(), 1, "{log}");
+        assert_eq!(
+            files[0].0.extension().and_then(|value| value.to_str()),
+            Some("json"),
+            "{log}"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
     /// Every file under an export root, in no particular order.
     fn collect_export_files(root: &std::path::Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
         for entry in std::fs::read_dir(root).expect("the export root is readable") {

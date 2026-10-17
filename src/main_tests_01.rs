@@ -1119,6 +1119,35 @@
     /// `m_StreamingMipmapsPriority` and `image data`. Writing zero for every node silently
     /// removes those bytes, so the payload and the decoder disagree.
     pub(super) fn make_reference_texture_file(width: i32, height: i32, data: &[u8]) -> Vec<u8> {
+        make_reference_texture_file_with_stream(width, height, data, None)
+    }
+
+    /// The same release-tree texture with its pixels in a `.resS` instead of inline.
+    ///
+    /// The 2019.4 tree carries `m_StreamData` on every texture, so "streamed" is a question of where
+    /// the pixels live, not of whether the field exists. Empty inline data plus a descriptor naming
+    /// a range is the only shape that shows the resolution actually ran.
+    pub(super) fn make_streamed_reference_texture_file(
+        width: i32,
+        height: i32,
+        stream_path: &str,
+        offset: u32,
+        size: u32,
+    ) -> Vec<u8> {
+        make_reference_texture_file_with_stream(
+            width,
+            height,
+            &[],
+            Some((stream_path, offset, size)),
+        )
+    }
+
+    fn make_reference_texture_file_with_stream(
+        width: i32,
+        height: i32,
+        data: &[u8],
+        stream: Option<(&str, u32, u32)>,
+    ) -> Vec<u8> {
         struct DumpedNode {
             level: u8,
             type_text: String,
@@ -1276,9 +1305,11 @@
         // m_StreamData is `StreamingInfo`, and in this release tree the leaves are 32-bit:
         // `offset` (unsigned int), `size` (unsigned int), then the `path` string's length
         // word, which the reader consumes before aligning the whole field.
-        put_u32_le(&mut payload, 0); // m_StreamData.offset
-        put_u32_le(&mut payload, 0); // m_StreamData.size
-        put_i32_le(&mut payload, 0); // m_StreamData.path (string: length 0)
+        let (stream_path, stream_offset, stream_size) = stream.unwrap_or(("", 0, 0));
+        put_u32_le(&mut payload, stream_offset); // m_StreamData.offset
+        put_u32_le(&mut payload, stream_size); // m_StreamData.size
+        put_i32_le(&mut payload, i32::try_from(stream_path.len()).unwrap()); // m_StreamData.path
+        payload.extend_from_slice(stream_path.as_bytes());
         while payload.len() % 4 != 0 {
             payload.push(0);
         }
