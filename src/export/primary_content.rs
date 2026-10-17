@@ -235,6 +235,54 @@ pub fn handlers_for_target(
         .filter(move |registration| registration.target == target)
 }
 
+/// `ObjectHandlerStack.GetHandlerStack`: the handlers to try for one asset type, in the order the
+/// exporter tries them.
+///
+/// **The order is the reverse of the registration order**, and that is the single most important
+/// fact about this table. `OverrideHandler` appends to a list, `CalculateAssetHandlerStack` pushes
+/// each match onto a `Stack<T>` while walking that list forwards, and a stack enumerates
+/// most-recently-pushed first - so the **last** matching registration is tried **first**. Measured,
+/// not read: `tools/probes/handler-stack` registers `string` handlers on the public,
+/// asset-independent `ObjectHandlerStack<string>` and observes `three,two,one` for three
+/// registrations of the same type. The rows are replayed by `handler_stack_matches_the_runtime_rows`
+/// below.
+///
+/// Consequences for the default stack, both of which are easy to invert by accident:
+///
+/// - `DeletedAssetsExporter` is registered **last** for `IUnityObjectBase`, so it is tried **first**
+///   for every asset, and `JsonContentExtractor` - registered first - is the **final fallback**. That
+///   is why JSON covers everything the others decline.
+/// - `GlbModelExporter` is registered after the empty `IComponent` handler, so it shadows it.
+///
+/// `applies` is the caller's `type == baseType || allowInheritance && type.IsAssignableTo(baseType)`
+/// test. It is a predicate rather than a type relation because the port models asset types as names,
+/// and every registration in the default stack uses the default `allowInheritance = true`, so the
+/// inheritance branch is the only one the default stack exercises - which is also why the row type
+/// carries no such flag.
+pub fn handler_stack_from(
+    registrations: &[PrimaryHandlerRegistration],
+    mut applies: impl FnMut(&PrimaryHandlerRegistration) -> bool,
+) -> Vec<&PrimaryHandlerRegistration> {
+    let mut stack: Vec<&PrimaryHandlerRegistration> =
+        registrations.iter().filter(|r| applies(r)).collect();
+    // `Stack<T>.Push` in registration order, enumerated - so reverse the filtered list.
+    stack.reverse();
+    stack
+}
+
+/// [`handler_stack_from`] over the default table, for a queried type name and an assignability test.
+///
+/// `is_assignable(target)` answers `queried.IsAssignableTo(target)`. A registration always applies to
+/// its own exact target, which is the source's first disjunct.
+pub fn handler_stack_for(
+    queried: &str,
+    mut is_assignable: impl FnMut(&str) -> bool,
+) -> Vec<&'static PrimaryHandlerRegistration> {
+    handler_stack_from(PRIMARY_HANDLERS, |registration| {
+        registration.target == queried || is_assignable(registration.target)
+    })
+}
+
 /// Format one export progress line: `(current/total) Exporting 'name'`.
 ///
 /// The primary-content loop passes the one-based index over all collections; the
@@ -406,9 +454,14 @@ impl std::error::Error for PrimaryContentNoHandler {}
 
 /// The handler stack's answer for one asset: the first extractor that claims it.
 ///
-/// `GetHandlerStack(asset.GetType())` returns the handlers registered for the asset's type and its
-/// bases in registration order, and `CreateCollection` takes the **first** whose
-/// `TryCreateCollection` succeeds.
+/// `candidates` must already be in **stack order** - the reverse of the registration order, which
+/// [`handler_stack_for`] produces. Passing the table in source order inverts every priority: the
+/// catch-all JSON extractor would claim every asset and the deleted-assets and model extractors would
+/// never be reached. This function cannot detect that, because a caller may legitimately hand it a
+/// narrowed stack, so the requirement is stated here and pinned by
+/// `default_stack_puts_deleted_first_and_json_last`.
+///
+/// `CreateCollection` takes the first candidate whose `TryCreateCollection` succeeds.
 pub fn select_primary_content_extractor<'a>(
     candidates: &[&'a PrimaryHandlerRegistration],
     mut accepts: impl FnMut(&PrimaryHandlerRegistration) -> bool,
@@ -421,14 +474,15 @@ pub fn select_primary_content_extractor<'a>(
 
 /// `PrimaryContentExporter.CreateCollection` for one asset.
 ///
-/// Walks `candidates` in order and returns the first handler whose `TryCreateCollection` reports
-/// success, or the error the source throws when every handler declined.
+/// Walks `candidates` in stack order - see [`select_primary_content_extractor`], which is where the
+/// reverse-registration requirement is explained - and returns the first handler whose
+/// `TryCreateCollection` reports success, or the error the source throws when every handler declined.
 ///
-/// The failure is deliberately an error rather than a fallback. Through the default registration
-/// the stack can never be exhausted - `RegisterHandler<IUnityObjectBase>(JsonContentExtractor)` is
-/// registered first, so it claims any remaining asset - but a port that substituted a default
-/// collection here would silently drop a resource the moment a caller narrowed the stack, which is
-/// the class of bug this whole row is meant to rule out.
+/// The failure is deliberately an error rather than a fallback. Through the default registration the
+/// stack can never be exhausted, because `JsonContentExtractor` accepts every asset and is the last
+/// entry in stack order - but a port that substituted a default collection here would silently drop a
+/// resource the moment a caller narrowed the stack, which is the class of bug this whole row is meant
+/// to rule out.
 pub fn create_primary_content_collection<'a>(
     identity: u64,
     candidates: &[&'a PrimaryHandlerRegistration],
@@ -590,8 +644,8 @@ pub fn plan_single_export_paths(
 mod tests {
     use super::{
         create_primary_content_collection, create_primary_content_collections,
-        format_export_progress, handlers_for_target, plan_single_export_paths,
-        primary_content_progress_total, run_primary_content_export_loop,
+        format_export_progress, handler_stack_for, handler_stack_from, handlers_for_target,
+        plan_single_export_paths, primary_content_progress_total, run_primary_content_export_loop,
         select_primary_content_extractor, PrimaryContentAsset, PrimaryContentExportEvent,
         PrimaryContentExportStep, PrimaryContentNoHandler, PrimaryHandlerRegistration,
         PRIMARY_HANDLERS,
@@ -1019,6 +1073,103 @@ mod tests {
         fn file_exists(&self, directory: &str, name: &str) -> bool {
             self.files.contains(&Self::joined(directory, name))
         }
+    }
+
+    /// Replay the runtime's handler-stack order.
+    ///
+    /// The rows come from `tools/probes/handler-stack`, which measures the real
+    /// `ObjectHandlerStack<string>`. The port's own documentation claimed the stack arrived in
+    /// **registration** order; it arrives in the reverse, and the difference decides every asset's
+    /// extractor. The fixture is what makes that reversal evidence rather than a reading of
+    /// `Stack<T>`.
+    #[test]
+    fn handler_stack_matches_the_runtime_rows() {
+        let fixture = include_str!("handler_stack_fixture.txt");
+        let mut checked = 0usize;
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let rest = line.strip_prefix("STACK|").expect("STACK row");
+            let mut parts = rest.splitn(5, '|');
+            let case = parts.next().expect("case");
+            let queried = parts.next().expect("queried type");
+            let registrations = parts.next().expect("registrations");
+            let assignable = parts.next().expect("assignable targets");
+            let expected = parts.next().expect("expected order");
+            let assignable: Vec<&str> = if assignable.is_empty() {
+                Vec::new()
+            } else {
+                assignable.split(',').collect()
+            };
+
+            // The probe registered `string` handlers on a real stack; this replay builds the same
+            // registration list and runs it through the production filter-and-reverse.
+            let mut no_inherit: Vec<&str> = Vec::new();
+            let owned: Vec<PrimaryHandlerRegistration> = registrations
+                .split(',')
+                .map(|entry| {
+                    let (target, handler) = entry.split_once(':').expect("target:handler");
+                    // `@false` marks `allowInheritance = false`, which the default table never sets,
+                    // so the replay carries it as a test-local set instead of a production field.
+                    let target = match target.strip_suffix("@false") {
+                        Some(target) => {
+                            no_inherit.push(target);
+                            target
+                        }
+                        None => target,
+                    };
+                    PrimaryHandlerRegistration {
+                        target: Box::leak(target.to_owned().into_boxed_str()),
+                        extractor: Box::leak(handler.to_owned().into_boxed_str()),
+                        is_empty_handler: false,
+                    }
+                })
+                .collect();
+
+            let stack = handler_stack_from(&owned, |registration| {
+                registration.target == queried
+                    || (!no_inherit.contains(&registration.target)
+                        && assignable.contains(&registration.target))
+            });
+            let actual: Vec<&str> = stack.iter().map(|r| r.extractor).collect();
+            assert_eq!(
+                actual,
+                expected.split(',').collect::<Vec<_>>(),
+                "case {case}"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 9, "every recorded row is replayed");
+    }
+
+    /// The default stack's two priority facts, asserted directly.
+    ///
+    /// An asset assignable to every registered interface is the worst case for getting this
+    /// backwards, so it is the case pinned: the deleted-assets tail is tried first and the JSON
+    /// catch-all last.
+    #[test]
+    fn default_stack_puts_deleted_first_and_json_last() {
+        let assignable_to_everything = |_target: &str| true;
+        let stack = handler_stack_for("IUnityObjectBase", assignable_to_everything);
+        assert_eq!(stack.len(), PRIMARY_HANDLERS.len(), "everything applies");
+        assert_eq!(
+            stack.first().unwrap().extractor,
+            "DeletedAssetsExporter",
+            "the last registration is tried first"
+        );
+        assert_eq!(
+            stack.last().unwrap().extractor,
+            "JsonContentExtractor",
+            "the first registration is the final fallback"
+        );
+
+        // A component that is not a hierarchy member: the model exporter shadows the empty handler,
+        // so it comes first even though it was registered second.
+        let component = handler_stack_for("IComponent", |_| false);
+        let extractors: Vec<&str> = component.iter().map(|r| r.extractor).collect();
+        assert_eq!(extractors, ["GlbModelExporter", "EmptyContentExtractor"]);
     }
 
     #[test]

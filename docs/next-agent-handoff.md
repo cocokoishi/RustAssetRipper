@@ -42,9 +42,9 @@
 - **A GLB is binary: decode the JSON chunk before asserting on text.**
 - **Run `tools/parity-report.ps1` after every ledger edit**; a literal `||` inside a cell splits the
   row.
-- **`JsonContentExtractor` overrides `VisitPPtr`**: a file id naming a dependency renders `{ "m_Collection": "<name>", "m_PathID": <id> }`, not the base `{ "m_FileID": n, "m_PathID": m }`. Both forms are ported; the base form is replayed from 5 runtime rows (`json_walker_pptr_fixture.txt`), the override is source-derived (private nested class needing a live `AssetCollection`). See `DIFF-JSON-PPTR-FORM-001`. **All extractor decisions are now ported** (binary, GLB, JSON/empty, texture, audio, script, terrain heatmap, deleted assets). **Next: assemble `PrimaryContentExporter`'s handler stack from settings and wire the claims to a production path**, which is what unlocks `/Export/PrimaryContent`.
+- **`JsonContentExtractor` overrides `VisitPPtr`**: a file id naming a dependency renders `{ "m_Collection": "<name>", "m_PathID": <id> }`, not the base `{ "m_FileID": n, "m_PathID": m }`. Both forms are ported; the base form is replayed from 5 runtime rows (`json_walker_pptr_fixture.txt`), the override is source-derived (private nested class needing a live `AssetCollection`). See `DIFF-JSON-PPTR-FORM-001`. **All extractor decisions are ported, and the stack order is measured.** `GetHandlerStack` yields the **reverse** of registration order (`OverrideHandler` appends, then pushes onto a `Stack<T>`), so `DeletedAssetsExporter` is tried first and `JsonContentExtractor` is the final fallback; `handler_stack_from`/`handler_stack_for` compute it and 9 runtime rows replay it. The port had this documented backwards - see `DIFF-PRIMARY-HANDLER-ORDER-001`. **Next: give `create_primary_content_collection` a production caller and wire the route**, which is what unlocks `/Export/PrimaryContent`.
 - Parity ledger: 408 rows, 380 verified, 28 non-verified, DUPES=0, MALFORMED=0, gate OPEN.
-- Verified: **1895** library + 199 bin tests, 0 failed; warnings-denied Clippy exit 0. CI green on all eight jobs for `a968099`.
+- Verified: **1897** library + 199 bin tests, 0 failed; warnings-denied Clippy exit 0. CI green on all eight jobs for the previous commit.
 
 ## Previous checkpoint - 2026-10-16 (duplicate .NET float formatter removed)
 

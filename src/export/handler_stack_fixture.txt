@@ -1,0 +1,36 @@
+# `ObjectHandlerStack<T>.GetHandlerStack` order, captured from the reference runtime
+#
+# This decides every primary-content asset's extractor, and reading the source invites the wrong
+# answer: `OverrideHandler` sounds like it replaces an earlier registration, while the implementation
+# appends to a list and pushes onto a `Stack<T>`, whose enumeration is the reverse of push order. So
+# the **most recently registered matching handler is tried first**.
+#
+# Produced by tools/probes/handler-stack, which instantiates the public, asset-independent
+# `ObjectHandlerStack<string>` and registers `string` handlers, so the order is measured rather than
+# read.
+#
+# Columns:
+#   STACK|<case>|<queried type>|<registrations in registration order>|<targets the queried type is
+#   assignable to>|<measured stack order>
+#
+# Registration entries are `<target>:<handler>`, and a `@false` suffix on the target marks`n# `allowInheritance = false` for that registration.
+# That flag is exercised here for completeness; every registration in `RegisterDefaultHandlers` uses
+# the default `true`, so no default-stack row depends on it.
+#
+# The rows that matter for the real stack:
+#   * `same-type-thrice` gives `three,two,one` - the whole order reverses, not just the last entry.
+#   * `after-late-add` gives `after,before` - a late registration takes priority immediately.
+#   * `leaf-with-exact-root-only` drops `root`, and `root-itself` keeps it - the assignability filter
+#     is per query, not per handler.
+#
+# Applied to the default primary-content stack this means `DeletedAssetsExporter` is tried **before**
+# `JsonContentExtractor` for every asset, and `GlbModelExporter` before the empty component handler.
+STACK|same-type-twice|IRoot|IRoot:first,IRoot:second|IRoot|second,first
+STACK|same-type-thrice|IRoot|IRoot:one,IRoot:two,IRoot:three|IRoot|three,two,one
+STACK|leaf-through-both|Leaf|IRoot:root,IChild:child|IRoot,IChild|child,root
+STACK|leaf-with-exact-root-only|Leaf|IRoot@false:root,IChild:child|IChild|child
+STACK|root-itself|IRoot|IRoot@false:root,IChild:child|IRoot|root
+STACK|before-late-add|IRoot|IRoot:before|IRoot|before
+STACK|after-late-add|IRoot|IRoot:before,IRoot:after|IRoot|after,before
+STACK|repeat-first|IRoot|IRoot:a,IRoot:b|IRoot|b,a
+STACK|repeat-second|IRoot|IRoot:a,IRoot:b|IRoot|b,a

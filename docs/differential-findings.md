@@ -1,5 +1,43 @@
 # Source behavior and differential findings
 
+## DIFF-PRIMARY-HANDLER-ORDER-001 - the primary-content handler stack runs in reverse registration order, and the port documented it the other way round
+
+`ObjectHandlerStack<T>.OverrideHandler` **appends** to a `List<(Type, T, bool)>`, and
+`CalculateAssetHandlerStack` walks that list forwards pushing each match onto a `Stack<T>`. Enumerating
+a stack yields the most recently pushed item first, so the **last matching registration is tried
+first** and the first registration is the final fallback.
+
+That is the whole precedence rule of the primary-content pipeline, and the port had it backwards in
+prose: `select_primary_content_extractor` was documented as receiving handlers "in registration order"
+with `CreateCollection` taking the first that claims, and the failure note explained that the stack
+can never be exhausted because the JSON catch-all "is registered first". The conclusion was right and
+the reason was inverted, which is the dangerous combination: the next caller to build candidates from
+`PRIMARY_HANDLERS` in source order would have handed every asset to `JsonContentExtractor` and left
+`DeletedAssetsExporter` and `GlbModelExporter` unreachable, with nothing failing.
+
+**Measured, not read.** `tools/probes/handler-stack` instantiates the public, asset-independent
+`ObjectHandlerStack<string>` and registers `string` handlers, so no asset model is involved. Nine rows
+are committed as `src/export/handler_stack_fixture.txt` and replayed by
+`handler_stack_matches_the_runtime_rows`. The rows that settle it:
+
+- three registrations of the same type enumerate `three,two,one` - the **entire** order reverses, not
+  just the last entry, which rules out the "last registration wins" reading;
+- a registration added after a query still takes priority (`after,before`), so the reversal holds per
+  query rather than being a snapshot;
+- `allowInheritance = false` drops the base-interface handler for a derived query while the exact
+  query keeps it, so the filter is applied per query.
+
+**Fix.** `handler_stack_from` and `handler_stack_for` now compute the order, the two misleading
+documentation blocks are corrected, and `default_stack_puts_deleted_first_and_json_last` pins the two
+facts a caller would otherwise get backwards: `DeletedAssetsExporter` first for every asset, and
+`GlbModelExporter` shadowing the empty `IComponent` handler.
+
+**Why this is a finding rather than a test fix.** No production behaviour changed, because the only
+callers of the selection functions are tests - the stack order was simply unmodelled. But the defect
+was real: it was documentation that asserted the opposite of the runtime, in the one place a port of
+`CreateCollection` would look. That is the same failure mode as the three earlier defects, caught
+before it could produce a wrong export rather than after.
+
 ## DIFF-JSON-PPTR-FORM-001 - the primary-content JSON extractor overrides the pointer form for dependency targets (base form verified, override ported from source)
 
 `JsonContentExtractor.Export` does not use `DefaultJsonWalker` directly: it subclasses it and

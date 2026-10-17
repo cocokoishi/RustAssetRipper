@@ -1,5 +1,39 @@
 # Validation log
 
+## 2026-10-16 - The handler stack runs backwards, and the port said otherwise
+
+- Outcome: measured the primary-content handler stack's order, found the port's documentation
+  inverted, and added the missing order computation. 1897 library tests.
+- **The rule.** `ObjectHandlerStack.OverrideHandler` appends; `CalculateAssetHandlerStack` pushes
+  matches onto a `Stack<T>`; a stack enumerates most-recently-pushed first. So the **last matching
+  registration is tried first** and the first is the final fallback. Applied to the default stack:
+  `DeletedAssetsExporter` is tried before everything for every asset, `JsonContentExtractor` is the
+  last resort, and `GlbModelExporter` shadows the empty `IComponent` handler.
+- **The port had it backwards in prose.** `select_primary_content_extractor` was documented as taking
+  handlers "in registration order", and the no-handler note justified itself with the JSON extractor
+  being "registered first" and therefore claiming whatever remains. The conclusion survived and the
+  reason was inverted - the worst combination, because the reason is what a caller copies. A caller
+  building candidates from `PRIMARY_HANDLERS` in source order would have sent every asset to JSON and
+  made the deleted-assets and model extractors unreachable, with no test failing.
+- **No production behaviour changed, and that is worth stating plainly:** the only callers of the
+  selection functions are tests, and the stack order was simply unmodelled rather than modelled
+  wrongly. The defect was real but latent - documentation asserting the opposite of the runtime, in
+  the exact place a port of `CreateCollection` looks.
+- **Measured with a probe that needs no asset model.** `ObjectHandlerStack<T>` is public and
+  asset-independent, so `tools/probes/handler-stack` registers `string` handlers and observes the
+  order. Nine rows replay in `handler_stack_matches_the_runtime_rows`. The decisive one is three
+  registrations of the same type enumerating `three,two,one`: the **entire** order reverses, which
+  rules out the tempting "last registration wins" reading that would have left the middle entries
+  correct by accident. A late registration added after a query still leads, and `allowInheritance =
+  false` drops a base handler only for the derived query.
+- **New:** `handler_stack_from` / `handler_stack_for` compute the stack, and
+  `default_stack_puts_deleted_first_and_json_last` pins the two facts a caller gets backwards.
+  The `allowInheritance` parameter exists on `RegisterHandler` but the default stack never passes
+  `false`, so the row type still carries no flag; the fixture exercises that branch through a
+  test-local set instead of an unused production field.
+- Evidence: `cargo test --locked --workspace` - **1897** library (up from 1895) + 199 bin tests,
+  0 failed, 1 ignored. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+
 ## 2026-10-16 - The primary-content extractor decision layer is complete
 
 - Outcome: ported the last five extractor gates - texture, audio, script, terrain heatmap and
