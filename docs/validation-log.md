@@ -1,5 +1,47 @@
 # Validation log
 
+## 2026-10-16 - The payload producers already exist; the route needs an adapter, not a new layer
+
+- Outcome: investigated what the route's payload production actually needs and found that
+  `res_wiring::plan_resource_export` already **is** the per-asset primary-content producer for most
+  extractors. No code changed; this round's deliverable is the producer map, which replaces the plan I
+  had been carrying.
+- **What I was about to build already existed.** I had planned to write a producer per extractor -
+  texture decode and write, mesh GLB, terrain GLB, navmesh GLB, audio. All of it is in
+  `src/export/res_wiring.rs`: `plan_texture_export`, `plan_mesh_export`, `plan_terrain_export`,
+  `plan_navmesh_export`, `plan_audio_export`, `plan_shader_export`, dispatched by
+  `plan_resource_export` into `PlannedResourceExport { file_name, bytes, family }`. The module is
+  47 KB and I had been reading its family enum without noticing it was the producer layer. **This is
+  the sixth time in this area that searching first changed the shape of the work, and the largest
+  saving so far.**
+- **The producer map the route needs, with what is genuinely missing marked:**
+
+  | Selected extractor | Producer | State |
+  | --- | --- | --- |
+  | `JsonContentExtractor` | `primary_export::json_content_document` | exists |
+  | `TextureExporter` | `res_wiring::plan_texture_export` via `plan_resource_export` | exists |
+  | `GlbMeshExporter` | `res_wiring::plan_mesh_export` | exists |
+  | `GlbTerrainExporter` | `res_wiring::plan_terrain_export` | exists |
+  | `GlbNavMeshExporter` | `res_wiring::plan_navmesh_export` | exists |
+  | `AudioContentExtractor` | `res_wiring::plan_audio_export` | exists |
+  | `GlbModelExporter` | `scene_glb::export_scene_glb` | exists, but needs the scene graph and per-node meshes |
+  | `BinaryAssetContentExtractor` | - | **missing**; only `resource_extensions::font_data_bytes` exists |
+  | `TerrainHeatmapExporter` | - | **missing**; the heatmap bitmap is not in `res_wiring` |
+  | `ScriptContentExtractor` | - | blocked on the decompiler (`TYPE-SCRIPT-DECOMPILE-001`) |
+
+- **Two refusal paths inside the planner are already correct and worth knowing.**
+  `plan_resource_export` returns `Ok(None)` for `HierarchyGlb` and for `MaterialText`: a whole-hierarchy
+  GLB needs the scene graph and the per-node meshes, so emitting a one-object GLB would look like a
+  hierarchy export, and a material belongs to the Unity-project YAML route. The route therefore has to
+  treat `None` as "not this producer's business" rather than as failure - and the two cases need
+  different follow-ups, since a hierarchy object must reach `scene_glb` while a material must reach the
+  JSON extractor.
+- **What this leaves for the route.** `ObjectWorkspace` to `PrimaryContentObject` (facts through
+  `object_class_facts` plus the payload reads), the producer map above, `WebState::export_primary_content`
+  and the route registration. The binary and heatmap producers are small gaps rather than layers, and
+  the script producer still waits on the decompiler decision.
+- Evidence: no code change; suite unchanged at 1917 library + 199 CLI, 0 failed.
+
 ## 2026-10-16 - The claim dispatch and the JSON producer
 
 - Outcome: added `claim_for_extractor` (the per-extractor decisions turned into the assembly rule's
