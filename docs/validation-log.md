@@ -1,5 +1,33 @@
 # Validation log
 
+## 2026-10-16 - EXPORT-UNITY-001 audited and left at 实现中, because it is right
+
+- Outcome: audited the third priority row and **confirmed** its status rather than changing it. Not
+  every audit ends in a status move, and recording the confirmation matters as much as recording a
+  correction: it is the difference between "audited and correct" and "not yet looked at".
+- **Why 实现中 is right here.** The row covers the whole `AssetRipper.Export.UnityProjects/` tree, 124
+  files, and its gap cell describes a bounded vertical slice with a long, specific remainder:
+  AssetBundle-derived Prefab importer bundle names, legacy Prefab versions beyond the 2017.4
+  synthetic fixture, remaining class-specific exporter and importer families, full settings
+  application, progress and cancellation, source manager dependency closure, and GUI workflows. Those
+  are missing implementations, not missing comparisons - the opposite of the texture row, which is
+  why the two rows were on the same status for different reasons.
+- **One claim clarified while checking it.** The cell says "Material/Shader have source-probed but
+  incomplete routes". There is **no dedicated material exporter on either side**: the reference
+  registers no material-specific exporter and has no material exporter file, so materials ride the
+  generic YAML asset route that `DefaultYamlExporter` claims everything into - which the port's
+  `collection_claims.rs` already documents. Shader, by contrast, does have a dedicated route
+  (`shader_export.rs`, 55 KB, with `ShaderExporter` and `ShaderExportCollection` referenced 50 and 17
+  times). A reader taking "Material/Shader routes" as one thing would go looking for a material
+  exporter that does not exist in the baseline either.
+- **The audit pattern across the three priority rows, stated plainly.** `RES-MODEL-001` and
+  `RES-TEXTURE-001` were **stale** - the status was set when the row was opened and never revisited,
+  and each had a cell that was false. `EXPORT-UNITY-001` is **accurate**. Both failures and the
+  success came from measuring the claim against the code instead of reading the cell, and the
+  distinction between "missing implementation" and "missing comparison" is what separated them.
+- Evidence: ledger unchanged at 409 rows, 已验证 380, 实现中 7, 已实现但未验证 20, 受外部条件阻塞 2,
+  MALFORMED=0, DUPES=0.
+
 ## 2026-10-16 - RES-TEXTURE-001: "platform format branches pending" was false
 
 - Outcome: audited the texture row against the code and re-statused it from 实现中 to 已实现但未验证.
