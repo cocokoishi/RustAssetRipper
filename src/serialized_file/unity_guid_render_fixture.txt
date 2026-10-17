@@ -1,0 +1,26 @@
+# `UnityGuid.ToString()` rendering, captured from the reference runtime
+#
+# Produced by tools/probes/guid-render, which loads `AssetRipper.Primitives.dll` from the reference
+# build, constructs a `UnityGuid` from four 32-bit words and records `ToString()`. This is the exact
+# call `FileIdentifier.GetFilePath` makes for an `AssetType.Meta` identifier, so the rendering reaches
+# every `.meta` guid line and every resolved GUID path.
+#
+# Columns: GUID|<the four words, uppercase hex, comma separated, in stored order>|<rendered text>
+#
+# The port implements the order as "each 32-bit word's nibbles least significant first", which these
+# rows confirm and pin. The edge rows matter most: a signedness or shift mistake would only show up
+# on a word with the high bit set.
+#
+# 0x80000000 renders as `00000008`  - the high nibble of the word lands LAST, not first
+# 0x7FFFFFFF renders as `fffffff7`  - the low nibbles are all f and the top nibble is 7
+# 0x0BADF00D renders as `d00fdab0`  - a mixed pattern with leading zeros inside the word
+#
+# The rendering is 32 lowercase hex characters with no separators. The existing
+# `export/guid_fixture.txt` carries the same convention for the export path; these rows are the
+# metadata path's own evidence, including the sign-bit and all-ones cases.
+GUID|00000000,00000000,00000000,00000000|00000000000000000000000000000000
+GUID|00000001,00000000,00000000,00000000|10000000000000000000000000000000
+GUID|01020304,A1B2C3D4,0F1E2D3C,99887766|403020104d3c2b1ac3d2e1f066778899
+GUID|80000000,00000000,FFFFFFFF,7FFFFFFF|0000000800000000fffffffffffffff7
+GUID|12345678,9ABCDEF0,DEADBEEF,0BADF00D|876543210fedcba9feebdaedd00fdab0
+GUID|FFFFFFFF,FFFFFFFF,FFFFFFFF,FFFFFFFF|ffffffffffffffffffffffffffffffff

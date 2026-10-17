@@ -1473,3 +1473,63 @@
             assert_eq!(metadata.externals.len(), 1);
         }
     }
+
+    /// `UnityGuid.ToString()` rendering, replayed against the reference runtime.
+    ///
+    /// `FileIdentifier.GetFilePath` returns this rendering for an `AssetType.Meta` identifier, so it
+    /// reaches every `.meta` guid line. The rows come from `tools/probes/guid-render`, which
+    /// constructs a `UnityGuid` from the same four words and records `ToString()`, so the
+    /// expectation does not depend on this module. The sign-bit and all-ones rows are the ones that
+    /// would expose a shift or signedness mistake.
+    #[test]
+    fn file_identifier_meta_guid_rendering_matches_the_reference_runtime() {
+        const META: i32 = 3;
+        let fixture = include_str!("unity_guid_render_fixture.txt");
+        let mut rows = 0usize;
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let rest = line.strip_prefix("GUID|").expect("GUID row");
+            let (words_text, expected) = rest.split_once('|').expect("words and text");
+            let mut words = [0u32; 4];
+            for (slot, word) in words.iter_mut().zip(words_text.split(',')) {
+                *slot = u32::from_str_radix(word, 16).expect("word hex");
+            }
+            let identifier = super::FileIdentifier {
+                asset_path: None,
+                guid: Some(words),
+                file_type: Some(META),
+                path_name_origin: String::new(),
+            };
+            assert_eq!(
+                identifier.get_file_path().as_deref(),
+                Some(expected),
+                "words {words_text}"
+            );
+            rows += 1;
+        }
+        assert_eq!(rows, 6, "every recorded row is replayed");
+
+        // A Meta identifier without a GUID is malformed and must not invent one, and a non-Meta
+        // identifier uses the normalized path instead of a GUID.
+        let no_guid = super::FileIdentifier {
+            asset_path: None,
+            guid: None,
+            file_type: Some(META),
+            path_name_origin: "archive:/CAB-1".to_owned(),
+        };
+        assert_eq!(no_guid.get_file_path(), None);
+        let not_meta = super::FileIdentifier {
+            asset_path: None,
+            guid: Some([0x0102_0304, 0, 0, 0]),
+            file_type: Some(0),
+            path_name_origin: "archive:/CAB-1".to_owned(),
+        };
+        assert_eq!(
+            not_meta.get_file_path().as_deref(),
+            Some(not_meta.fixed_path_name().as_str()),
+            "a non-Meta identifier uses the normalized path"
+        );
+    }

@@ -1,5 +1,40 @@
 # Validation log
 
+## 2026-10-16 - GUID rendering pinned on the metadata path, and a CI formatting trap fixed
+
+- Outcome: closed the sweep's own remaining item by widening the `UnityGuid` evidence, and fixed a
+  real defect in the CI formatting check that the work exposed. 1878 library tests.
+- **`UnityGuid.ToString` on the metadata path now has its own runtime fixture.**
+  `FileIdentifier.GetFilePath` returns that rendering for an `AssetType.Meta` identifier, so it
+  reaches every `.meta` guid line, and the port's implementation - "each 32-bit word's nibbles least
+  significant first" - had no fixture of its own; the existing `export/guid_fixture.txt` covers the
+  same convention for the export path. `tools/probes/guid-render` constructs a `UnityGuid` from four
+  words and records `ToString()`, and the six rows are replayed by
+  `file_identifier_meta_guid_rendering_matches_the_reference_runtime`. The edge rows are the point:
+  `0x80000000` renders as `00000008` and `0x7FFFFFFF` as `fffffff7`, so a shift or signedness mistake
+  would show up there rather than on an ordinary word. The test also pins the two negative cases - a
+  Meta identifier with no GUID must not invent one, and a non-Meta identifier uses the normalized
+  path.
+- **The CI formatting check had a real bug, found by trying to add a test.** The check wraps a file
+  in a throwaway module before running rustfmt, because the `*_tests_NN.rs` fragments are spliced in
+  with `include!` and carry the parent module's indentation. But the pattern matched only
+  `src/main_tests_NN.rs`, so the dozen fragments added since are formatted as top-level files, where
+  rustfmt de-indents every line. For those files the check reported every line as changed, so **any**
+  edit failed CI regardless of content. Widened to `src/**/*_tests_NN.rs`; `metadata_tests_01.rs`,
+  `stream_tests_01.rs`, `scene_wiring_tests_01.rs` and `managed_assembly_tests_01.rs` are verified
+  byte-identical to their wrapped rustfmt output, and the remaining fragments still differ only in a
+  few lines that the changed-range comparison tolerates - so nothing gets stricter.
+- **This is why the edit was worth making rather than avoiding.** The path of least resistance was to
+  leave the test out; instead the blocked path was the signal that the check, not the test, was wrong.
+  A CI check that fails every edit to a whole class of files is worse than no check, because the
+  rational response is to stop editing those files.
+- **Method note:** the fragment question was settled by measuring, not by reading. Comparing each
+  fragment against its wrapped rustfmt output took one command and showed four are clean and four are
+  not, which is what makes the widened check safe to land.
+- Evidence: `cargo test --locked --workspace` - **1878** library (up from 1877) + 199 bin tests,
+  0 failed, 1 ignored. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+  Parity: TOTAL=407, 已验证 380, NONVERIFIED=27, DUPES=0, MALFORMED=0, GATE=OPEN.
+
 ## 2026-10-16 - .NET-semantics sweep: the coverage inventory, and why two heuristics failed
 
 - Outcome: completed the first pass of the sweep for "expectations derived from the implementation"
