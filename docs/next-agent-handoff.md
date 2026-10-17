@@ -1,6 +1,39 @@
 # RustAssetRipper hand-off — 2026-10-16
 
-## Latest current checkpoint - 2026-10-16 (collection membership rules ported)
+## Latest current checkpoint - 2026-10-16 (`isScene` is dead in the baseline)
+
+- **`GlbLevelBuilder.Build`'s `isScene` flag is never true in the frozen source.** Recorded as
+  `DIFF-GLB-ISSCENE-DEAD-001`. The proof is exhaustive: `Build` has one caller
+  (`GlbModelExporter.ExportModel`), `ExportModel` has one caller (the **multi-asset**
+  `IContentExtractor.Export` overload), and that hard-codes `false`. Neither
+  `GlbSceneModelExportCollection` nor `GlbPrefabModelExportCollection` overrides `ExportInner`, so
+  a scene hierarchy gets `false` too. **The class name `GlbSceneModelExportCollection` is what
+  misleads** - it is not the place that would set the flag.
+- Consequence: in the shipped product a scene GLB and a prefab GLB come from the same call with the
+  same flag, and **no root node ever carries a local transform**.
+- **Do not hard-code `false` in the port.** `is_scene` stays a parameter because the
+  reference-verified `Build` semantics must remain testable on both arms, and
+  `level_plan_matches_the_reference_runtime_rows` does so against reference-runtime fixtures. The
+  honest statement is in the doc comment: production callers pass `false`.
+- **This is the fourth time reading the source corrected a gap I had recorded** (after
+  `EXP-GLB-001` twice and `RES-MODEL-001`). Same shape every time: an *implemented but unreachable*
+  branch read as a missing feature. The settling check is small - list every call site of the entry
+  point and read the arguments.
+- **Ledger hygiene:** a literal `||` inside a table cell splits the row and makes the parity report
+  raise `MALFORMED`. Use `A OR B` in prose. **Run `tools/parity-report.ps1` after every ledger edit**
+  and check `MALFORMED` is empty.
+- **Next steps, in order:** wire the primary-content export path to the web surface
+  (`/Export/PrimaryContent`, still 501) now that dispatch/assembly/loop/membership are all ported;
+  then `RES-TEXTURE-001` (`实现中`) and `PROC-ANIM-*`.
+- **Never format `src/resources/glb_tests_01.rs`** (nor `main_tests_01.rs`/`main_tests_03.rs`).
+- **A GLB is binary: decode the JSON chunk before asserting on text** (12-byte header, then the
+  chunk header).
+- Parity ledger: 407 rows, 381 verified, 26 non-verified, DUPES=0, MALFORMED=0, gate OPEN.
+- `/Scenes/View` and `/Export/PrimaryContent` both still return 501.
+- Corpus replays are local-only and have not run in these rounds.
+- Verified: **1872** library + 199 bin tests, 0 failed; warnings-denied Clippy exit 0.
+
+## Previous checkpoint - 2026-10-16 (collection membership rules ported)
 
 - **Ported the membership half of `SingleExportCollection`/`MultipleExportCollection`**:
   `PrimaryContentCollection::contains` and `add_asset`.

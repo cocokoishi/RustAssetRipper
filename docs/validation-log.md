@@ -1,5 +1,39 @@
 # Validation log
 
+## 2026-10-16 - `isScene` is dead in the frozen baseline; the scene GLB is a documentation fix, not a wiring gap
+
+- Outcome: traced the whole `GlbModelExporter` chain and found that **`isScene: true` is never
+  passed by any code path in the frozen source**. Recorded as `DIFF-GLB-ISSCENE-DEAD-001`; the
+  ledger row and the `SceneGlbExportInput::is_scene` doc comment now say so. No behaviour change.
+- **The proof is exhaustive, not a sample.** `GlbLevelBuilder.Build` has exactly one caller
+  (`GlbModelExporter.ExportModel`); `ExportModel` has exactly one caller (the **multi-asset**
+  `IContentExtractor.Export` overload), and it hard-codes `false`. The two collection classes -
+  `GlbSceneModelExportCollection` and `GlbPrefabModelExportCollection` - override only
+  `ExportExtension`, so both inherit `MultipleExportCollection.ExportInner`, which routes through
+  that same multi-asset overload and also gets `false`.
+- **The naming is what misleads.** `GlbSceneModelExportCollection` reads like the class that would
+  pass `isScene: true`, and I had been treating "the scene GLB's remaining gap" as if the scene arm
+  of `Build` were live. It is not. A scene hierarchy and a prefab hierarchy produce their GLBs by
+  the same call with the same flag, so the only observable consequence of the flag is that **no
+  root node ever carries a local transform** in the shipped product.
+- **This is the fourth time reading the source has corrected an assumption I had recorded as a
+  gap** (after `EXP-GLB-001` twice and `RES-MODEL-001`). The recurring mistake is the same one:
+  treating an *implemented but unreachable* branch as a missing feature. The check that settles it
+  is small - list every call site of the entry point and read the arguments.
+- The port keeps `is_scene` as an explicit parameter on purpose: the reference-verified `Build`
+  semantics must remain testable on both arms, and `level_plan_matches_the_reference_runtime_rows`
+  does exactly that against reference-runtime fixture rows. The parameter is documented as
+  "production must pass `false`", which is the honest statement - a hard-coded `false` would delete
+  the fixture-backed coverage of the other arm.
+- **A ledger-hygiene catch:** my first edit put the literal string `||` inside a table cell, which
+  split the row into 13 cells and made the parity report raise `MALFORMED=1` for
+  `EXP-GLB-SCENE-001`. Rewritten as `` `parentNode is not null` OR `IsScene` ``; the checker then
+  reported `MALFORMED=0` again. The report catches this reliably - run it after every ledger edit.
+- Evidence: `cargo test --locked --workspace` unchanged at 1872 library + 199 bin tests, 0 failed,
+  1 ignored. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+  `rustfmt --edition 2021 --check` on the changed file - clean. Parity: TOTAL=407,
+  NONVERIFIED=26, DUPES=0, MALFORMED=0, GATE=OPEN.
+
 ## 2026-10-16 - Collection membership rules, and a second asymmetry checked rather than "fixed"
 
 - Outcome: ported the membership half of `SingleExportCollection` / `MultipleExportCollection`:

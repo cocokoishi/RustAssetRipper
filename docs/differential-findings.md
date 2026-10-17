@@ -1,5 +1,32 @@
 # Source behavior and differential findings
 
+## DIFF-GLB-ISSCENE-DEAD-001 - `isScene` is never true in the frozen baseline (documentation, no code change)
+
+`GlbLevelBuilder.Build(assets, isScene)` takes a flag whose only effect is whether a **root** node
+writes its local transform: `GlbLevelBuilder` computes the local transform when
+`parentNode is not null || parameters.IsScene`. That flag is dead in the shipped product, and the
+proof is exhaustive rather than a sample:
+
+- `GlbLevelBuilder.Build` has exactly one caller: `GlbModelExporter.ExportModel`.
+- `ExportModel` has exactly one caller: `GlbModelExporter.Export(IEnumerable<…>)`, the **multi-asset**
+  `IContentExtractor` overload, and it hard-codes `ExportModel(assets, path, false, fileSystem)`.
+- Neither `GlbSceneModelExportCollection` nor `GlbPrefabModelExportCollection` overrides
+  `ExportInner`; both only override `ExportExtension => "glb"`. So they inherit
+  `MultipleExportCollection.ExportInner`, which calls `ContentExtractor.Export(Assets, …)` - the same
+  multi-asset overload - and therefore also gets `false`.
+
+The naming is what misleads: `GlbSceneModelExportCollection` sounds like the class that would pass
+`isScene: true`, but it does not, and no code path anywhere does. So in the shipped product a scene
+hierarchy and a prefab hierarchy produce GLBs by exactly the same call with the same flag value, and
+**no root node ever carries a local transform**.
+
+The port keeps `is_scene` as an explicit parameter of `build_level_plan` / `build_scene_plan` and of
+`SceneGlbExportInput`, because the reference-verified `Build` semantics must stay testable on both
+arms - `level_plan_matches_the_reference_runtime_rows` is fixture-backed against reference-runtime
+rows for the scene and asset runs. Keeping the parameter is not a claim that production sets it:
+`SceneGlbExportInput::is_scene` now documents that a production caller must pass `false`, and
+`EXP-GLB-SCENE-001` records the same. Status: documentation corrected; no behaviour change.
+
 ## DIFF-PRIMARY-CONTENT-CLASSNAME-001 - the primary-content class-name fallback skips file-name sanitization (fix implemented, unit-tested)
 
 `ExportCollectionBase.GetUniqueFileName` sanitizes the name it derives from the asset, but only on one of its two branches. The source reads:

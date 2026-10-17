@@ -236,6 +236,17 @@ pub struct SceneGlbExportInput<'a> {
     /// The collection to walk.
     pub collection: &'a MaterializedSceneCollection,
     /// `BuildParameters.IsScene`.
+    ///
+    /// **A production caller must pass `false` to match the frozen baseline.** In the source this
+    /// value is dead: `GlbLevelBuilder.Build(assets, isScene)` has exactly one caller,
+    /// `GlbModelExporter.ExportModel`, which has exactly one caller - the `GlbModelExporter`
+    /// multi-asset `Export` - and that hard-codes `isScene: false`. Neither
+    /// `GlbSceneModelExportCollection` nor `GlbPrefabModelExportCollection` overrides
+    /// `ExportInner`, so a scene hierarchy reaches the same path and also gets `false`. The flag
+    /// has one effect: whether a **root** node writes its local transform
+    /// (`parentNode is not null || IsScene`). Keeping it as a parameter rather than hard-coding
+    /// `false` preserves the reference-verified `Build` semantics on both arms, which the
+    /// fixture-backed tests exercise; it does not mean the shipped product ever sets it.
     pub is_scene: bool,
     /// Per-node decoded geometry, indexed by node position in the plan.
     ///
