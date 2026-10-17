@@ -81,6 +81,21 @@ pub struct GlbLevelMesh {
     pub subset_indices: Option<Vec<u32>>,
     /// The Renderer's `StaticBatchInfo` as `(firstSubMesh, subMeshCount)`.
     pub static_batch_info: Option<(u32, u32)>,
+    /// Which mesh object this geometry came from.
+    ///
+    /// The walk records the facts about a mesh, not the mesh itself, so without this a caller that
+    /// wants to supply the decoded geometry cannot say which node wants which mesh. The reference
+    /// holds the `IMesh` objects directly and never needs the identity; a caller-side walk does.
+    pub source: Option<GlbSourceMesh>,
+}
+
+/// The mesh object a node's geometry came from.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GlbSourceMesh {
+    /// The reference's file table index; `0` is this file.
+    pub file_id: i32,
+    /// The mesh object's PathID.
+    pub path_id: i64,
 }
 
 /// One emitted node in the plan.
@@ -119,6 +134,8 @@ pub struct GlbLevelAttachedMesh {
     pub is_16_bit_indices: bool,
     /// The mesh's vertex type.
     pub mesh_type: Option<GlbMeshType>,
+    /// Which mesh object this geometry came from, for a caller supplying the decoded geometry.
+    pub source: Option<GlbSourceMesh>,
     /// The accumulated `globalInverseTransform` the static path passes as its first argument.
     pub global_inverse_transform: GlbLevelAccumulatedTransform,
     /// The accumulated `globalTransform` the static path passes as its second argument.
@@ -271,6 +288,7 @@ fn attached_mesh(transform: &GlbLevelTransform) -> Option<GlbLevelAttachedMesh> 
         subset_indices: subset,
         is_16_bit_indices: mesh.is_16_bit_indices,
         mesh_type: mesh.mesh_type,
+        source: mesh.source,
         global_inverse_transform: GlbLevelAccumulatedTransform::IDENTITY,
         global_transform: GlbLevelAccumulatedTransform::IDENTITY,
     })
@@ -979,6 +997,7 @@ mod tests {
             subset_indices_count: subset.as_ref().map_or(0, Vec::len),
             subset_indices: subset,
             static_batch_info: static_batch,
+            source: None,
         }
     }
 

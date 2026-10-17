@@ -1,5 +1,36 @@
 # Validation log
 
+## 2026-10-16 - The scene GLB can attach geometry now, and the plan says which mesh
+
+- Outcome: `SceneGlbExportInput::attached_meshes` carries the geometry the caller resolved, indexed by
+  Transform position, and the plan records the source mesh's identity. 1933 library tests (up from
+  1932).
+- **The design choice is where the facts come from.** The materialized collection records each
+  GameObject's component slots and class ids but **not the fields of those components**, so the
+  MeshFilter's `m_Mesh` and the Renderer's batching fields are not there to read. Rather than teach the
+  scene-definition pass about meshes - which would put export concerns inside the processing layer -
+  the caller resolves them and hands them in. The processing layer stays as it was.
+- **The identity is the part that makes it usable.** A plan node recorded the *facts* about a mesh
+  (sub-mesh count, index width, vertex type) and no way to say **which** mesh, so even a caller that
+  found the geometry could not match it to a node. `GlbSourceMesh { file_id, path_id }` now travels
+  from `GlbLevelMesh` to `GlbLevelAttachedMesh`, which is what the reference never needs because it
+  holds the `IMesh` objects directly.
+- **The refusal stays and is now conditional.** A collection with a `MeshFilter` and no supplied
+  geometry is still refused; supplying geometry removes the refusal, which the new test asserts from
+  both sides - the same collection that errored before now exports with `mesh_count == 1` and a node
+  named for the GameObject.
+- **What is still missing, stated plainly.** The caller's half: reading the MeshFilter's `m_Mesh`, the
+  Mesh's facts and the Renderer's fields, then building `MeshData` per node. Until that exists, no
+  production caller supplies `attached_meshes`, so `EXP-GLB-SCENE-001` and `RES-MODEL-001` stay open.
+- Evidence: `cargo test --locked --workspace` - **1933** library + 206 CLI tests, 0 failed, 1 ignored.
+  `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+- **A formatting trap caught before committing, twice over.** Running `rustfmt` on
+  `src/resources/glb_tests_01.rs` rewrote the whole file: the numbered test fragments are deliberately
+  exempt from rustfmt, and formatting one turns a two-line edit into a 1,180-line rewrite. I caught it
+  in the staged numstat, restored the file from HEAD, and re-applied only the two `source: None,` lines.
+  **Reading `git diff --cached --numstat` before committing is what caught it** - a diff that is far
+  larger than the edit is the tell, and it is the same tell as last round's crate-root reformat.
+
 ## 2026-10-16 - The configuration-files feature, and the end of the pending routes
 
 - Outcome: ported the data-set subsystem, added the configuration-files page and its five form

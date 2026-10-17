@@ -169,6 +169,7 @@
             subset_indices_count: 0,
             subset_indices: Some(Vec::new()),
             static_batch_info: None,
+            source: None,
         };
         // A static renderer that selects sub-mesh 0 explicitly.
         let static_mesh = GlbLevelMesh {
@@ -244,6 +245,7 @@
                     subset_indices_count: 1,
                     subset_indices: Some(vec![7]),
                     static_batch_info: None,
+                    source: None,
                 }),
             }],
             true,

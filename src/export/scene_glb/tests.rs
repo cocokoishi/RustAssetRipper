@@ -165,7 +165,7 @@ fn json_chunk(bytes: &[u8]) -> String {
 #[test]
 fn the_view_resolves_names_edges_and_local_transforms() {
     let collection = hierarchy();
-    let view = MaterializedSceneGraphView::new(&collection);
+    let view = MaterializedSceneGraphView::new(&collection, &[]);
 
     assert_eq!(view.len(), 4);
     // Transform order matches the collection, and each names its GameObject.
@@ -198,7 +198,7 @@ fn the_view_resolves_names_edges_and_local_transforms() {
 fn a_transform_without_values_reads_back_as_the_identity() {
     let mut collection = hierarchy();
     collection.transforms[0].values = None;
-    let view = MaterializedSceneGraphView::new(&collection);
+    let view = MaterializedSceneGraphView::new(&collection, &[]);
     // A Transform with no resolved values still reads back, as the source's identity
     // `Transformation` does, so the node is emitted with an identity local transform.
     let local = view.local(0).expect("a missing component still reads back");
@@ -211,7 +211,7 @@ fn a_transform_without_values_reads_back_as_the_identity() {
 fn a_transform_without_a_game_object_reports_no_name_and_no_game_object() {
     let mut collection = hierarchy();
     collection.transforms[1].game_object = None;
-    let view = MaterializedSceneGraphView::new(&collection);
+    let view = MaterializedSceneGraphView::new(&collection, &[]);
     assert_eq!(view.name(1), None);
     assert!(!view.has_game_object(1));
 
@@ -234,7 +234,7 @@ fn a_self_edge_is_not_a_hierarchy_edge() {
     let mut collection = hierarchy();
     // A Transform that names itself as its father must not become its own parent.
     collection.transforms[0].father = Some(to_local(10));
-    let view = MaterializedSceneGraphView::new(&collection);
+    let view = MaterializedSceneGraphView::new(&collection, &[]);
     assert_eq!(view.father(0), None, "a self-edge is dropped");
     let plan = build_scene_plan_with_limits(&view, true, GlbLevelLimits::default())
         .expect("the walk completes");
@@ -247,6 +247,7 @@ fn the_export_emits_a_glb_whose_document_matches_the_hierarchy() {
     let meshes: Vec<Option<crate::resources::mesh_data::MeshData>> = vec![None; 4];
     let export = export_scene_glb(SceneGlbExportInput {
         collection: &collection,
+        attached_meshes: &[],
         is_scene: true,
         meshes: &meshes,
         level_limits: GlbLevelLimits::default(),
@@ -295,6 +296,7 @@ fn an_asset_export_leaves_roots_untransformed() {
     let meshes: Vec<Option<crate::resources::mesh_data::MeshData>> = vec![None; 4];
     let export = export_scene_glb(SceneGlbExportInput {
         collection: &collection,
+        attached_meshes: &[],
         is_scene: false,
         meshes: &meshes,
         level_limits: GlbLevelLimits::default(),
@@ -322,6 +324,7 @@ fn an_empty_hierarchy_reports_no_nodes_rather_than_writing_an_empty_file() {
     };
     let error = export_scene_glb(SceneGlbExportInput {
         collection: &collection,
+        attached_meshes: &[],
         is_scene: true,
         meshes: &[],
         level_limits: GlbLevelLimits::default(),
@@ -362,6 +365,7 @@ fn a_collection_with_mesh_filters_and_no_resolved_mesh_is_refused() {
 
     let error = export_scene_glb(SceneGlbExportInput {
         collection: &collection,
+        attached_meshes: &[],
         is_scene: true,
         meshes: &[],
         level_limits: GlbLevelLimits::default(),
@@ -380,6 +384,7 @@ fn a_collection_with_mesh_filters_and_no_resolved_mesh_is_refused() {
     let without_geometry = hierarchy();
     export_scene_glb(SceneGlbExportInput {
         collection: &without_geometry,
+        attached_meshes: &[],
         is_scene: true,
         meshes: &[],
         level_limits: GlbLevelLimits::default(),
@@ -388,12 +393,80 @@ fn a_collection_with_mesh_filters_and_no_resolved_mesh_is_refused() {
     .expect("a scene with no MeshFilter has no geometry to lose");
 }
 
+/// Caller-supplied geometry turns the refusal into an export that carries a mesh node.
+///
+/// This is the half the port was missing: the view could report no mesh for any Transform, so a real
+/// scene exported a node graph with no geometry. The caller now resolves each Transform's geometry
+/// from the MeshFilter and Renderer fields and supplies it, and the node records the mesh object it
+/// came from so the caller can supply the decoded `MeshData` for that node.
+#[test]
+fn supplied_geometry_is_attached_to_the_plan() {
+    use crate::export::scene_wiring::MaterializedComponentSlot;
+    use crate::export::scene_wiring::MaterializedComponentTarget;
+    use crate::processing::scene::SceneRelationshipTarget;
+    use crate::resources::glb_level::{
+        GlbLevelAccumulatedTransform, GlbLevelAttachedMesh, GlbSourceMesh,
+    };
+
+    let mut collection = hierarchy();
+    let mut with_filter = game_object(50, "WithGeometry");
+    with_filter.components.push(MaterializedComponentSlot {
+        source_array_index: 0,
+        class_id: Some(33),
+        target: MaterializedComponentTarget::Source {
+            relationship_index: 0,
+            file_id: 0,
+            path_id: 51,
+            target: SceneRelationshipTarget::LocalObject { object_index: 51 },
+        },
+    });
+    collection.game_objects.push(with_filter);
+    collection.transforms.push(transform(51, 50, None, None));
+
+    let mesh = GlbLevelAttachedMesh {
+        dynamic: false,
+        subset_indices: vec![0],
+        is_16_bit_indices: true,
+        mesh_type: None,
+        source: Some(GlbSourceMesh {
+            file_id: 0,
+            path_id: 7,
+        }),
+        global_inverse_transform: GlbLevelAccumulatedTransform::IDENTITY,
+        global_transform: GlbLevelAccumulatedTransform::IDENTITY,
+    };
+    let mut attached: Vec<Option<GlbLevelAttachedMesh>> = vec![None; collection.transforms.len()];
+    let position = collection.transforms.len() - 1;
+    attached[position] = Some(mesh);
+    let meshes: Vec<Option<crate::resources::mesh_data::MeshData>> =
+        vec![None; collection.transforms.len()];
+
+    let export = export_scene_glb(SceneGlbExportInput {
+        collection: &collection,
+        is_scene: true,
+        attached_meshes: &attached,
+        meshes: &meshes,
+        level_limits: GlbLevelLimits::default(),
+        glb_limits: GlbBuildLimits::default(),
+    })
+    .expect("supplying the geometry removes the refusal");
+    assert_eq!(export.mesh_count, 1);
+
+    let json = json_chunk(&export.bytes);
+    assert!(json.contains("WithGeometry"), "{json}");
+    assert!(
+        json.contains("\"mesh\":"),
+        "the node carries a mesh reference: {json}"
+    );
+}
+
 #[test]
 fn the_node_limit_reaches_the_export() {
     let collection = hierarchy();
     let meshes: Vec<Option<crate::resources::mesh_data::MeshData>> = vec![None; 4];
     let error = export_scene_glb(SceneGlbExportInput {
         collection: &collection,
+        attached_meshes: &[],
         is_scene: true,
         meshes: &meshes,
         level_limits: GlbLevelLimits { max_nodes: 2 },

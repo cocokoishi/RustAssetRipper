@@ -17,11 +17,16 @@ and class ids but not the MeshFilter's **mesh reference**, so the mesh identity 
 source identity, so even a caller that found the mesh could not say which node wanted it. Both have to
 be added before the walk can attach geometry.
 
-**The port now refuses instead of writing the geometry-less file.** `export_scene_glb` returns
-`SceneGlbExportError::GeometryNotResolved { mesh_filter_count }` when the plan has no mesh node and
-the collection has any GameObject with a class-33 `MeshFilter` - a GameObject with no MeshFilter has no
-geometry to lose, and still exports. That converts a silently wrong success into a reported failure,
-which is what the acceptance rules require while the gap is open.
+**The port refused the geometry-less file, and now attaches caller-supplied geometry.** `export_scene_glb`
+returns `SceneGlbExportError::GeometryNotResolved { mesh_filter_count }` when the plan has no mesh node
+and the collection has any GameObject with a class-33 `MeshFilter` - a GameObject with no MeshFilter has
+no geometry to lose, and still exports. That converted a silently wrong success into a reported failure
+while the gap was open. `SceneGlbExportInput::attached_meshes` now carries the geometry the caller
+resolved, indexed by Transform position, and the plan records which mesh object each node's geometry
+came from (`GlbSourceMesh` on `GlbLevelMesh` and `GlbLevelAttachedMesh`) so a caller can fetch the
+decoded `MeshData` for that node. **What remains is the caller's half:** reading the MeshFilter's
+`m_Mesh`, the Mesh's sub-mesh count and index width, and the Renderer's batching fields, then building
+`MeshData` per node.
 
 **Independent evidence.** `scene_glb.rs`'s trait impl for `MaterializedSceneGraphView` returns `None`
 from `mesh` unconditionally; the same file's tests construct `GlbLevelMesh` values by hand and never

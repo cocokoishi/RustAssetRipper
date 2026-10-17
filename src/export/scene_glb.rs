@@ -107,11 +107,21 @@ pub struct MaterializedSceneGraphView<'a> {
     fathers: Vec<Option<usize>>,
     /// For each Transform, the indexes of its children in source order.
     children: Vec<Vec<usize>>,
+    /// The geometry the caller resolved for each Transform, indexed by Transform position.
+    ///
+    /// The materialized collection records each GameObject's component slots but not the fields of
+    /// those components, so the MeshFilter's mesh reference and the Renderer's batching fields are
+    /// read by the caller and handed in here. An empty slice means the caller resolved nothing, which
+    /// `export_scene_glb` refuses for a collection that has MeshFilters.
+    attached_meshes: &'a [Option<GlbLevelAttachedMesh>],
 }
 
 impl<'a> MaterializedSceneGraphView<'a> {
-    /// Index a materialized collection by Transform position.
-    pub fn new(collection: &'a MaterializedSceneCollection) -> Self {
+    /// Index a materialized collection by Transform position, with caller-resolved geometry.
+    pub fn new(
+        collection: &'a MaterializedSceneCollection,
+        attached_meshes: &'a [Option<GlbLevelAttachedMesh>],
+    ) -> Self {
         // A relationship resolves to a local object index; the Transform that owns that object is
         // the edge target.
         let target_index = |relationship: &crate::processing::scene::SceneRelationship| {
@@ -145,6 +155,7 @@ impl<'a> MaterializedSceneGraphView<'a> {
             collection,
             fathers,
             children,
+            attached_meshes,
         }
     }
 
@@ -247,11 +258,11 @@ impl SceneCollectionGraph for MaterializedSceneGraphView<'_> {
         })
     }
 
-    fn mesh(&self, _index: usize) -> Option<GlbLevelAttachedMesh> {
-        // Geometry selection depends on the Renderer's fields, which the caller resolves; see the
-        // module note. A plan from this view therefore has no mesh selections, and the caller
-        // supplies geometry through `SceneGlbExportInput::meshes` instead.
-        None
+    fn mesh(&self, index: usize) -> Option<GlbLevelAttachedMesh> {
+        // Geometry selection depends on the MeshFilter's and Renderer's fields, which the
+        // materialized collection does not carry, so the caller resolves them per Transform and
+        // supplies them here.
+        self.attached_meshes.get(index).cloned().flatten()
     }
 
     fn has_game_object(&self, index: usize) -> bool {
@@ -291,6 +302,11 @@ pub struct SceneGlbExportInput<'a> {
     /// The reference builds these on demand and caches them; the caller does the same, because
     /// `MeshData` construction needs the mesh pipeline rather than the scene graph.
     pub meshes: &'a [Option<crate::resources::mesh_data::MeshData>],
+    /// The geometry the caller resolved, indexed by Transform position.
+    ///
+    /// Empty means nothing was resolved; a collection whose GameObjects carry a `MeshFilter` is then
+    /// refused rather than exported with no geometry.
+    pub attached_meshes: &'a [Option<GlbLevelAttachedMesh>],
     /// Bounds for the walk.
     pub level_limits: GlbLevelLimits,
     /// Bounds for the GLB container.
@@ -305,14 +321,15 @@ pub struct SceneGlbExportInput<'a> {
 pub fn export_scene_glb(
     input: SceneGlbExportInput<'_>,
 ) -> Result<SceneGlbExport, SceneGlbExportError> {
-    let view = MaterializedSceneGraphView::new(input.collection);
+    let view = MaterializedSceneGraphView::new(input.collection, input.attached_meshes);
     let plan = build_scene_plan_with_limits(&view, input.is_scene, input.level_limits)?;
     if plan.nodes.is_empty() {
         return Err(SceneGlbExportError::NoNodes);
     }
     // A plan with no mesh nodes for a collection that has MeshFilters is a geometry-less export,
-    // not a scene with nothing in it: the view does not resolve mesh references yet, so this is the
-    // shape the gap takes. Refusing keeps it from being written as a successful scene.
+    // not a scene with nothing in it. The caller resolves each Transform's geometry and supplies it
+    // through `attached_meshes`; supplying none is the state the gap takes, and refusing keeps it
+    // from being written as a successful scene.
     if plan.nodes.iter().all(|node| node.mesh.is_none()) {
         let mesh_filter_count = view.mesh_filter_count();
         if mesh_filter_count > 0 {
