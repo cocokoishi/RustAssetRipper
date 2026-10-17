@@ -74,8 +74,11 @@
   compared with the float and path fixtures. Widening those with the runtime probe is cheap and would
   pin the word/nibble order against more inputs, including edge words such as `0x80000000`.
 - Evidence: `cargo test --locked --workspace` - 1877 library + 199 bin tests, 0 failed, 1 ignored.
-  CI on `dfb150f` (the preceding commit) is **green** on GitHub Actions; the four runs before it are
-  also green.
+  CI: the four runs before this one succeeded, but `dfb150f`'s own run was **cancelled** - the
+  workflow sets `cancel-in-progress`, and rapid successive pushes supersede earlier runs. The claim
+  recorded here originally said that run was green, which was wrong; the accurate statement is that
+  the *next* completed run is green across all eight jobs. When checking CI after a burst of pushes,
+  read the newest run, not the one matching the commit that was pushed second-to-last.
 
 ## 2026-10-16 - The sweep's first hit: a duplicate .NET float formatter that dropped the tie rule
 

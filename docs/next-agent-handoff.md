@@ -33,7 +33,8 @@
 - **CI formatting check fixed:** `tools/check_changed_rust_format.py` now wraps every `src/**/*_tests_NN.rs` fragment, not just `main_tests_NN.rs`. Before this, **any edit to one of the other 13 fragments failed CI**; four of them are verified byte-identical to their wrapped rustfmt output.
 - **GUID rendering on the metadata path has its own runtime fixture** (`unity_guid_render_fixture.txt` + `tools/probes/guid-render`), with edge rows for the sign bit. The sweep is complete; its inventory is in `validation-log.md`.
 - Parity ledger: 407 rows, 380 verified, 27 non-verified, DUPES=0, MALFORMED=0, gate OPEN.
-- Verified: **1878** library + 199 bin tests, 0 failed; warnings-denied Clippy exit 0. CI green on GitHub Actions.
+- Verified: **1878** library + 199 bin tests, 0 failed; warnings-denied Clippy exit 0.
+- **CI on `2fced0e` is green across all eight jobs** (hygiene, ledger audit, changed-line rustfmt, clippy on both OSes, tests + release build on both OSes, release-mode tests). **Note the workflow runs with `cancel-in-progress`:** a burst of pushes cancels earlier runs, so after several pushes check the *newest* run rather than the one bearing the commit you pushed second-to-last. Reading a cancelled run as green was a mistake made once already.
 
 ## Previous checkpoint - 2026-10-16 (JSON surface renders the reference's indented text)
 
