@@ -628,12 +628,257 @@ fn tree_link(html: &mut Html, href: &str, name: &str) {
     html.close("a");
 }
 
-/// The collection page: the collection name, its bundle, its scene link, and the asset table.
+/// The frozen `ViewPage.assetsPerPage` values, in source order.
+const ASSETS_PER_PAGE: [u32; 5] = [500, 1000, 2000, 3000, 5000];
+
+/// The `distinct().order(ordinal)` class list the class filter offers: one entry per distinct
+/// class name, sorted by code unit.
+///
+/// `StringComparer.Ordinal` compares UTF-16 code units and the element class names are ASCII,
+/// so Rust's byte-ordered `sort` yields the same sequence.
+fn ordered_classes<'a>(names: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut classes: Vec<String> = names.map(str::to_owned).collect();
+    classes.sort();
+    classes.dedup();
+    classes
+}
+
+/// The frozen class filter: a `Localization.Class` label over a `classFilter` select whose
+/// empty option is `Localization.All`, followed by one option per distinct class name.
+///
+/// `ViewPage` and `Search.ViewPage` both render it only when the page holds more than one
+/// distinct class, and both table rows carry `data-class` for the page script to filter on.
+fn write_class_filter(html: &mut Html, state: &WebState, classes: &[String]) {
+    html.element(
+        "label",
+        &[("for", "classFilter"), ("class", "me-2")],
+        &t(state, "class"),
+    );
+    html.open("select", &[("id", "classFilter"), ("class", "me-2")]);
+    html.element("option", &[("value", "")], &t(state, "all"));
+    for class in classes {
+        html.element("option", &[("value", class.as_str())], class);
+    }
+    html.close("select");
+}
+
+/// The frozen `ViewPage.CreatePageOption` block: the `Localization.Page` label, the
+/// previous/next buttons around the `pageNumber` label, and the `assetsPerPage` select
+/// (`Localization.All` plus the five page sizes).
+///
+/// The buttons start `disabled` and the page script enables them as the paging state changes.
+/// The frozen buttons also carry a `v-else` directive; the port runs no Vue, so the directive
+/// is dropped and the real `disabled` attribute it never reads is kept.
+fn write_page_control(html: &mut Html, state: &WebState) {
+    html.element(
+        "label",
+        &[("for", "pageCollection"), ("class", "me-2")],
+        &t(state, "page"),
+    );
+    html.element(
+        "button",
+        &[
+            ("id", "previousButton"),
+            ("class", "ms-2"),
+            ("type", "button"),
+            ("disabled", ""),
+        ],
+        &t(state, "previous"),
+    );
+    html.element("label", &[("id", "pageNumber"), ("class", "ms-2")], "1");
+    html.element(
+        "button",
+        &[
+            ("id", "nextButton"),
+            ("type", "button"),
+            ("class", "ms-2"),
+            ("disabled", ""),
+        ],
+        &t(state, "next"),
+    );
+    html.element("label", &[("class", "ms-2")], &t(state, "assets_per_page"));
+    html.open("select", &[("id", "assetsPerPage"), ("class", "ms-2")]);
+    html.element("option", &[("value", "")], &t(state, "all"));
+    for count in ASSETS_PER_PAGE {
+        let text = count.to_string();
+        html.element("option", &[("value", text.as_str())], &text);
+    }
+    html.close("select");
+}
+
+/// The collection page's client script, transcribed from `ViewPage.WriteScriptReferences`.
+///
+/// It filters `#assetsTable` rows by `data-class` and pages them with the `assetsPerPage`
+/// value, keeping the page number, the previous/next disabled state and the two selects in
+/// step. The baseline registers it on every response after its framework bundles; the port
+/// emits it with the table it drives, the only state where it has any effect.
+const ASSETS_TABLE_SCRIPT: &str = r##"document.addEventListener('DOMContentLoaded', function() {
+	const classFilter = document.getElementById('classFilter');
+	if (classFilter) {
+		classFilter.addEventListener('change', function() {
+			const selectedClass = this.value;
+			const rows = document.querySelectorAll('#assetsTable tr');
+
+			rows.forEach(function(row) {
+				const rowClass = row.getAttribute('data-class');
+				if (selectedClass === '' || rowClass === selectedClass) {
+					row.style.display = '';
+				} else {
+					row.style.display = 'none';
+				}
+			});
+
+			if (pageFilter) {
+				var event = new Event('change');
+				pageFilter.dispatchEvent(event);
+			}
+		});
+	}
+
+	const pageFilter = document.getElementById('assetsPerPage');
+	const previousButton = document.getElementById('previousButton');
+	const nextButton = document.getElementById('nextButton');
+	if (pageFilter) {
+		pageFilter.addEventListener('change', function() {
+			var selectedClass = "";
+			var query = '#assetsTable tr';
+			if (classFilter && classFilter.value != '') {
+				selectedClass = classFilter.value;
+				query += '[data-class="' + selectedClass + '"]';
+			}
+
+			var pageNumber = parseInt(document.getElementById('pageNumber').innerHTML);
+			const rows = document.querySelectorAll(query);
+
+			const selected = this.value;
+			if (selected == '') {
+				for (var i = 0; i < rows.length; ++i) {
+					rows[i].style.display = '';
+				}
+
+				if (previousButton) {
+					previousButton.disabled = true;
+				}
+
+				if (nextButton) {
+					nextButton.disabled = true;
+				}
+
+				document.getElementById('pageNumber').innerHTML = '1';
+			} else {
+				const selectedCount = parseInt(this.value);
+
+				if (rows.length < selectedCount * pageNumber) {
+					pageNumber = Math.ceil(rows.length / selectedCount);
+					document.getElementById('pageNumber').innerHTML = '' + pageNumber;
+
+					if (nextButton) {
+						nextButton.disabled = true;
+					}
+
+					if (pageNumber == 1) {
+						if (previousButton) {
+							previousButton.disabled = true;
+						}
+					}
+				} else if (rows.length >= selectedCount * pageNumber) {
+					if (nextButton) {
+						nextButton.disabled = false;
+					}
+				}
+
+				const start = selectedCount * (pageNumber - 1);
+				for (var i = 0; i < rows.length; ++i) {
+					if (i >= start && i < selectedCount * pageNumber) {
+						rows[i].style.display = '';
+					} else {
+						rows[i].style.display = 'none';
+					}
+				}
+			}
+		});
+	}
+
+	if (previousButton) {
+		previousButton.addEventListener('click', function() {
+			var pageNumber = parseInt(document.getElementById('pageNumber').innerHTML);
+			--pageNumber;
+			document.getElementById('pageNumber').innerHTML = "" + pageNumber;
+
+			if (pageNumber == 1) {
+				this.disabled = true;
+			}
+
+			if (nextButton) {
+				nextButton.disabled = false;
+			}
+
+			if (pageFilter) {
+				var event = new Event('change');
+				pageFilter.dispatchEvent(event);
+			}
+		});
+	}
+
+	if (nextButton) {
+		nextButton.addEventListener('click', function() {
+			var pageNumber = parseInt(document.getElementById('pageNumber').innerHTML);
+			++pageNumber;
+			document.getElementById('pageNumber').innerHTML = "" + pageNumber;
+
+			if (previousButton) {
+				previousButton.disabled = false;
+			}
+
+			if (pageFilter) {
+				var query = '#assetsTable tr';
+				if (classFilter && classFilter.value != '') {
+					selectedClass = classFilter.value;
+					query += '[data-class="' + selectedClass + '"]';
+				}
+				const rows = document.querySelectorAll(query);
+				const selectedCount = parseInt(pageFilter.value);
+				if (rows.length < selectedCount * pageNumber) {
+					this.disabled = true;
+				}
+
+				var event = new Event('change');
+				pageFilter.dispatchEvent(event);
+			}
+		});
+	}
+});"##;
+
+/// The search page's client script, transcribed from `Search.ViewPage.WriteScriptReferences`.
+///
+/// The search page has no page control, so its script only filters `#resultsTable` by
+/// `data-class`. Emitted with the results table for the same reason as the collection script.
+const RESULTS_TABLE_SCRIPT: &str = r##"document.addEventListener('DOMContentLoaded', function() {
+	const classFilter = document.getElementById('classFilter');
+	if (classFilter) {
+		classFilter.addEventListener('change', function() {
+			const selectedClass = this.value;
+			const rows = document.querySelectorAll('#resultsTable tr');
+
+			rows.forEach(function(row) {
+				const rowClass = row.getAttribute('data-class');
+				if (selectedClass === '' || rowClass === selectedClass) {
+					row.style.display = '';
+				} else {
+					row.style.display = 'none';
+				}
+			});
+		});
+	}
+});"##;
+
+/// The collection page: the collection name, its bundle, its scene link and the asset table
+/// with the frozen class filter and page control.
 ///
 /// `position` addresses the collection in the bundle at `bundle_index` and `path` is its
-/// `CollectionPath`. The table keeps the frozen columns (path ID, class, name) with one
-/// linked row per asset; the class filter, the page control and the client script have no
-/// port counterpart (the server renders every row with no client code). `scene` is the scene
+/// `CollectionPath`. The table keeps the frozen columns (path ID, class, name) with one linked
+/// row per asset, preceded by the class filter only when more than one class is present and by
+/// the page control, and followed by the page script that drives both. `scene` is the scene
 /// definition's display name when the collection is a scene, so the page renders the same
 /// `Localization.Scene` section and `ScenePath` link the baseline's `Collection.IsScene`
 /// branch adds; it is `None` for a non-scene collection. The collection dependency section
@@ -670,6 +915,18 @@ pub fn collection_page(
 
     if !collection.assets.is_empty() {
         inner.element("h2", &[], &t(state, "assets"));
+
+        let classes = ordered_classes(
+            collection
+                .assets
+                .iter()
+                .map(|asset| asset.class_name.as_str()),
+        );
+        if classes.len() > 1 {
+            write_class_filter(&mut inner, state, &classes);
+        }
+        write_page_control(&mut inner, state);
+
         inner.open("table", &[("class", "table")]);
         inner.open("thead", &[]);
         inner.open("tr", &[]);
@@ -696,7 +953,12 @@ pub fn collection_page(
         inner.close("table");
     }
 
-    Some(layout(state, &collection.name, inner.as_str()))
+    Some(layout_with_scripts(
+        state,
+        &collection.name,
+        inner.as_str(),
+        ASSETS_TABLE_SCRIPT,
+    ))
 }
 
 /// `SceneAPI.GetView`: the scene definition's name, path, GUID and collection links.
@@ -1314,8 +1576,8 @@ fn save_button(html: &mut Html, state: &WebState, href: &str, file_name: &str) {
 /// `query` is the trimmed `q` value the frozen page works with. The input element carries
 /// the query pre-escaped exactly like the frozen `WithValue(SearchQuery.ToHtml())` (the
 /// element writer escapes attribute values again), and the table keeps the frozen columns
-/// with the asset and collection links. The class filter and the client script have no
-/// port counterpart (the server renders every row with no client code).
+/// with the asset and collection links, preceded by the frozen class filter (only when the
+/// results span more than one class) and followed by the search page's filter script.
 pub fn search_page(state: &WebState, query: &str, matches: &[super::tree::SearchMatch]) -> String {
     use super::html::escape;
     use assetripper::web_paths::{asset_view_url, collection_view_url};
@@ -1362,6 +1624,10 @@ pub fn search_page(state: &WebState, query: &str, matches: &[super::tree::Search
             &[],
             &format!("{}: {}", t(state, "results"), matches.len()),
         );
+        let classes = ordered_classes(matches.iter().map(|hit| hit.asset.class_name.as_str()));
+        if classes.len() > 1 {
+            write_class_filter(&mut inner, state, &classes);
+        }
         inner.open("table", &[("class", "table")]);
         inner.open("thead", &[]);
         inner.open("tr", &[]);
@@ -1396,7 +1662,14 @@ pub fn search_page(state: &WebState, query: &str, matches: &[super::tree::Search
         inner.close("table");
     }
 
-    layout(state, &title, inner.as_str())
+    // The baseline ships the page script on every response; the port emits it with the
+    // results table it drives, so the prompt and no-results states carry none.
+    let scripts = if query.trim().is_empty() || matches.is_empty() {
+        ""
+    } else {
+        RESULTS_TABLE_SCRIPT
+    };
+    layout_with_scripts(state, &title, inner.as_str(), scripts)
 }
 
 /// The OpenAPI document the development menu links to.
@@ -1618,6 +1891,15 @@ fn write_dropdown(html: &mut Html, state: &WebState, dropdown: &Dropdown) {
 
 /// A whole document with the shared header, footer and stylesheet.
 fn layout(state: &WebState, title: &str, inner: &str) -> String {
+    layout_with_scripts(state, title, inner, "")
+}
+
+/// As [`layout`], with the page's own client script written after the footer.
+///
+/// The frozen `DefaultPage.Write` writes the script references after the footer and inside the
+/// body, so the port appends the page-specific script in the same place; `scripts` is empty
+/// for the pages that have none.
+fn layout_with_scripts(state: &WebState, title: &str, inner: &str, scripts: &str) -> String {
     let mut html = Html::new();
     html.raw("<!DOCTYPE html>\n");
     html.open("html", &[("lang", state.language())]);
@@ -1641,6 +1923,11 @@ fn layout(state: &WebState, title: &str, inner: &str) -> String {
     html.close("main");
     html.raw("</div>");
     write_footer(&mut html, state);
+    if !scripts.is_empty() {
+        html.raw("<script>\n");
+        html.raw(scripts);
+        html.raw("\n</script>\n");
+    }
     html.close("body");
     html.close("html");
     html.into_string()
@@ -1795,9 +2082,10 @@ fn post_form(html: &mut Html, action: &str, label: &str, class: &str) {
 mod tests {
     use super::{
         bundle_page, commands, confirm_delete, index, licenses, openapi_document, pending_page,
-        premium_features, privacy, search_page, settings_edit, swagger_page, BOOLEAN_LABELS,
-        LICENSE_TEXTS, TEXT_LABELS,
+        premium_features, privacy, search_page, settings_edit, swagger_page, write_page_control,
+        BOOLEAN_LABELS, LICENSE_TEXTS, TEXT_LABELS,
     };
+    use crate::web::html::Html;
     use crate::web::localization::{Messages, MISSING_MARKER_PREFIX};
     use crate::web::settings_form::BOOLEAN_KEYS;
     use crate::web::state::WebState;
@@ -2013,6 +2301,100 @@ mod tests {
                 route.path
             );
         }
+    }
+
+    fn search_match(class_name: &str) -> SearchMatch {
+        SearchMatch {
+            collection_path: assetripper::web_paths::CollectionPath {
+                bundle: assetripper::web_paths::BundlePath::root(),
+                index: 0,
+            },
+            collection_name: "managed.assets".to_owned(),
+            asset: TreeAsset {
+                path_id: 7,
+                class_id: 114,
+                class_name: class_name.to_owned(),
+                best_name: "ManagedRoot".to_owned(),
+                file_index: 0,
+                object_index: 0,
+                has_text: false,
+                has_binary: false,
+                has_image: false,
+                has_audio: false,
+                has_font: false,
+                has_video: false,
+                has_model: false,
+                dependencies: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn the_page_control_renders_the_frozen_paging_controls() {
+        let state = state("en-US");
+        let mut html = Html::new();
+        write_page_control(&mut html, &state);
+        assert_eq!(
+            html.as_str(),
+            concat!(
+                "<label for=\"pageCollection\" class=\"me-2\">Page</label>",
+                "<button id=\"previousButton\" class=\"ms-2\" type=\"button\" disabled=\"\">Previous</button>",
+                "<label id=\"pageNumber\" class=\"ms-2\">1</label>",
+                "<button id=\"nextButton\" type=\"button\" class=\"ms-2\" disabled=\"\">Next</button>",
+                "<label class=\"ms-2\">Assets Per Page</label>",
+                "<select id=\"assetsPerPage\" class=\"ms-2\">",
+                "<option value=\"\">All</option>",
+                "<option value=\"500\">500</option>",
+                "<option value=\"1000\">1000</option>",
+                "<option value=\"2000\">2000</option>",
+                "<option value=\"3000\">3000</option>",
+                "<option value=\"5000\">5000</option>",
+                "</select>",
+            )
+        );
+    }
+
+    #[test]
+    fn the_class_filter_appears_only_for_multiple_classes_and_lists_them_in_order() {
+        let state = state("en-US");
+
+        // One class: the frozen page renders no filter at all, though the page script still
+        // mentions the control it would drive.
+        let single = search_page(&state, "o", &[search_match("MonoBehaviour")]);
+        assert!(!single.contains("<select id=\"classFilter\""), "{single}");
+        assert!(!single.contains("<label for=\"classFilter\""), "{single}");
+        assert!(single.contains("'#resultsTable tr'"), "{single}");
+
+        let html = search_page(
+            &state,
+            "o",
+            &[
+                search_match("Texture2D"),
+                search_match("MonoBehaviour"),
+                search_match("MonoBehaviour"),
+            ],
+        );
+        let filter = html
+            .split("<select id=\"classFilter\" class=\"me-2\">")
+            .nth(1)
+            .expect("two classes render the filter");
+        let options = filter.split("</select>").next().unwrap_or("");
+        assert_eq!(
+            options,
+            concat!(
+                "<option value=\"\">All</option>",
+                "<option value=\"MonoBehaviour\">MonoBehaviour</option>",
+                "<option value=\"Texture2D\">Texture2D</option>",
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains("<label for=\"classFilter\" class=\"me-2\">Class</label>"),
+            "{html}"
+        );
+        // The frozen search script filters the results table by `data-class`.
+        assert!(html.contains("'#resultsTable tr'"), "{html}");
+        assert!(html.contains("<tr data-class=\"Texture2D\">"), "{html}");
     }
 
     #[test]

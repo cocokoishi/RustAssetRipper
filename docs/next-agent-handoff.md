@@ -1,6 +1,42 @@
 # RustAssetRipper hand-off — 2026-10-17
 
-## Latest current checkpoint - 2026-10-17 (the scene view is covered end to end)
+## Latest current checkpoint - 2026-10-17 (the collection and search pages carry their frozen client behaviour)
+
+- **`PRODUCT-GUI-001`'s class filter, page control and client script landed.** The reference's
+  `Collections/ViewPage` renders a `Localization.Class` label over a `classFilter` select (only when
+  the collection spans more than one class), the `CreatePageOption` block (`Page` label, disabled
+  previous/next buttons around the `pageNumber` label, and an `assetsPerPage` select over
+  500/1000/2000/3000/5000), and a `WriteScriptReferences` override that filters and pages
+  `#assetsTable`. The port's `collection_page` now renders all three, and `search_page` renders the
+  class filter over `#resultsTable` plus the search page's own page-control-free filter script.
+- **The script is emitted only with the table it drives.** The baseline writes the page script on
+  every response through `DefaultPage.Write`; it is a no-op in the states that carry no table, so the
+  port appends it with the table it drives. `layout` now delegates to a new `layout_with_scripts`,
+  whose output with an empty script is byte-identical to the old `layout`, so every other page is
+  unchanged.
+- **One deviation, recorded:** the frozen previous/next buttons carry a `v-else` directive. The port
+  runs no Vue, so the directive is dropped and the real `disabled` attribute the script toggles is
+  kept.
+- **Coverage and its boundary:** `the_page_control_renders_the_frozen_paging_controls` pins the whole
+  page-control markup (including all five page sizes) exactly; the web e2e test asserts the page
+  control and the `#assetsTable` script on a loaded collection page, the absent filter *control* for a
+  one-class collection, and the multi-class `classFilter` select plus the `#resultsTable` script
+  through `/Search/View?q=o`;
+  `the_class_filter_appears_only_for_multiple_classes_and_lists_them_in_order` pins the option list
+  and the ordinal ordering. **The collection page's positive class-filter branch is not covered by a
+  fixture**: every fixture collection holds exactly one object and each collection page's asset-link
+  count is asserted, so covering it needs a two-object SerializedFile builder. The branch is four
+  lines over the same `write_class_filter`/`ordered_classes` pair that the negative case and the
+  search page both exercise.
+- Verified by GitHub Actions (the local machine is not used for compute): the `Rust CI` run for this
+  commit must be green before the unit counts.
+- **Next:** keep working the wrap-up plan - the collection dependency section on the collection page,
+  the primary-content extractor layer's script producer (blocked on the decompiler decision), the
+  remaining `实现中` rows with `RES-TEXTURE-001` / `EXPORT-UNITY-001` first, `PRODUCT-CONFIG-001`'s
+  data-set subsystem, the `EXP-GLB-*` production wiring, then the 22-sample local replay and
+  `docs/acceptance-corpus.md` refresh.
+
+## Previous checkpoint - 2026-10-17 (the scene view is covered end to end)
 
 - **`PRODUCT-GUI-001`'s `/Scenes/View` render path is now covered, and the collection page
   gained the baseline's Scene section.** The reference's `Collections/ViewPage` renders a

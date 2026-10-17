@@ -1634,6 +1634,34 @@ mod tests {
             assert!(collection.contains("assetsTable"), "{collection}");
             assert!(collection.contains("/Assets/View?Path="), "{collection}");
             assert!(collection.contains("MonoBehaviour"), "{collection}");
+            // The page control is part of every non-empty asset table, and the page's own
+            // script drives it; with one class present the frozen filter is absent.
+            assert!(
+                collection.contains("<select id=\"assetsPerPage\" class=\"ms-2\">"),
+                "{collection}"
+            );
+            for count in [500, 1000, 2000, 3000, 5000] {
+                assert!(
+                    collection.contains(&format!("<option value=\"{count}\">{count}</option>")),
+                    "{collection}"
+                );
+            }
+            assert!(collection.contains("id=\"previousButton\""), "{collection}");
+            assert!(collection.contains("id=\"pageNumber\""), "{collection}");
+            assert!(collection.contains("id=\"nextButton\""), "{collection}");
+            assert!(
+                collection.contains("document.addEventListener('DOMContentLoaded'"),
+                "{collection}"
+            );
+            assert!(collection.contains("'#assetsTable tr'"), "{collection}");
+            assert!(
+                !collection.contains("<select id=\"classFilter\""),
+                "{collection}"
+            );
+            assert!(
+                !collection.contains("<label for=\"classFilter\""),
+                "{collection}"
+            );
 
             // A resolved asset renders its information section with the numeric
             // class ID, the class name and the collection link.
@@ -2074,6 +2102,31 @@ mod tests {
             assert_eq!(response.status(), 200, "{search}");
             let body = String::from_utf8(response.body().to_vec()).expect("pages are UTF-8");
             assert!(body.contains("/Assets/View?Path="), "{search}");
+
+            // A query that spans several classes renders the frozen class filter over the
+            // results table, and the search page's own (page-control-free) script drives it.
+            let response = get(&mut state, "/Search/View?q=o");
+            assert_eq!(response.status(), 200);
+            let multi_class = String::from_utf8(response.body().to_vec()).expect("pages are UTF-8");
+            let filter = multi_class
+                .split("<select id=\"classFilter\" class=\"me-2\">")
+                .nth(1)
+                .expect("the multi-class search renders the class filter");
+            let options = filter.split("</select>").next().unwrap_or("");
+            assert!(
+                options.starts_with("<option value=\"\">All</option>"),
+                "the filter starts with the All option: {options}"
+            );
+            assert!(
+                options.matches("<option value=\"").count() > 2,
+                "the filter lists All plus every distinct class: {options}"
+            );
+            assert!(multi_class.contains("'#resultsTable tr'"), "{multi_class}");
+            // The search page has no page control.
+            assert!(
+                !multi_class.contains("id=\"assetsPerPage\""),
+                "{multi_class}"
+            );
 
             // An empty query prompts, a hopeless one reports no results.
             let response = get(&mut state, "/Search/View");

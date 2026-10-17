@@ -8854,3 +8854,34 @@ These results do not pass the first-phase gate. The reference .NET solution buil
 - Next step for this arc: build a complete Texture2D TypeTree fixture from the frozen
   class database, or take a different remaining tab whose data the current fixtures
   already provide.
+
+## 2026-10-17 - Collection and search pages: class filter, page control, client script
+
+- Scope: `PRODUCT-GUI-001`'s recorded-open collection/search rendering. The reference
+  `Collections/ViewPage` renders a class filter (only above one distinct class), the
+  `CreatePageOption` block and a `WriteScriptReferences` override that filters `#assetsTable`
+  and pages it; `Search/ViewPage` renders a class filter plus its own smaller filter script
+  over `#resultsTable`. The port now renders all of it from `write_class_filter`,
+  `write_page_control` and two transcribed script constants (transcribed from the frozen
+  `WriteScriptReferences` bodies, not re-invented).
+- Port decision recorded: `DefaultPage.Write` writes the script on *every* response, where it
+  is a no-op without a table; the port emits it with the table it drives, so the search
+  prompt/no-results states carry none and the pre-existing `!prompt.contains("resultsTable")`
+  assertions keep their meaning. The frozen buttons' `v-else` Vue directive is dropped (the
+  port runs no Vue); the real `disabled` attribute is kept because the script toggles it.
+- New `layout_with_scripts` keeps `layout`'s byte-exact output for the empty script, so no
+  other page changed.
+- Negative assertions target the filter *control* (`<select id="classFilter"`), not the
+  identifier: the emitted script itself names `classFilter`, which the first draft of the
+  assertions got wrong.
+- Not covered, stated plainly: the collection page's positive class-filter branch. Every
+  fixture collection holds one object and every collection page's asset-link count is
+  asserted (text=1, unknown=1, texture=1, font=1, video=1, scene link=1, census total=2), so a
+  multi-class collection needs a two-object SerializedFile builder. The branch is four lines
+  over the `write_class_filter`/`ordered_classes` pair that the negative case and the search
+  page's positive case both exercise.
+- Commands run locally: `rustfmt --edition 2021 --check src/web/pages.rs src/web/routes.rs` -
+  exit 0 after the authoring pass. Build and test run on GitHub Actions, not this machine.
+- Next step for this arc: the collection dependency section (`Collection.Dependencies.Count > 1`
+  -> `Localization.AssetTabDependencies`, `File ID` column, one linked row per non-null external
+  slot), reusing the multi-file graph's `dependency_identifier`/`candidate_file_indices`.
