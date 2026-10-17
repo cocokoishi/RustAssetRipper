@@ -760,6 +760,133 @@
         assert_eq!(&exported.bytes[0..4], b"glTF");
     }
 
+    /// The geometry facts read from a **production-layout** mesh payload, not a hand-built struct.
+    ///
+    /// The mesh fixture is the one the class-43 test uses, so the mesh gate is exercised against a
+    /// real `m_VertexData` stream and a real `m_SubMeshes` list rather than against a shape chosen to
+    /// suit it. The renderer payloads are synthetic, because the fixture holds no renderer: what is
+    /// under test there is the batching fields, which are two named fields.
+    #[test]
+    fn the_geometry_facts_read_a_production_mesh_payload() {
+        use crate::{load_object_workspace, load_workspace_from_vfs};
+        use assetripper::export::scene_glb::attached_mesh_facts;
+        use assetripper::io::dependency::DependencyFilePath;
+        use assetripper::io::filesystem::VirtualFileSystem;
+        use assetripper::resources::glb_level::GlbSourceMesh;
+        use assetripper::resources::packed_bit_vector::PackedBitVectorLimits;
+        use assetripper::resources::vertex_data_blob::{EndianType, UnityVersion};
+        use assetripper::serialized_file::object::{SerializedFieldValue, SerializedValue};
+        use assetripper::serialized_file::object_workspace::ObjectWorkspaceLimits;
+        use assetripper::serialized_file::workspace::SerializedFileWorkspaceLimits;
+
+        let _production = crate::SourceFactoryLayoutGuard::use_source_factory();
+        let bytes = make_production_mesh_file();
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem.create_directory(Some("/game")).unwrap();
+        filesystem
+            .write_all_bytes("/game/mesh.assets", &bytes)
+            .unwrap();
+        let input = DependencyFilePath {
+            file_name: "mesh.assets".to_owned(),
+            virtual_path: "/game/mesh.assets".to_owned(),
+        };
+        let workspace = load_workspace_from_vfs(
+            &filesystem,
+            &[input],
+            SerializedFileWorkspaceLimits::default(),
+        )
+        .expect("the workspace loads");
+        let objects =
+            load_object_workspace(&filesystem, &workspace, ObjectWorkspaceLimits::default())
+                .expect("the object workspace loads");
+        let payload = objects
+            .get(0, 0)
+            .expect("the mesh exists")
+            .payload
+            .as_ref()
+            .unwrap_or_else(|error| panic!("the mesh must decode: {error}"));
+        let version = UnityVersion {
+            major: 2019,
+            minor: 4,
+            patch: 0,
+        };
+        let source = GlbSourceMesh {
+            file_id: 0,
+            path_id: 42,
+        };
+        let renderer = |fields: Vec<(&str, SerializedValue)>| {
+            SerializedValue::Struct(
+                fields
+                    .into_iter()
+                    .map(|(name, value)| SerializedFieldValue {
+                        name: name.to_owned(),
+                        value,
+                    })
+                    .collect(),
+            )
+        };
+        let limits = PackedBitVectorLimits::default();
+
+        // A renderer with an empty subset list is the dynamic case: every sub-mesh, in order.
+        let (dynamic, _) = attached_mesh_facts(
+            &payload.root,
+            Some(&renderer(vec![(
+                "m_SubsetIndices",
+                SerializedValue::Array(Vec::new()),
+            )])),
+            version,
+            EndianType::Little,
+            limits,
+            source,
+        )
+        .expect("a production mesh with a renderer yields facts");
+        assert_eq!(dynamic.sub_mesh_count, 1);
+        assert!(dynamic.is_16_bit_indices);
+        assert!(dynamic.has_renderer);
+        assert!(dynamic.has_subset_indices);
+        assert_eq!(dynamic.subset_indices_count, 0);
+        assert_eq!(dynamic.source, Some(source));
+        assert!(dynamic.mesh_type.is_some());
+
+        // A static batch range selects the sub-meshes it names.
+        let batch_info = SerializedValue::Struct(vec![
+            SerializedFieldValue {
+                name: "firstSubMesh".to_owned(),
+                value: SerializedValue::U32(0),
+            },
+            SerializedFieldValue {
+                name: "subMeshCount".to_owned(),
+                value: SerializedValue::U32(1),
+            },
+        ]);
+        let (static_facts, _) = attached_mesh_facts(
+            &payload.root,
+            Some(&renderer(vec![("m_StaticBatchInfo", batch_info)])),
+            version,
+            EndianType::Little,
+            limits,
+            source,
+        )
+        .expect("a production mesh with a static renderer yields facts");
+        assert!(static_facts.has_static_batch_info);
+        assert_eq!(static_facts.static_batch_sub_mesh_count, 1);
+        assert_eq!(static_facts.static_batch_info, Some((0, 1)));
+
+        // No renderer: the mesh resolves but nothing is attached, which is the source's gate order.
+        assert_eq!(
+            attached_mesh_facts(
+                &payload.root,
+                None,
+                version,
+                EndianType::Little,
+                limits,
+                source
+            ),
+            None,
+            "a mesh without a renderer attaches nothing"
+        );
+    }
+
     /// A class-43 `Mesh` whose vertex data is a single Float32 position channel and whose index
     /// buffer holds one 16-bit triangle.
     pub(super) fn make_mesh_file() -> Vec<u8> {

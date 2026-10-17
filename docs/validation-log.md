@@ -1,5 +1,26 @@
 # Validation log
 
+## 2026-10-16 - The geometry facts read a production mesh payload, and the fixture was already there
+
+- Outcome: `attached_mesh_facts` is verified against a real production-layout class-43 mesh payload,
+  including the dynamic and static batching cases and the renderer gate. 207 CLI tests (up from 206).
+- **I had said twice that this fixture did not exist, and it did.** `make_production_mesh_file` writes
+  the full production class-43 field list with one triangle of real geometry, and a neighbouring test
+  already decodes it into `MeshData`. My search had looked for a *payload builder* in the resource and
+  export modules and never checked the CLI test fragments, so two rounds recorded an unverifiable gap
+  that was one file away. **The lesson is the same shape as the others this session: search for the
+  capability, not for the module you expect it in.**
+- The test asserts the facts from that payload - one sub-mesh, 16-bit indices, a mesh type, the source
+  identity preserved - and then the two batching readings and the renderer gate, so the gates are
+  exercised against data whose vertex stream and sub-mesh list were not chosen to suit them.
+- **The local format check needed refining.** The wrapper comparison shows every pre-existing
+  deviation in the file, and a numbered fragment carries several, so a non-zero count means nothing on
+  its own. What matters is whether a rustfmt delta **overlaps the changed line range**: this edit's
+  range was 763-889 and one delta sat at 760-768, which is why the import order in the new test had to
+  match rustfmt's. The handoff now records the range test rather than the count.
+- Evidence: `cargo test --locked --workspace` - 1935 library + **207** CLI tests, 0 failed, 1 ignored.
+  `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+
 ## 2026-10-16 - Prefab hierarchy members, derived by the walk that already existed
 
 - Outcome: the main-asset relation now resolves prefab hierarchy members, so those objects classify as
