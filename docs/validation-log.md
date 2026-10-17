@@ -1,5 +1,42 @@
 # Validation log
 
+## 2026-10-16 - `/Export/PrimaryContent` is wired: the route that was a 501
+
+- Outcome: added `src/main_cli_primary_content.rs` (the driver), `WebState::export_primary_content`,
+  and the route registration that replaces the 501. 204 CLI tests (up from 199); library unchanged at
+  1924.
+- **This was the round the route actually got done**, after three rounds of necessary-but-smaller
+  preceding units. The pattern was worth naming: I kept choosing units that fit in a round, and the
+  goal's item 2 - unlock `/Export/PrimaryContent` - stayed open. This round took the bigger unit.
+- **The gate was already in the baseline, and I nearly got that wrong.** I read `Commands.cs` first
+  and saw `ExportPrimaryContent` doing nothing but reading a path, which looked like it had no
+  delete-confirmation gate while the port's sibling route had one. The gate is in
+  `GameFileLoader.ExportPrimaryContent`: loaded, valid directory, consent on a non-empty directory,
+  delete, recreate, export - **the same sequence for both exports**. So the port's existing
+  `plan_export`/`resolve_export_flow` is faithful, and the new handler differs from the
+  Unity-project one only in its label and its call.
+- **The driver's producer map is four lines of dispatch over producers that already existed**:
+  `json_content_document` for JSON, `plan_resource_export` for the texture/mesh/terrain/navmesh/audio
+  families, `plan_binary_export` for the four binary arms, and **unimplemented** for the rest -
+  counted, never written.
+- **Objects whose facts cannot be decided are counted and printed with their reason.** The hierarchy
+  classes need the scene-or-prefab relation and streamed textures need the resource lookup; both are
+  reported as `N x <reason>` plus a few example names. Declining them into the JSON fallback would
+  write files the reference never writes and call the run a success, which is the silent degradation
+  the acceptance rules forbid. This is the honest state of the route: it works, and it says exactly
+  which objects it could not decide.
+- **The probe reflects the run's own writes**, which the collision rules depend on: the first asset in
+  a fresh directory takes the plain name and creates the directory, and later assets must see it. A
+  probe that only read the disk would let two assets collide, which the module's own earlier test had
+  once asserted as correct.
+- **The three log lines the baseline emits are emitted in its order**, so the run's visible log is
+  comparable with the reference's.
+- The route test that asserted `501` now asserts the redirect, and the sibling route is asserted
+  beside it so the two cannot drift.
+- Evidence: `cargo test --locked --workspace` - **1924** library + **204** CLI tests, 0 failed, 1
+  ignored. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0. Ledger 409 rows,
+  MALFORMED=0, DUPES=0.
+
 ## 2026-10-16 - The binary extractor's payload producer, the last genuinely missing one
 
 - Outcome: added `res_wiring::plan_binary_export`, covering all four `BinaryAssetContentExtractor`

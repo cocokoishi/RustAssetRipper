@@ -555,6 +555,8 @@ mod export_commands;
 use export_commands::*;
 #[path = "main_cli_inspection.rs"]
 mod inspection;
+#[path = "main_cli_primary_content.rs"]
+mod primary_content_commands;
 use inspection::*;
 #[path = "main_cli_summary.rs"]
 mod summary;

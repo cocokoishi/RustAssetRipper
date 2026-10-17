@@ -29,6 +29,7 @@ use crate::export_commands::{
     load_default_serialized_settings_from_dir, load_game, save_serialized_settings_to_dir,
     LoadedGame,
 };
+use crate::primary_content_commands::export_loaded_primary_content;
 
 use super::localization::{Messages, FALLBACK_LANGUAGE};
 use super::tree::BundleTree;
@@ -958,6 +959,33 @@ impl WebState {
             .ok_or_else(|| "no game is loaded".to_owned())?;
         let mut status = Vec::new();
         export_loaded_game(
+            game,
+            Path::new(path),
+            delete_existing,
+            &self.settings,
+            &mut status,
+        )
+        .map_err(|error| error.to_string())?;
+        self.push_status(&status);
+        Ok(())
+    }
+
+    /// Export the loaded game's primary content.
+    ///
+    /// The gate is the caller's, as it is for the Unity-project export: `GameFileLoader` applies
+    /// `IsLoaded && IsValidExportDirectory`, asks for consent on a non-empty directory, deletes and
+    /// recreates it, and only then exports. This mirrors that order.
+    pub fn export_primary_content(
+        &mut self,
+        path: &str,
+        delete_existing: bool,
+    ) -> Result<(), String> {
+        let game = self
+            .loaded
+            .as_ref()
+            .ok_or_else(|| "no game is loaded".to_owned())?;
+        let mut status = Vec::new();
+        export_loaded_primary_content(
             game,
             Path::new(path),
             delete_existing,

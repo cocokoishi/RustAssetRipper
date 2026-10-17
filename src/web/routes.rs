@@ -111,6 +111,7 @@ fn post(state: &mut WebState, request: &Request) -> Response {
             Response::redirect("/")
         }
         "/Export/UnityProject" => export(state, request),
+        "/Export/PrimaryContent" => export_primary_content(state, request),
         _ => fallback(state, "POST", request.path()),
     }
 }
@@ -193,6 +194,54 @@ fn export(state: &mut WebState, request: &Request) -> Response {
         }
         ExportDecision::Proceed { delete_existing } => {
             if let Err(error) = state.export_unity_project(&path, delete_existing) {
+                state.log_error(&error);
+            }
+            Response::redirect("/")
+        }
+    }
+}
+
+/// `POST /Export/PrimaryContent`: the same gate, then the primary-content export.
+///
+/// The baseline's `GameFileLoader` applies one gate sequence to both exports, so this handler differs
+/// from [`export`] only in the label and the call.
+fn export_primary_content(state: &mut WebState, request: &Request) -> Response {
+    let Some(submitted) = request.form_value("Path") else {
+        return Response::redirect("/Commands");
+    };
+    if submitted.is_empty() {
+        return Response::redirect("/");
+    }
+    let create_subfolder = request.form_flag("CreateSubfolder");
+    let confirmed = request.form_flag("ConfirmDelete");
+    let path = state.resolve_export_path(
+        &submitted,
+        create_subfolder,
+        &utc_timestamp_text(std::time::SystemTime::now()),
+    );
+    match state.plan_export(&path, confirmed) {
+        ExportDecision::Skip => Response::redirect("/"),
+        ExportDecision::InvalidDirectory => {
+            state.log_error(&format!(
+                "Export path '{path}' is not a valid export directory."
+            ));
+            Response::redirect("/")
+        }
+        ExportDecision::NeedsConfirmation => {
+            let label = state
+                .messages()
+                .text(state.language(), "export_primary_content")
+                .into_owned();
+            Response::html(pages::confirm_delete(
+                state,
+                "/Export/PrimaryContent",
+                &label,
+                &path,
+                create_subfolder,
+            ))
+        }
+        ExportDecision::Proceed { delete_existing } => {
+            if let Err(error) = state.export_primary_content(&path, delete_existing) {
                 state.log_error(&error);
             }
             Response::redirect("/")
@@ -1042,9 +1091,12 @@ mod tests {
     }
 
     #[test]
-    fn an_unwired_baseline_route_reports_not_implemented_and_an_unknown_one_404() {
+    fn the_primary_content_route_is_wired_and_an_unknown_one_404() {
         let mut state = state();
-        assert_eq!(status(&mut state, "POST", "/Export/PrimaryContent"), 501);
+        // `/Export/PrimaryContent` is wired now: a POST with no form path redirects to the commands
+        // page, exactly as `/Export/UnityProject` does, rather than reporting 501.
+        assert_eq!(status(&mut state, "POST", "/Export/PrimaryContent"), 302);
+        assert_eq!(status(&mut state, "POST", "/Export/UnityProject"), 302);
         // The search page takes no path: without a loaded game it reports that.
         let response = dispatch(&mut state, &request("GET", "/Search/View"));
         assert_eq!(response.status(), 404);
