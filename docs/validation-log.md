@@ -1,5 +1,39 @@
 # Validation log
 
+## 2026-10-16 - The sweep's first hit: a duplicate .NET float formatter that dropped the tie rule
+
+- Outcome: swept the .NET-semantic formatting surfaces for the "expectation derived from the
+  implementation" risk that has now produced three defects. The sweep's first concrete result was in
+  code I committed one round earlier: `json_walker`'s float formatter was a **second** implementation
+  of .NET's `ToString`, and `unity_yaml::format_dotnet_f32`/`_f64` already existed - with the harder
+  half of the rule that my copy omitted. The copy is deleted; the walker delegates. 1877 tests.
+- **The omitted rule is real and my fixture could not see it.** When several same-length decimals
+  round-trip to the same bits, .NET picks the one closest to the exact value with exact ties broken
+  toward the even last digit. `-280.890625f32` prints `-280.89062` under .NET but `-280.89063` under
+  Rust's `{}`. My copy took the shortest string from `Display`, so it printed the wrong spelling;
+  its 79-row fixture contained no such value **because I chose those rows**, which is the same
+  self-confirmation failure in a new costume. The tie rows are now captured from the runtime
+  (`tools/probes/float-format` extended with tie values) and the fixture is 82 rows.
+- **The generalisable rule, and the reason this sweep was the right first task:** before writing a
+  second port of a reference behaviour, look for the first. A duplicate does not just waste code; it
+  is where the difficult part of a rule gets silently omitted, and a fixture authored alongside the
+  copy will not cover that part. Three defects have now come from evidence that was chosen by the
+  same person who wrote the code under test.
+- **Sweep coverage, measured rather than assumed:** the repository already carries roughly 190
+  runtime-derived fixtures under `src/`, including `float_tostring_fixture.txt` (28 rows),
+  `guid_fixture.txt`, `hash128_fixture.txt`, `vector_fixture.txt`, `bounds_fixture.txt`,
+  `matrix4x4_fixture.txt`, `color_fixture.txt` and the texture/mesh/animation families. So the
+  methodology is applied broadly, not only where I happened to look; the JSON walker was an outlier.
+  The remaining sweep targets are the surfaces with **no** fixture, which is now a tractable list.
+- **Two process lessons from the edit itself, both cheap to avoid:** a whole-file rewrite through
+  `WriteAllLines` reintroduces CRLF, and `git diff --check` catches the result. And a line-range
+  replacement silently removed two unrelated definitions because my filter matched on a *text*
+  pattern (`#[derive(Clone, Copy, Debug, Eq, PartialEq)]`) that two different types shared. The
+  compiler found both; the review step that would have found them earlier is the diff, not the test.
+- Evidence: `cargo test --locked --workspace` - **1877** library + 199 bin tests, 0 failed, 1
+  ignored. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0. `git diff
+  --check` clean after normalising to LF.
+
 ## 2026-10-16 - The JSON surface rendered compact text; the walker had no production caller
 
 - Outcome: `JsonWalker` was fully ported and fixture-verified but **unused in production** -

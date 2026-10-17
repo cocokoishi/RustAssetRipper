@@ -74,6 +74,21 @@ then needs every one of those digits to round-trip; .NET formats the `float` its
 threshold pair and the format precision are carried by one `kind` value rather than two parameters
 that could drift apart.
 
+**Superseded: this function was a second implementation of something that already existed, and it was
+wrong on bullets the first one already handled.** `unity_yaml::format_dotnet_f32`/`_f64` had been
+formatting .NET floats for Unity YAML output with runtime-measured thresholds *and* an
+equivalent-representation tie rule that Rust's formatting does not reproduce. When several same-length
+decimals round-trip to the same bits, .NET picks the one closest to the exact value with exact ties
+broken toward the even last digit: `-280.890625f32` prints `-280.89062` under .NET but `-280.89063`
+under Rust's `{}`. The JSON walker's own copy took the shortest string from `Display` and therefore
+printed the wrong spelling, and its 79-row fixture happened not to contain such a value - the first
+version of the copy passed its own tests on precisely the inputs it got wrong. The tie rows are now
+captured from the runtime (`VALUE|f32|C38C7200|-280.89062`) and the walker delegates to the shared
+formatter, so there is one implementation with the union of the evidence: 82 replayed rows.
+**The generalisable lesson: before writing a second port of a reference behaviour, look for the
+first.** A duplicate is not just redundant, it is a place where the harder half of the rule gets
+omitted, and its own fixture will not notice if it was chosen by the copy's author.
+
 **The test caught two of my own mistakes before the fix landed**, both from replaying the fixture
 rather than trusting the implementation: first the widened-precision digit string, then the
 lower threshold, which is `<= -5` (scientific begins at exponent -5, not below it). Neither would have

@@ -25,6 +25,11 @@
 # Both kinds also print integral values without a trailing `.0` (`1`, not `1.0`) and preserve the
 # sign of negative zero (`-0`).
 # BOUNDARY|f32|1e-6|1E-06
+#
+# Tie rows: Rust's shortest form can pick a different same-length decimal than .NET, which
+# resolves the tie toward the even last digit. -280.890625f32 is -280.89062 under .NET and
+# -280.89063 under Rust's Display, and the JSON walker must print the .NET spelling.
+BOUNDARY|f32|1e-6|1E-06
 BOUNDARY|f32|1e-5|1E-05
 BOUNDARY|f32|1e-4|0.0001
 BOUNDARY|f32|1e6|1000000
@@ -71,6 +76,12 @@ VALUE|f32|00000001|1E-45
 VALUE|f32|449A5000|1234.5
 VALUE|f32|3900F990|0.000123
 VALUE|f32|4B18967F|9999999
+VALUE|f32|C38C7200|-280.89062
+VALUE|f32|438C7200|280.89062
+VALUE|f32|3F800001|1.0000001
+VALUE|f32|3F7FFFFF|0.99999994
+VALUE|f32|3FFFFFFF|1.9999999
+VALUE|f32|47F12065|123456.79
 VALUE|f32|FFC00000|NaN
 VALUE|f32|7F800000|Infinity
 VALUE|f32|FF800000|-Infinity

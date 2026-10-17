@@ -34,6 +34,9 @@ public static class Program
             1e7f, 1e8f, 1e15f, 1e16f, 1e20f, 3.4028235e38f, 1.1754944e-38f,
             1.1920929e-7f, 0.1f, 1.0f / 3.0f, 123456.789f, 16777216.0f,
             0.30000001f, 2.5f, 1e-45f, 1234.5f, 0.000123f, 9999999f,
+            // Shortest-representation ties: Rust picks one same-length decimal and .NET the
+            // other, so these separate the two implementations.
+            -280.890625f, 280.890625f, 1.0000001f, 0.99999994f, 1.9999999f, 123456.789f,
             float.NaN, float.PositiveInfinity, float.NegativeInfinity,
         });
         Report<double>("f64", new[]

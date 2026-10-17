@@ -460,144 +460,29 @@ pub fn write_json_value(output: &mut String, value: &SerializedValue) {
 }
 
 /// Write a float the way `float.ToString()` / `double.ToString()` does under the invariant culture.
+/// Write a float the way `float.ToString()` / `double.ToString()` does under the invariant culture.
 ///
-/// **Rust's `Display` is not equivalent, and using it produces byte-different output.** The
-/// reference passes no format string, so the value reaches .NET's shortest-round-trip default,
-/// whose behaviour was captured into `float_format_fixture.txt`. It differs from `{}` in three
-/// ways:
+/// **This delegates rather than reimplementing.** `unity_yaml` already formats .NET floats for
+/// Unity YAML output, and both writers are rendering the same call - a value handed to a
+/// `TextWriter` with no format string, i.e. .NET's shortest-round-trip default. That shared
+/// implementation additionally resolves the tie where several same-length decimals round-trip to
+/// the same bits, which .NET breaks toward the even last digit: `-280.890625f32` prints
+/// `-280.89062` under .NET but `-280.89063` under Rust's `{}`, so taking the shortest string from
+/// `Display` is not enough on its own. A second implementation here would have had to duplicate
+/// that reasoning, and a copy is exactly what drifts.
 ///
-/// - **Exponent threshold.** `Display` never uses exponent notation. .NET switches to it when the
-///   decimal exponent is below `-5` or at/above `9` for `f32` and `17` for `f64`, so `1e-5f` prints
-///   `1E-05` rather than `0.00001`, and `1e9f` prints `1E+09` while `1e8f` still prints `100000000`.
-/// - **Exponent spelling.** .NET writes an uppercase `E`, an explicit sign for positive exponents,
-///   and at least two exponent digits (`E+09`, `E-05`, `E+38`).
-/// - **Non-finite values.** .NET writes bare `NaN`, `Infinity` and `-Infinity` - not valid JSON, but
-///   that is what the reference emits - whereas `Display` writes `inf` and `-inf`.
+/// The first version of this function *was* a second implementation, and it was wrong on precisely
+/// that tie case. `float_format_fixture.txt` now carries the tie rows, captured from the runtime,
+/// so the delegation is pinned by evidence rather than by the two functions merely looking alike.
 ///
-/// Integral values print without a trailing `.0` in both, and the sign of negative zero is kept.
-///
-/// `kind` decides both the exponent threshold **and** the precision the shortest digit string is
-/// taken at, so the two can never disagree.
+/// Integral values print without a trailing `.0` in both forms, and the sign of negative zero is
+/// kept. `kind` is retained because an `f32` must be formatted at `f32` precision: widening it to
+/// `f64` first would need every digit of the widened value to round-trip.
 fn write_invariant_float(output: &mut String, value: f64, kind: FloatKind) {
-    if value.is_nan() {
-        output.push_str("NaN");
-        return;
-    }
-    if value.is_infinite() {
-        output.push_str(if value.is_sign_negative() {
-            "-Infinity"
-        } else {
-            "Infinity"
-        });
-        return;
-    }
-    // The shortest round-trip digits must be taken at the **originating** type's precision, which is
-    // why this parameter carries the kind rather than just a threshold pair. Formatting an `f32`
-    // widened to `f64` with `{}` prints `0.000009999999747378752`, because widening preserves the
-    // binary value exactly and `f64` needs all those digits to round-trip; .NET formats the `float`
-    // itself and prints `1E-05`. Both the digit string and the exponent threshold therefore come
-    // from the same `kind`.
-    let plain = match kind {
-        FloatKind::F32 => format!("{}", value as f32),
-        FloatKind::F64 => format!("{value}"),
-    };
-    let (negative, digits) = match plain.strip_prefix('-') {
-        Some(rest) => (true, rest),
-        None => (false, plain.as_str()),
-    };
-    // Split the shortest representation into significant digits and a decimal exponent, where the
-    // exponent is the position of the first significant digit relative to the decimal point.
-    let (integer, fraction) = match digits.split_once('.') {
-        Some((integer, fraction)) => (integer, fraction),
-        None => (digits, ""),
-    };
-    let mut significant = String::with_capacity(integer.len() + fraction.len());
-    significant.push_str(integer);
-    significant.push_str(fraction);
-    // Strip leading zeros, tracking how many were removed so the exponent stays correct.
-    let leading_zeros = significant.len() - significant.trim_start_matches('0').len();
-    let significant = significant.trim_start_matches('0');
-    // Strip trailing zeros: the shortest form never relies on them, but `{}` can emit `.0`-free
-    // integers such as `100`, where the expansion below would otherwise carry a zero exponent.
-    let significant = significant.trim_end_matches('0');
-    if significant.is_empty() {
-        // The value is zero; `-0` keeps its sign and neither form uses an exponent.
-        output.push_str(if negative { "-0" } else { "0" });
-        return;
-    }
-    let integral_length = integer.len() as i64 - leading_zeros as i64;
-    let exponent = integral_length - 1;
-    let (low, high) = kind.scientific_thresholds();
-    let use_scientific = exponent < low || exponent >= high;
-
-    if negative {
-        output.push('-');
-    }
-    if use_scientific {
-        // One digit before the point, the rest after, then `E` and a signed two-digit minimum
-        // exponent.
-        let mut characters = significant.chars();
-        let first = characters.next().expect("significant digits are non-empty");
-        output.push(first);
-        let rest: String = characters.collect();
-        if !rest.is_empty() {
-            output.push('.');
-            output.push_str(&rest);
-        }
-        output.push('E');
-        if exponent < 0 {
-            output.push('-');
-            let magnitude = exponent.unsigned_abs();
-            let _ = write!(output, "{magnitude:02}");
-        } else {
-            output.push('+');
-            let _ = write!(output, "{exponent:02}");
-        }
-        return;
-    }
-
-    // Fixed notation. The digit string is `significant`; the decimal point goes after
-    // `exponent + 1` digits, padding with zeros on either side as needed.
-    let point = exponent + 1;
-    if point <= 0 {
-        output.push_str("0.");
-        for _ in 0..(-point) {
-            output.push('0');
-        }
-        output.push_str(significant);
-    } else if point as usize >= significant.len() {
-        output.push_str(significant);
-        for _ in significant.len()..point as usize {
-            output.push('0');
-        }
-    } else {
-        let (head, tail) = significant.split_at(point as usize);
-        output.push_str(head);
-        output.push('.');
-        output.push_str(tail);
-    }
-}
-
-/// Which threshold set applies, i.e. whether the value came from a `float` or a `double`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum FloatKind {
-    /// `float`: exponent form below -5 or at/above 9.
-    F32,
-    /// `double`: exponent form below -5 or at/above 17.
-    F64,
-}
-
-impl FloatKind {
-    /// The fixed-notation exponent range: fixed while `low <= exponent < high`.
-    ///
-    /// The lower bound is inclusive because .NET prints `1e-4f` as `0.0001` but `1e-5f` as
-    /// `1E-05`, so scientific begins **at** exponent -5.
-    const fn scientific_thresholds(self) -> (i64, i64) {
-        match self {
-            Self::F32 => (-4, 9),
-            Self::F64 => (-4, 17),
-        }
-    }
+    output.push_str(&match kind {
+        FloatKind::F32 => super::unity_yaml::format_dotnet_f32(value as f32),
+        FloatKind::F64 => super::unity_yaml::format_dotnet_f64(value),
+    });
 }
 
 /// JavaScript-string-encode `text` and wrap it in quotes (`HttpUtility.JavaScriptStringEncode`).
@@ -638,6 +523,14 @@ fn write_json_string(output: &mut String, text: &str) {
     output.push('"');
 }
 
+/// Which .NET type the value came from, so it is formatted at that type's precision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FloatKind {
+    /// A `float`, i.e. `Single.ToString`.
+    F32,
+    /// A `double`, i.e. `Double.ToString`.
+    F64,
+}
 /// Standard Base64 with padding and no line breaks (`Convert.ToBase64String`).
 fn base64_encode(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

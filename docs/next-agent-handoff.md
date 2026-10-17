@@ -1,6 +1,39 @@
 # RustAssetRipper hand-off — 2026-10-16
 
-## Latest current checkpoint - 2026-10-16 (JSON surface renders the reference's indented text)
+## Latest current checkpoint - 2026-10-16 (duplicate .NET float formatter removed)
+
+- **The .NET-semantics sweep found its first hit in code committed one round earlier.** The JSON
+  walker's float formatter was a *second* implementation of .NET `ToString`; `unity_yaml::
+  format_dotnet_f32`/`_f64` already existed and additionally implements the equal-length tie rule.
+  The copy printed `-280.89063` where .NET prints `-280.89062`. **The copy is deleted; the walker
+  delegates.** Fixture grew to 82 rows with runtime-captured tie rows.
+- **Rule for the rest of the sweep: before writing a second port of a reference behaviour, look for
+  the first.** A duplicate is where the hard half of a rule gets omitted, and a fixture authored
+  beside the copy will not cover it.
+- **The sweep is now measurable, not guesswork.** ~190 runtime fixtures already exist under `src/`
+  (floats, GUID, Hash128, vectors, bounds, matrix, color, textures, meshes, animation, containers,
+  metadata). The JSON walker was an outlier. **Next sweep targets are the surfaces with no fixture
+  at all** - enumerate them by listing formatter/encoding functions and checking for a fixture
+  sibling, rather than by reading modules at random.
+- **Two cheap edit traps, both hit this round:** `WriteAllLines`/`WriteAllText` whole-file rewrites
+  reintroduce CRLF (fix with `git diff --check` then normalise), and a line-range replacement whose
+  filter matches on text rather than position can delete an unrelated definition that shares the
+  pattern. The compiler caught both; **review the diff, not just the test result.**
+- **Remaining Phase-1 work, in rough priority order:** finish the sweep for unfixtured .NET
+  surfaces; the primary-content content extractors (biggest missing layer - dispatch/assembly/loop/
+  membership and the JSON/GLB pieces are done); `PRODUCT-GUI-001`'s pending pages incl.
+  `/Export/PrimaryContent` and `/Scenes/View` (both 501); `RES-TEXTURE-001` / `RES-MODEL-001` /
+  `EXPORT-UNITY-001` (`实现中`); the `PROC-ANIM-*` family; `PRODUCT-CONFIG-001`'s data-set subsystem.
+- **Corpus note:** `docs/acceptance-corpus.md` marks all 22 samples CONVERGED but those verdicts are
+  dated 2026-10-15 and predate 61+ commits. **They must be re-replayed locally** before they count as
+  current evidence.
+- **Never format `src/resources/glb_tests_01.rs`** (nor `main_tests_01.rs`/`main_tests_03.rs`).
+- **A GLB is binary: decode the JSON chunk before asserting on text.**
+- **Run `tools/parity-report.ps1` after every ledger edit**; a literal `||` inside a cell splits the row.
+- Parity ledger: 407 rows, 380 verified, 27 non-verified, DUPES=0, MALFORMED=0, gate OPEN.
+- Verified: **1877** library + 199 bin tests, 0 failed; warnings-denied Clippy exit 0.
+
+## Previous checkpoint - 2026-10-16 (JSON surface renders the reference's indented text)
 
 - **`JsonWalker` had no production caller.** `render_asset_json` served compact `write_json_value`
   output, so the JSON tab and `/Assets/Json` differed from the reference's tab-indented text in
