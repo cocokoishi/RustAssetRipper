@@ -1,6 +1,44 @@
 # RustAssetRipper hand-off — 2026-10-16
 
-## Latest current checkpoint - 2026-10-16 (primary-content pipeline complete)
+## Latest current checkpoint - 2026-10-16 (primary-content path escape fixed)
+
+- **Found and fixed a real path escape in the frozen source.**
+  `ExportCollectionBase.GetUniqueFileName` sanitizes the asset-derived name on **one** branch only:
+  when the trimmed best name is empty it falls back to `asset.ClassName` **verbatim**, skipping
+  `FixInvalidFileNameCharacters`. The port reproduced that faithfully; it now sanitizes both.
+  Recorded as `DIFF-PRIMARY-CONTENT-CLASSNAME-001`.
+- **Why it matters:** `TypeTreeObject.ClassName` is `EditorFields.Type.Name`, i.e. the TypeTree's
+  own `m_Type` string - **file-controlled data, not a C# identifier**. The baseline corroborates
+  that such names need sanitizing: `Pass002_RenameSubnodes` runs `ValidNameGenerator.GetValidTypeName`
+  over every `TypeName`, and that generator's regex is `[<>\[\]\s&\(\):\.-]`. Four of those (`[`,
+  `]`, `:`, whitespace) are also invalid **file-name** characters, so an unsanitized type name can
+  inject a path component.
+- **Reachability, stated precisely because the first version of this claim was too broad:** the
+  branch is *not* "the asset has no name". `GetBestName` itself falls back through `OriginalName`
+  to `ClassName`, so an ordinary unnamed asset already takes the **sanitizing** branch. The
+  unsanitized branch needs a name that is present but **whitespace-only** (`OverrideName` /
+  `OriginalName` that trims to nothing). Real, but narrower than it first looked - check
+  reachability before writing a claim down.
+- **When a test expectation and the implementation disagree, check which is wrong before editing.**
+  Two of mine were wrong: the sanitizer yields `Foo_Bar__Baz` (one `_` per invalid character, not
+  a collapsed run), and the class-name fallback lands in `Export/Assets/` via `GetBestDirectory`,
+  not directly under `Export`. The implementation was right in both cases.
+- **Next concrete step for the scene GLB:** give `export_scene_glb` a caller reachable from the
+  primary-content path, and resolve per-node geometry (the reference reaches a mesh through
+  `BuildParameters.TryGetOrMakeMeshData`). `EXP-GLB-001` and `EXP-GLB-SCENE-001` share this work.
+  The scene GLB belongs to the **primary-content** path (`GameFileLoader.cs:96`,
+  `/Export/PrimaryContent`), **not** the Unity project export.
+- **Never format `src/resources/glb_tests_01.rs`** (nor `main_tests_01.rs`/`main_tests_03.rs`).
+- **A GLB is binary: decode the JSON chunk before asserting on text** (12-byte header, then the
+  chunk header).
+- **When a feature a gap cell calls unported lands, re-check that cell in the same round** - four
+  cells have been wrong this way (`EXP-GLB-001` twice, `RES-MODEL-001`, `RES-BLENDSHAPE-001`).
+- Parity ledger: 407 rows, 381 verified, 26 non-verified, DUPES=0, MALFORMED=0, gate OPEN.
+- `/Scenes/View` and `/Export/PrimaryContent` both still return 501.
+- Corpus replays are local-only and have not run in these rounds.
+- Verified: **1871** library + 199 bin tests, 0 failed; warnings-denied Clippy exit 0.
+
+## Previous checkpoint - 2026-10-16 (primary-content pipeline complete)
 
 - **Ported `PrimaryContentExporter.CreateCollection`.** The primary-content pipeline is now complete
   end to end: handler table -> `create_primary_content_collection` (dispatch) ->

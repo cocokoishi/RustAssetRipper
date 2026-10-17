@@ -1,5 +1,29 @@
 # Source behavior and differential findings
 
+## DIFF-PRIMARY-CONTENT-CLASSNAME-001 - the primary-content class-name fallback skips file-name sanitization (fix implemented, unit-tested)
+
+`ExportCollectionBase.GetUniqueFileName` sanitizes the name it derives from the asset, but only on one of its two branches. The source reads:
+
+```
+fileName = asset.GetBestName();
+fileName = FileSystem.RemoveCloneSuffixes(fileName);
+fileName = FileSystem.RemoveInstanceSuffixes(fileName);
+fileName = fileName.Trim();
+if (string.IsNullOrEmpty(fileName)) {
+    fileName = asset.ClassName;                  // <- no FixInvalidFileNameCharacters
+} else {
+    fileName = FileSystem.FixInvalidFileNameCharacters(fileName);
+}
+```
+
+So when the trimmed best name is empty, the class name is used **verbatim**, and it is the one input to this function that is never checked for invalid file-name characters.
+
+**Why the class name can carry invalid characters.** `IUnityObjectBase.ClassName` has three implementations, and one of them is not a C# identifier: `TypeTreeObject.ClassName` is `EditorFields.Type.Name`, which traces back to the serialized file's own TypeTree `m_Type` string - file-controlled data, not a compile-time name. The baseline itself treats those names as untrusted: `Pass002_RenameSubnodes` runs `ValidNameGenerator.GetValidTypeName` over every `TypeName` before use, and that generator's own bad-character regex is `[<>\[\]\s&\(\):\.-]`. Four of those characters - `[`, `]`, `:`, and whitespace - are also on the invalid **file-name** character list (Windows: `" < > | : / \ ? * , [ ]`). A type name containing a path separator would therefore be emitted into a path component unsanitized, letting the write escape the intended export directory.
+
+**Reachability, stated precisely.** The branch is narrower than "the asset has no name". `GetBestName` itself falls back through `OriginalName` to `ClassName`, so an ordinary unnamed asset returns its class name from `GetBestName` and *does* take the sanitizing branch. The unsanitized branch is reached only when a name is present but whitespace-only - `OverrideName` or `OriginalName` set to something that trims to nothing - because only then does `GetBestName` return that value and the trim leave an empty string behind. That is an unusual but real input, so the divergence is worth keeping rather than dismissing as dead code.
+
+**Fix.** The port sanitizes the class name on both branches. The transform is idempotent over names containing no invalid character, so a legitimate class name such as `MonoBehaviour` is passed through unchanged and no asset can be renamed or rejected by the fix. `primary_content_class_name_fallback_is_sanitized` pins all three cases: the whitespace-only fallback with a TypeTree-shaped class name (`Foo[Bar]:Baz` becomes `Foo_Bar__Baz`, one underscore per replaced character), the same class name reached through the ordinary best-name branch, and a plain class name that must be untouched. Status: implemented and unit-tested. The affected path is the primary-content exporter; the same helper shape also serves the Unity-project pipeline.
+
 ## DIFF-ENGINE-MESH-CACHE-001 — the predefined Mesh redirect (fix implemented and verified on real input)
 
 A world exports two mesh assets the frozen reference never writes, and 109 mesh-filter plus 30 mesh and 8 mesh-collider documents disagree. The two extra files are named `Cube_31` and `Cube_32`; every other mesh name set is identical, and resolving the two sides' GUIDs through each project's own `.meta` files shows the cause is a name shift rather than a content difference: the same source mesh is `Assets/Mesh/Cube_27.asset` in the reference and `Assets/Mesh/Cube_29.asset` in Rust. Two extra files written earlier in the shared-name sequence push every later suffix up by two, so pointers that should resolve to the same relative path resolve to different ones, and GUID-path normalization cannot rescue them. No source-only path exists on either side.

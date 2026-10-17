@@ -1,5 +1,38 @@
 # Validation log
 
+## 2026-10-16 - A primary-content path escape in the frozen source, fixed generically
+
+- Outcome: `ExportCollectionBase.GetUniqueFileName` sanitizes the asset-derived name on **one**
+  branch only. When the trimmed best name is empty it falls back to `asset.ClassName` verbatim,
+  skipping `FixInvalidFileNameCharacters` entirely. The port reproduced that faithfully; it now
+  sanitizes both branches, and the divergence is recorded as `DIFF-PRIMARY-CONTENT-CLASSNAME-001`.
+- **The class name is file-controlled, not a C# identifier.** `TypeTreeObject.ClassName` is
+  `EditorFields.Type.Name`, which traces to the serialized file's own TypeTree `m_Type` string.
+  The baseline corroborates that these names need sanitizing: `Pass002_RenameSubnodes` runs
+  `ValidNameGenerator.GetValidTypeName` over every `TypeName`, and that generator's bad-character
+  regex is `[<>\[\]\s&\(\):\.-]`. Four of those characters (`[`, `]`, `:`, whitespace) are also
+  invalid **file-name** characters, so an unsanitized type name can inject a path component and
+  escape the export directory.
+- **My first draft of this claim was overstated, and checking the reachability corrected it.**
+  I initially described the branch as "the asset has no name". It is not: `GetBestName` *itself*
+  falls back through `OriginalName` to `ClassName`, so an ordinary unnamed asset returns its class
+  name from `GetBestName` and already takes the sanitizing branch. The unsanitized branch needs a
+  name that is present but **whitespace-only** (`OverrideName`/`OriginalName` that trims to
+  nothing). The finding is still real and the fix still applies, but the write-up now states the
+  narrower condition rather than the convenient one.
+- **Two of my own test expectations were wrong and were corrected from the implementation, not the
+  reverse.** The sanitizer replaces each invalid character with `_`, so `Foo[Bar]:Baz` yields
+  `Foo_Bar__Baz` (four replacements, hence the doubled underscore where `:` sat between two
+  brackets) - not the `Foo_Bar_Baz` I first wrote. And the class-name fallback routes through
+  `GetBestDirectory`, so the file lands in `Export/Assets/` rather than directly under `Export`.
+  In both cases the implementation was right and the expectation was wrong; adjusting the
+  expectation to match reality was correct, and neither change weakened the assertion's intent.
+- The fix cannot reject a valid asset: the transform is idempotent over names with no invalid
+  character, which a third case in the test pins (`MonoBehaviour` is untouched).
+- Evidence: `cargo test --locked --workspace` - **1871** library (up from 1870) + 199 bin tests,
+  0 failed, 1 ignored. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+  `rustfmt --edition 2021 --check` on the changed file - clean.
+
 ## 2026-10-16 - `CreateCollection` dispatch ported with its loud-failure contract
 
 - Outcome: ported `PrimaryContentExporter.CreateCollection`. The primary-content pipeline is now

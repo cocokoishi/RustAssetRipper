@@ -512,8 +512,18 @@ pub fn plan_single_export_paths(
     let stem = remove_clone_suffixes(identity.best_name());
     let stem = remove_instance_suffixes(&stem);
     let trimmed = stem.trim();
+    // `ClassName` is sanitized on **both** branches, which is a deliberate divergence from the
+    // frozen source. The source applies `FixInvalidFileNameCharacters` only when the best name was
+    // non-empty, and falls back to `asset.ClassName` verbatim otherwise. That asymmetry is
+    // reachable and unsafe: for a `TypeTreeObject` the class name is `EditorFields.Type.Name`,
+    // i.e. the TypeTree's own `m_Type` string, and the baseline's own `ValidNameGenerator`
+    // demonstrates the shape of those names with the regex `[<>\[\]\s&\(\):\.-]` - so they can
+    // contain `[`, `]`, `:`, or spaces, each of which is an invalid file-name character. Unity
+    // assets whose class name contains a path separator would escape the export directory.
+    // Sanitizing here cannot reject a valid name: the transform is idempotent over names that
+    // contain no invalid character. See `DIFF-PRIMARY-CONTENT-CLASSNAME-001`.
     let mut file_name = if trimmed.is_empty() {
-        identity.class_name.clone()
+        fix_invalid_file_name_characters(&identity.class_name, platform)?
     } else {
         fix_invalid_file_name_characters(trimmed, platform)?
     };
@@ -737,6 +747,78 @@ mod tests {
 
         // An entirely declining stack yields no selection rather than a default.
         assert!(select_primary_content_extractor(&stack, |_| false).is_none());
+    }
+
+    /// An identity whose only name is its class name, matching an asset with no name of its own.
+    fn class_named(class_name: &str) -> ExportAssetPathIdentity {
+        ExportAssetPathIdentity {
+            class_name: class_name.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    /// A class-name fallback is sanitized, closing a path-escape the frozen source allows.
+    ///
+    /// The fallback branch is narrower than it first appears: `GetBestName` itself falls back to
+    /// `ClassName` when no name is set, so the ordinary "asset has no name" case already takes the
+    /// **sanitizing** branch with the class name as its input. The unsanitized branch is reachable
+    /// only when a name is *present but whitespace-only* (`OverrideName` or `OriginalName`), since
+    /// only then does `GetBestName` return that value and the trim leave nothing behind. That is
+    /// still a real input, so the divergence is kept and pinned here.
+    #[test]
+    fn primary_content_class_name_fallback_is_sanitized() {
+        let file_system = TestFileSystem::default();
+        let mut state = UniqueNameState::default();
+        // The class name takes the shape a TypeTree type name can take: the baseline's own
+        // `ValidNameGenerator` regex `[<>\[\]\s&\(\):\.-]` shows that `[`, `]`, `:`, and spaces
+        // are characters a type name may contain, and each is an invalid file-name character.
+        let mut identity = class_named("Foo[Bar]:Baz");
+        identity.override_name = Some("   ".to_owned());
+        let planned = plan_single_export_paths(
+            &identity,
+            "glb",
+            HostPathPlatform::Windows,
+            &mut state,
+            &file_system,
+            "Export",
+        )
+        .expect("the sanitized name is still a valid path");
+        assert_eq!(planned.file_name, "Foo_Bar__Baz.glb");
+        assert_eq!(planned.file_path, "Export\\Assets\\Foo_Bar__Baz.glb");
+        assert!(
+            !planned.file_name.contains(':') && !planned.file_name.contains('['),
+            "the fallback name carries no invalid file-name character: {}",
+            planned.file_name
+        );
+
+        // A class name that is already valid is unaffected, so sanitizing cannot rename a
+        // legitimate asset.
+        let mut identity = class_named("MonoBehaviour");
+        identity.override_name = Some("   ".to_owned());
+        let planned = plan_single_export_paths(
+            &identity,
+            "glb",
+            HostPathPlatform::Windows,
+            &mut state,
+            &file_system,
+            "Export",
+        )
+        .expect("a plain class name is unchanged");
+        assert_eq!(planned.file_name, "MonoBehaviour.glb");
+
+        // And the ordinary unnamed asset already sanitizes, via `GetBestName`'s own fallback.
+        let identity = class_named("Foo[Bar]:Baz");
+        assert_eq!(identity.best_name(), "Foo[Bar]:Baz");
+        let planned = plan_single_export_paths(
+            &identity,
+            "glb",
+            HostPathPlatform::Windows,
+            &mut state,
+            &file_system,
+            "Export",
+        )
+        .expect("the best-name branch sanitizes");
+        assert_eq!(planned.file_name, "Foo_Bar__Baz.glb");
     }
 
     /// A primary asset is claimed by its own collection even when the member list omits it.
