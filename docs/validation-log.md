@@ -1,5 +1,41 @@
 # Validation log
 
+## 2026-10-16 - The JSON surface rendered compact text; the walker had no production caller
+
+- Outcome: `JsonWalker` was fully ported and fixture-verified but **unused in production** -
+  `render_asset_json` served compact `write_json_value` output instead, so the browser JSON tab and
+  `/Assets/Json` differed from the reference's indented text in every line. Added `write_json_body`
+  (the reference's traversal order) and wired the route to it with `"\n"`. Recorded as
+  `DIFF-JSON-INDENT-001`; 1877 library tests.
+- **The shape rules are now captured from the reference runtime.** `tools/probes/json-walker`
+  instantiates the reference's own `DefaultJsonWalker` over a `StringWriter` and drives its public
+  callbacks directly - no asset model is needed because the walker only writes text. Thirteen
+  scenarios are committed as `json_walker_shape_fixture.txt` and replayed by
+  `walker_shape_matches_the_reference_runtime_rows`. This is the third time in this series that a
+  runtime-derived expectation replaced a self-derived one, and it is now the standard method for
+  this module.
+- **The line break belongs to the writer, not the module, and I got that wrong first.** I began by
+  making the walker hard-code the host newline, having captured `\r\n` from the probe. Reading the
+  reference's two callers showed why that is wrong: the export's `StreamWriter` takes
+  `Environment.NewLine`, while the route sets `NewLine = "\n"` explicitly
+  (`AssetAPI.cs`). The fixture's `\r\n` reflects the probe's default `StringWriter`, i.e. the
+  export's configuration, not the route's. `JsonWalker::with_line_break` now carries it and a test
+  pins both configurations. **Probing the runtime is not enough on its own - the probe's own
+  configuration is part of the evidence.**
+- **Two earlier port tests had to change, and that was the correct outcome:** they asserted `\n`
+  because the implementation used `\n`. They now build the expectation from
+  `default_line_break()`, so they hold on either platform. One of my edits briefly deleted an
+  assertion instead of rewriting it; the full-suite run and a re-read of the region caught it before
+  commit.
+- **What is still not verified, stated plainly:** the traversal *order*. The port walks its decoded
+  `Struct`; the reference walks through `WalkStandard`. The 13 scenarios prove the shape rules, not
+  that a real asset's fields come out in the reference's order with the reference's values. The PPtr
+  form also remains unprobed, because the probe could not construct a `PPtr<TAsset>` argument.
+- Evidence: `cargo test --locked --workspace` - **1877** library (up from 1874) + 199 bin tests,
+  0 failed, 1 ignored. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+  `rustfmt --edition 2021 --check` on the changed files - clean. Parity: TOTAL=407, 已验证 380,
+  NONVERIFIED=27, DUPES=0, MALFORMED=0, GATE=OPEN.
+
 ## 2026-10-16 - A 已验证 row was demoted: its evidence had been asserted from the implementation
 
 - Outcome: `PRODUCT-ASSET-JSON-TAB-001` was **已验证** and its evidence cell claimed the walker used

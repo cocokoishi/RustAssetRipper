@@ -1,5 +1,48 @@
 # Source behavior and differential findings
 
+## DIFF-JSON-INDENT-001 - the JSON surface emitted compact text where the reference emits the indented walker text (fix implemented and verified against captured runtime rows)
+
+`DefaultJsonWalker` writes tab-indented, line-broken JSON as it walks an asset. The port had the
+walker but **no production caller**: `render_asset_json`, which serves the browser JSON tab and the
+`/Assets/Json` route, called the compact `write_json_value` instead. So the served body parsed to the
+same data while its text differed from the reference in every line - and the walker's carefully
+ported shape rules were exercised only by unit tests.
+
+**The line break is the writer's, not a constant.** The reference's two callers differ, and reading
+both is what settled it:
+
+- the **file export** wraps a `StreamWriter` and never sets `NewLine`, so it gets
+  `Environment.NewLine` - `\r\n` on Windows;
+- the **browser route** sets `StringWriter { NewLine = "\n" }` explicitly
+  (`AssetRipper.GUI.Web/Pages/Assets/AssetAPI.cs`), so it is `\n` on every platform.
+
+The captured fixture shows `\r\n` because the probe used a default `StringWriter`, which is the
+export's configuration rather than the route's. Hard-coding either value would be wrong for one
+caller, so `JsonWalker::new` uses the host default and `JsonWalker::with_line_break` takes an
+explicit one; `walker_line_break_is_the_writers` pins both. **This corrected an over-generalisation
+made in the same round**: the first version of the fix made the module hard-code the host newline.
+
+**Fix.** `write_json_body` renders a decoded `SerializedValue` through the walker in the
+reference's callback order - a `Struct` is an object body, an `Array` is a list, and a leaf is
+written inline after a field prefix or positioned as the next entry otherwise - and
+`render_asset_json` now uses it with `"\n"`. The `/Assets/Json` route test asserts the body is
+tab-indented with LF and contains no carriage return.
+
+**Verification.** The walker's shape rules were captured from the reference runtime rather than
+reasoned about: `tools/probes/json-walker` instantiates the reference's own `DefaultJsonWalker` over
+a `StringWriter` and drives its public callbacks directly - no asset model is needed, because the
+walker only writes text. Thirteen scenarios are committed in `json_walker_shape_fixture.txt` and
+replayed by `walker_shape_matches_the_reference_runtime_rows`. They pin the rules the port had only
+asserted from itself: one tab per level, a newline **before** every closing brace, the comma at the
+end of the previous line, `[]` and `{}` collapsed for empty containers (and `[]` - not `{}` - for an
+empty non-string-keyed dictionary), the `{"Key": .., "Value": ..}` rendering inside a list, and
+Base64/char/float leaf forms.
+
+**Still open.** The traversal *order*: the port walks its decoded `Struct` while the reference walks
+through `WalkStandard`, so a document replay against original AssetRipper is still missing. The PPtr
+form is documented from the source but not probe-covered, because the probe could not construct a
+`PPtr<TAsset>` argument through reflection.
+
 ## DIFF-JSON-FLOAT-FORMAT-001 - the JSON walker formatted floats with Rust's `Display`, which is not .NET's `ToString` (fix implemented and verified against captured runtime rows)
 
 `DefaultJsonWalker.VisitPrimitive` writes a `float` or `double` by handing it to the text writer

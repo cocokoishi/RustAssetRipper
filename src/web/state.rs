@@ -759,7 +759,14 @@ impl WebState {
             return Ok(String::new());
         };
         let mut output = String::new();
-        assetripper::export::json_walker::write_json_value(&mut output, &payload.root);
+        // The reference's `/Assets/Json` route renders the asset through `DefaultJsonWalker` over a
+        // `StringWriter` whose `NewLine` it sets to `"\n"` explicitly, so the response is the
+        // indented walker text with LF line breaks on every platform. Emitting the compact form
+        // here (`write_json_value`) produced a body that parsed the same but did not match the
+        // reference's text at all.
+        let mut walker = assetripper::export::json_walker::JsonWalker::with_line_break("\n");
+        assetripper::export::json_walker::write_json_body(&mut walker, &payload.root);
+        output.push_str(walker.as_str());
         Ok(output)
     }
 

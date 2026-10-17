@@ -21,6 +21,27 @@ use std::fmt::Write as _;
 
 use crate::serialized_file::object::SerializedValue;
 
+/// The line break a `TextWriter` uses when the caller leaves `NewLine` at its default.
+///
+/// `DefaultJsonWalker` writes whatever `TextWriter.NewLine` holds, and the reference's two callers
+/// differ:
+///
+/// * the **file export** wraps a `StreamWriter` and never sets `NewLine`, so it gets
+///   `Environment.NewLine` - `\r\n` on Windows, `\n` elsewhere;
+/// * the **browser `/Assets/Json` route** explicitly sets `NewLine = "\n"`
+///   (`AssetRipper.GUI.Web/Pages/Assets/AssetAPI.cs`), so it is `\n` on every platform.
+///
+/// The line break is therefore a property of the writer the caller supplies, not a constant of this
+/// module: [`JsonWalker::new`] uses this host default and [`JsonWalker::with_line_break`] takes an
+/// explicit one. Hard-coding either value would be wrong for one of the two callers.
+const fn default_line_break() -> &'static str {
+    if cfg!(windows) {
+        "\r\n"
+    } else {
+        "\n"
+    }
+}
+
 /// Which container the walker is currently inside, so a closing brace can be written correctly
 /// and a separator can be chosen from context.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -45,12 +66,33 @@ pub struct JsonWalker {
     stack: Vec<Container>,
     /// Whether the current container already holds an entry, so a separator is due.
     needs_separator: Vec<bool>,
+    /// The line break to write, mirroring `TextWriter.NewLine`.
+    ///
+    /// `&'static str` because both of the reference's callers use a compile-time constant: the host
+    /// default and a literal `"\n"`.
+    line_break: &'static str,
 }
 
 impl JsonWalker {
-    /// A walker writing into a fresh buffer.
+    /// A walker writing into a fresh buffer with the host's default line break.
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            line_break: default_line_break(),
+            ..Self::default()
+        }
+    }
+
+    /// A walker writing an explicit line break, for a caller that sets `TextWriter.NewLine`.
+    pub fn with_line_break(line_break: &'static str) -> Self {
+        Self {
+            line_break,
+            ..Self::default()
+        }
+    }
+
+    /// The line break this walker writes.
+    pub fn line_break(&self) -> &'static str {
+        self.line_break
     }
 
     /// The JSON text written so far.
@@ -81,7 +123,7 @@ impl JsonWalker {
             self.output.push(',');
         }
         *pending = true;
-        self.output.push('\n');
+        self.output.push_str(self.line_break);
         self.indent();
     }
 
@@ -96,7 +138,7 @@ impl JsonWalker {
 
     /// `ExitAsset`: close an object body.
     pub fn exit_asset(&mut self) {
-        self.output.push('\n');
+        self.output.push_str(self.line_break);
         self.indent = self.indent.saturating_sub(1);
         self.indent();
         self.output.push('}');
@@ -127,7 +169,7 @@ impl JsonWalker {
 
     /// `ExitList`: close a list.
     pub fn exit_list(&mut self) {
-        self.output.push('\n');
+        self.output.push_str(self.line_break);
         self.indent = self.indent.saturating_sub(1);
         self.indent();
         self.output.push(']');
@@ -142,7 +184,7 @@ impl JsonWalker {
         };
         *pending = true;
         self.output.push(',');
-        self.output.push('\n');
+        self.output.push_str(self.line_break);
     }
 
     /// `EnterDictionary`: open `{ .. }` for string keys or `[ .. ]` otherwise.
@@ -164,7 +206,7 @@ impl JsonWalker {
 
     /// `ExitDictionary`: close a dictionary opened by [`Self::enter_dictionary`].
     pub fn exit_dictionary(&mut self, string_keys: bool) {
-        self.output.push('\n');
+        self.output.push_str(self.line_break);
         self.indent = self.indent.saturating_sub(1);
         self.indent();
         self.output.push(if string_keys { '}' } else { ']' });
@@ -210,7 +252,7 @@ impl JsonWalker {
         self.indent += 1;
         self.stack.push(Container::Object);
         self.needs_separator.push(true);
-        self.output.push('\n');
+        self.output.push_str(self.line_break);
         self.indent();
         self.output.push_str("\"Key\": ");
         true
@@ -218,7 +260,7 @@ impl JsonWalker {
 
     /// `ExitPair`: close a pair object.
     pub fn exit_pair(&mut self) {
-        self.output.push('\n');
+        self.output.push_str(self.line_break);
         self.indent = self.indent.saturating_sub(1);
         self.indent();
         self.output.push('}');
@@ -249,6 +291,14 @@ impl JsonWalker {
         write_json_value(&mut self.output, value);
     }
 
+    /// Position the next entry in the current container without writing a leaf.
+    ///
+    /// Containers need this because a leaf's positioning lives in [`Self::visit_value`], while a
+    /// nested object or list must be positioned *before* its opening brace is written.
+    pub fn position_entry(&mut self) {
+        self.separator();
+    }
+
     /// `VisitPrimitive` for a bare string, used where the caller already knows the text.
     pub fn visit_string(&mut self, value: &str) {
         self.separator();
@@ -259,6 +309,68 @@ impl JsonWalker {
     pub fn visit_bool(&mut self, value: bool) {
         self.separator();
         self.output.push_str(if value { "true" } else { "false" });
+    }
+}
+
+/// Write one decoded value as the reference's indented JSON body.
+///
+/// This is the function the browser `/Assets/Json` route and the file export both need: the
+/// reference renders an asset by walking it and writing as it goes, so its output is tab-indented
+/// and line-broken rather than compact. [`write_json_value`] produces the compact form and is kept
+/// for callers that want one line.
+///
+/// The traversal mirrors the reference's callback order:
+///
+/// * a `Struct` is an object body - `EnterAsset`, then `EnterField` plus the field's value for each
+///   field, then `ExitAsset`. The reference calls `DivideAsset` between fields, which is the same
+///   position [`JsonWalker::enter_field`] already handles, so no explicit divide is issued;
+/// * an `Array` is a list - `EnterList`, each element as the next entry, then `ExitList`;
+/// * everything else is a leaf written through `VisitPrimitive`, either inline when the cursor
+///   already sits after a `"name": ` prefix or positioned as the next entry otherwise.
+pub fn write_json_body(walker: &mut JsonWalker, value: &SerializedValue) {
+    write_decoded_value(walker, value, false);
+}
+
+/// Write `value` at the cursor, optionally already positioned by the caller.
+///
+/// `positioned` is true when a `"name": ` prefix (or an equivalent indent) has just been written,
+/// so a leaf must not emit a separator of its own. Containers position themselves when they are
+/// entries, because the reference positions an object element *before* `EnterAsset` writes its
+/// brace.
+fn write_decoded_value(walker: &mut JsonWalker, value: &SerializedValue, positioned: bool) {
+    match value {
+        SerializedValue::Struct(fields) => {
+            if !positioned {
+                walker.position_entry();
+            }
+            walker.enter_asset();
+            for field in fields {
+                walker.enter_field(&field.name);
+                write_decoded_value(walker, &field.value, true);
+            }
+            walker.exit_asset();
+        }
+        SerializedValue::Array(items) => {
+            if !positioned {
+                walker.position_entry();
+            }
+            if items.is_empty() {
+                walker.enter_list(0);
+            } else {
+                walker.enter_list(items.len());
+                for item in items {
+                    write_decoded_value(walker, item, false);
+                }
+                walker.exit_list();
+            }
+        }
+        leaf => {
+            if positioned {
+                walker.visit_value_inline(leaf);
+            } else {
+                walker.visit_value(leaf);
+            }
+        }
     }
 }
 
@@ -732,6 +844,235 @@ mod tests {
         );
     }
 
+    /// Replay the reference's own callback output.
+    ///
+    /// `tools/probes/json-walker` instantiates the reference `DefaultJsonWalker` over a
+    /// `StringWriter` and drives its public callbacks directly, so the expected text in
+    /// `json_walker_shape_fixture.txt` comes from the reference rather than from this module. Every
+    /// scenario below issues the same callback sequence the probe issued.
+    ///
+    /// The comparison normalises `\r\n` to `\n` on both sides, because the reference's line break is
+    /// `Environment.NewLine` and the fixture was captured on Windows; `walker_uses_the_host_line_break`
+    /// asserts the host-dependent half separately so this test stays valid on either platform.
+    #[test]
+    fn walker_shape_matches_the_reference_runtime_rows() {
+        let fixture = include_str!("json_walker_shape_fixture.txt");
+        let mut checked = 0usize;
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let rest = line.strip_prefix("TEXT|").expect("TEXT row");
+            let (name, escaped) = rest.split_once('|').expect("scenario and text");
+            let expected = unescape_walker_text(escaped);
+            assert!(
+                !expected.starts_with("<threw"),
+                "{name} is recorded as a probe failure: {expected}"
+            );
+            let actual = walker_scenario(name);
+            assert_eq!(
+                actual.replace("\r\n", "\n"),
+                expected.replace("\r\n", "\n"),
+                "scenario {name}"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 13, "every recorded scenario is replayed");
+    }
+
+    /// The default line break is the host's, and an explicit one overrides it.
+    ///
+    /// Asserted separately from the fixture comparison because the fixture can only record the
+    /// platform it was captured on. A hard-coded `\n` would pass the normalised comparison above
+    /// while producing output that differs from the reference in every line on Windows; conversely
+    /// a hard-coded `\r\n` would be wrong for the browser route, which sets `NewLine = "\n"`.
+    #[test]
+    fn walker_line_break_is_the_writers() {
+        let host = if cfg!(windows) { "\r\n" } else { "\n" };
+        assert_eq!(JsonWalker::new().line_break(), host);
+        let mut walker = JsonWalker::new();
+        walker.enter_asset();
+        walker.enter_field("m_Name");
+        walker.visit_value_inline(&SerializedValue::StringBytes(b"Cube".to_vec()));
+        walker.exit_asset();
+        assert_eq!(
+            walker.finish(),
+            format!("{{{host}\t\"m_Name\": \"Cube\"{host}}}")
+        );
+
+        // The browser route's configuration: `AssetAPI.GetJson` sets `NewLine = "\n"`.
+        let mut walker = JsonWalker::with_line_break("\n");
+        walker.enter_asset();
+        walker.enter_field("m_Name");
+        walker.visit_value_inline(&SerializedValue::StringBytes(b"Cube".to_vec()));
+        walker.exit_asset();
+        assert_eq!(walker.finish(), "{\n\t\"m_Name\": \"Cube\"\n}");
+    }
+
+    /// The indented traversal that gives `JsonWalker` its production caller.
+    ///
+    /// The expected text is built from the fixture-verified shape rules - one tab per level, a
+    /// newline before every closing brace, and a comma at the end of the previous line - and written
+    /// with `\n` because that is the line break the browser route configures. What this test does
+    /// **not** establish is that the reference's `WalkStandard` visits an asset's fields in the same
+    /// order the port's decoded `Struct` holds them; that remains the row's open question.
+    #[test]
+    fn decoded_values_render_as_the_reference_indented_body() {
+        use SerializedFieldValue as Field;
+        let value = SerializedValue::Struct(vec![
+            Field {
+                name: "m_Name".to_owned(),
+                value: SerializedValue::StringBytes(b"hero".to_vec()),
+            },
+            Field {
+                name: "m_Data".to_owned(),
+                value: SerializedValue::Array(vec![SerializedValue::U8(1), SerializedValue::U8(2)]),
+            },
+        ]);
+        let mut walker = JsonWalker::with_line_break("\n");
+        write_json_body(&mut walker, &value);
+        assert_eq!(
+            walker.finish(),
+            "{\n\t\"m_Name\": \"hero\",\n\t\"m_Data\": [\n\t\t1,\n\t\t2\n\t]\n}"
+        );
+
+        // An empty array collapses onto one line and needs no exit, so it does not gain the
+        // newline an empty *string* body would end with.
+        let empty = SerializedValue::Struct(vec![Field {
+            name: "m_Items".to_owned(),
+            value: SerializedValue::Array(Vec::new()),
+        }]);
+        let mut walker = JsonWalker::with_line_break("\n");
+        write_json_body(&mut walker, &empty);
+        assert_eq!(walker.finish(), "{\n\t\"m_Items\": []\n}");
+
+        // A nested object gains a level of indentation, and its closing brace sits at its own level.
+        let nested = SerializedValue::Struct(vec![Field {
+            name: "m_Inner".to_owned(),
+            value: SerializedValue::Struct(vec![Field {
+                name: "m_Leaf".to_owned(),
+                value: SerializedValue::I32(7),
+            }]),
+        }]);
+        let mut walker = JsonWalker::with_line_break("\n");
+        write_json_body(&mut walker, &nested);
+        assert_eq!(
+            walker.finish(),
+            "{\n\t\"m_Inner\": {\n\t\t\"m_Leaf\": 7\n\t}\n}"
+        );
+    }
+
+    /// The port's callback sequence for one probe scenario.
+    ///
+    /// Note the shape of this API: positioning and value writing are separate, so a field value is
+    /// written with [`JsonWalker::visit_value_inline`] after [`JsonWalker::enter_field`] has already
+    /// positioned the entry. A list element or a top-level value uses [`JsonWalker::visit_value`],
+    /// which performs the positioning itself. The reference splits the same work across its
+    /// `Divide*` and `VisitPrimitive` callbacks.
+    fn walker_scenario(name: &str) -> String {
+        use SerializedValue::{Bytes, Char, StringBytes, F32, I32};
+        let mut walker = JsonWalker::new();
+        match name {
+            // No callbacks at all: the probe created the walker and read it back.
+            "empty-asset" => {}
+            "one-field-string" => {
+                walker.enter_asset();
+                walker.enter_field("m_Name");
+                walker.visit_value_inline(&StringBytes(b"Cube".to_vec()));
+                walker.exit_asset();
+            }
+            "two-fields-divided" => {
+                walker.enter_asset();
+                walker.enter_field("m_A");
+                walker.visit_value_inline(&I32(1));
+                // `enter_field` positions the next entry, so no explicit divide is needed.
+                walker.enter_field("m_B");
+                walker.visit_value_inline(&SerializedValue::Bool(true));
+                walker.exit_asset();
+            }
+            "empty-list" => {
+                assert!(!walker.enter_list(0), "an empty list needs no exit");
+            }
+            "list-of-three" => {
+                if walker.enter_list(3) {
+                    walker.visit_value(&I32(1));
+                    walker.visit_value(&I32(2));
+                    walker.visit_value(&I32(3));
+                    walker.exit_list();
+                }
+            }
+            "empty-string-map" => {
+                assert!(
+                    !walker.enter_dictionary(0, true),
+                    "an empty string-keyed dictionary needs no exit"
+                );
+            }
+            "empty-int-map" => {
+                assert!(
+                    !walker.enter_dictionary(0, false),
+                    "an empty non-string-keyed dictionary needs no exit"
+                );
+            }
+            "string-map-one" => {
+                if walker.enter_dictionary(1, true) {
+                    walker.enter_dictionary_pair(true);
+                    walker.visit_value_inline(&StringBytes(b"key".to_vec()));
+                    walker.divide_dictionary_pair(true);
+                    walker.visit_value_inline(&I32(5));
+                    walker.exit_dictionary_pair(true);
+                    walker.exit_dictionary(true);
+                }
+            }
+            "int-map-one" => {
+                if walker.enter_dictionary(1, false) {
+                    if walker.enter_dictionary_pair(false) {
+                        walker.visit_value_inline(&I32(7));
+                        walker.divide_dictionary_pair(false);
+                        walker.visit_value_inline(&I32(5));
+                        walker.exit_dictionary_pair(false);
+                    }
+                    walker.exit_dictionary(false);
+                }
+            }
+            "nested-list-in-field" => {
+                walker.enter_asset();
+                walker.enter_field("m_Values");
+                if walker.enter_list(2) {
+                    walker.visit_value(&I32(1));
+                    walker.visit_value(&I32(2));
+                    walker.exit_list();
+                }
+                walker.exit_asset();
+            }
+            "primitive-byte-array" => walker.visit_value_inline(&Bytes(vec![1, 2, 3, 4])),
+            "primitive-float" => walker.visit_value_inline(&F32(1.5)),
+            "primitive-char" => walker.visit_value_inline(&Char(0x41)),
+            other => panic!("unexpected scenario {other}"),
+        }
+        walker.finish()
+    }
+
+    /// Reverse the fixture's `\r`, `\n`, `\t` and `\\` escaping.
+    fn unescape_walker_text(text: &str) -> String {
+        let mut result = String::with_capacity(text.len());
+        let mut characters = text.chars();
+        while let Some(character) = characters.next() {
+            if character != '\\' {
+                result.push(character);
+                continue;
+            }
+            match characters.next() {
+                Some('r') => result.push('\r'),
+                Some('n') => result.push('\n'),
+                Some('t') => result.push('\t'),
+                Some('\\') => result.push('\\'),
+                other => panic!("unexpected escape {other:?}"),
+            }
+        }
+        result
+    }
+
     /// Expand the fixture's `\uXXXX` prose form back into the character it describes.
     fn unescape_description(text: &str) -> String {
         let mut result = String::new();
@@ -767,7 +1108,8 @@ mod tests {
         assert!(walker.enter_field("m_Width"));
         walker.visit_value_inline(&SerializedValue::I32(2));
         walker.exit_asset();
-        assert_eq!(walker.finish(), "{\n\t\"m_Width\": 2\n}");
+        let nl = default_line_break();
+        assert_eq!(walker.finish(), format!("{{{nl}\t\"m_Width\": 2{nl}}}"));
     }
 
     #[test]
@@ -779,9 +1121,10 @@ mod tests {
         assert!(walker.enter_field("m_EmptyMap"));
         assert!(!walker.enter_dictionary(0, true));
         walker.exit_asset();
+        let nl = default_line_break();
         assert_eq!(
             walker.finish(),
-            "{\n\t\"m_Empty\": [],\n\t\"m_EmptyMap\": {}\n}"
+            format!("{{{nl}\t\"m_Empty\": [],{nl}\t\"m_EmptyMap\": {{}}{nl}}}")
         );
     }
 
@@ -795,9 +1138,10 @@ mod tests {
         walker.visit_value_inline(&SerializedValue::I32(6));
         walker.exit_dictionary_pair(false);
         walker.exit_dictionary(false);
+        let nl = default_line_break();
         assert_eq!(
             walker.finish(),
-            "[\n\t{\n\t\t\"Key\": 5,\n\t\t\"Value\": 6\n\t}\n]"
+            format!("[{nl}\t{{{nl}\t\t\"Key\": 5,{nl}\t\t\"Value\": 6{nl}\t}}{nl}]")
         );
     }
 

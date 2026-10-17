@@ -1,6 +1,44 @@
 # RustAssetRipper hand-off — 2026-10-16
 
-## Latest current checkpoint - 2026-10-16 (JSON walker float formatting corrected)
+## Latest current checkpoint - 2026-10-16 (JSON surface renders the reference's indented text)
+
+- **`JsonWalker` had no production caller.** `render_asset_json` served compact `write_json_value`
+  output, so the JSON tab and `/Assets/Json` differed from the reference's tab-indented text in
+  every line. Added `write_json_body` (the reference's traversal order) and wired the route to it.
+  Recorded as `DIFF-JSON-INDENT-001`.
+- **The line break is the writer's, not a constant.** The export's `StreamWriter` takes
+  `Environment.NewLine` (`\r\n` on Windows); the browser route sets `NewLine = "\n"` explicitly
+  (`AssetAPI.cs`). `JsonWalker::new` uses the host default, `JsonWalker::with_line_break` takes an
+  explicit one, and a test pins both. **I first made the module hard-code the host newline from the
+  probe's `\r\n` - the probe's own writer configuration is part of the evidence, not just its output.**
+- **The shape rules are now runtime-verified.** `tools/probes/json-walker` drives the reference's own
+  `DefaultJsonWalker` over a `StringWriter` (no asset model needed) and 13 scenarios are replayed by
+  `walker_shape_matches_the_reference_runtime_rows` from `json_walker_shape_fixture.txt`. **Use this
+  probe for any further walker work; it is the cheapest ground truth in this area.**
+- **What is still open on `PRODUCT-ASSET-JSON-TAB-001`:** the traversal *order* - the port walks its
+  decoded `Struct`, the reference walks `WalkStandard`, so a document replay against original
+  AssetRipper is the missing evidence. The PPtr form is unprobed (reflection could not build a
+  `PPtr<TAsset>` argument).
+- **Remaining Phase-1 work, in rough priority order:** the primary-content content extractors
+  (biggest missing layer; dispatch/assembly/loop/membership are done), `PRODUCT-GUI-001`'s pending
+  pages, `RES-TEXTURE-001` / `RES-MODEL-001` / `EXPORT-UNITY-001` (`实现中`), the `PROC-ANIM-*`
+  family, and `PRODUCT-CONFIG-001`'s data-set subsystem.
+- **Corpus note:** `docs/acceptance-corpus.md` marks all 22 samples CONVERGED, but those verdicts are
+  dated 2026-10-15 and predate roughly a day of commits. **They are stale relative to HEAD** and must
+  be re-replayed locally before they count as current evidence.
+- **Never format `src/resources/glb_tests_01.rs`** (nor `main_tests_01.rs`/`main_tests_03.rs`).
+- **A GLB is binary: decode the JSON chunk before asserting on text** (12-byte header, then the
+  chunk header).
+- **Run `tools/parity-report.ps1` after every ledger edit**; a literal `||` inside a cell splits the
+  row. Also check `git diff --check` for a blank line at EOF after a whole-file rewrite, and
+  normalize CRLF back to LF (`WriteAllLines` reintroduces CRLF).
+- **When a feature a gap cell calls unported lands, re-check that cell in the same round** - four
+  cells have been wrong this way (`EXP-GLB-001` twice, `RES-MODEL-001`, `RES-BLENDSHAPE-001`).
+- Parity ledger: 407 rows, 380 verified, 27 non-verified, DUPES=0, MALFORMED=0, gate OPEN.
+- `/Scenes/View` and `/Export/PrimaryContent` both still return 501.
+- Verified: **1877** library + 199 bin tests, 0 failed; warnings-denied Clippy exit 0.
+
+## Previous checkpoint - 2026-10-16 (JSON walker float formatting corrected)
 
 - **The JSON walker formatted floats with Rust's `Display`, which is not .NET's `ToString`.**
   Fixed in `src/export/json_walker.rs`; recorded as `DIFF-JSON-FLOAT-FORMAT-001`. The reference's

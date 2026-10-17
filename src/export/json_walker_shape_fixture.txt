@@ -1,0 +1,41 @@
+# `DefaultJsonWalker` callback output, captured from the reference runtime
+#
+# Produced by tools/probes/json-walker, which instantiates the reference's own
+# `AssetRipper.Export.PrimaryContent.DefaultJsonWalker` over a `StringWriter` and drives its
+# public callbacks directly - no asset model is needed, because the walker only writes text.
+#
+# Columns: TEXT|<scenario>|<the emitted text, with \r \n \t \ escaped>
+#
+# Why this fixture exists: the port's expectations for this module were twice written from the
+# port itself and were twice wrong (DIFF-JSON-ESCAPE-ENCODER-001, DIFF-JSON-FLOAT-FORMAT-001).
+# These rows are the reference's own shapes and are replayed by
+# `walker_shape_matches_the_reference_runtime_rows` in src/export/json_walker.rs.
+#
+# The rules the rows pin down:
+#   * an asset body is `{`, then one level of tab indent per nesting level, and a newline
+#     **before** the closing brace, so a container never ends on the same line as its last entry;
+#   * every entry starts on its own indented line, and a divider writes the comma at the end of
+#     the previous line rather than at the start of the next;
+#   * an empty list is `[]` and an empty string-keyed dictionary is `{}`, both on one line,
+#     with the matching exit skipped (the reference returns false from Enter* for these);
+#   * an empty **non**-string-keyed dictionary is `[]`, not `{}`;
+#   * a string-keyed dictionary writes the key itself as the field name, while a non-string-keyed
+#     dictionary renders each entry as `{''Key'': .., ''Value'': ..}` inside a list;
+#   * `byte[]` is Base64 in quotes, a `char` is a quoted character, and a float uses the
+#     invariant shortest form with no trailing `.0`;
+#   * the line break is the host's (`Environment.NewLine`), so the rows below were captured on
+#     Windows and carry `\r\n`; the walker emits `\r\n` on Windows and `\n` elsewhere, and
+#     the replay test normalises both sides before comparing.
+TEXT|empty-asset|
+TEXT|one-field-string|{\r\n\t"m_Name": "Cube"\r\n}
+TEXT|two-fields-divided|{\r\n\t"m_A": 1,\r\n\t"m_B": true\r\n}
+TEXT|empty-list|[]
+TEXT|list-of-three|[\r\n\t1,\r\n\t2,\r\n\t3\r\n]
+TEXT|empty-string-map|{}
+TEXT|empty-int-map|[]
+TEXT|string-map-one|{\r\n\t"key": 5\r\n}
+TEXT|int-map-one|[\r\n\t{\r\n\t\t"Key": 7,\r\n\t\t"Value": 5\r\n\t}\r\n]
+TEXT|nested-list-in-field|{\r\n\t"m_Values": [\r\n\t\t1,\r\n\t\t2\r\n\t]\r\n}
+TEXT|primitive-byte-array|"AQIDBA=="
+TEXT|primitive-float|1.5
+TEXT|primitive-char|"A"

@@ -1577,6 +1577,11 @@ mod tests {
             assert!(json.starts_with('{'), "{json}");
             assert!(json.contains("\"m_Width\": 2"), "{json}");
             assert!(json.contains("\"m_Height\": 1"), "{json}");
+            // The reference's route sets `StringWriter.NewLine = "\n"` before walking the asset, so
+            // the body is the walker's tab-indented text with LF breaks - not compact JSON, and not
+            // the host's CRLF that the file export's `StreamWriter` default would produce.
+            assert!(json.contains("\n\t\"m_Width\": 2"), "{json}");
+            assert!(!json.contains('\r'), "{json}");
             // The inlined tab escapes the JSON for HTML, so the page carries the escaped
             // quotes while the route serves the raw ones.
             assert!(
