@@ -8919,3 +8919,61 @@ These results do not pass the first-phase gate. The reference .NET solution buil
   `!dependencies.is_empty()` because `Dependencies[0]` is always null.
 - Commands run locally: `rustfmt --edition 2021 --check` on the five changed Rust files - exit 0
   after the authoring pass. Build and test run on GitHub Actions, not this machine.
+
+## 2026-10-17 - The primary-content export runs end to end, and it found three gate rules
+
+- Scope: the wrap-up plan's item 3 for the primary-content path. The rows
+  `PRODUCT-PRIMARY-CONTENT-001` and `PRODUCT-PRIMARY-CONTENT-EXTRACTORS-001` each claimed in their own
+  evidence that "nothing yet calls any of the claim functions in production" and that
+  `/Export/PrimaryContent` "still returns 501". Both claims were stale - the route was wired
+  2026-10-16 and the driver calls `claim_for_extractor`/`export_primary_content` - but nothing proved
+  a *loaded* object reaches a producer and a file, so the rows could not be closed either way.
+- The new regression `the_primary_content_export_writes_one_file_per_producer_family`
+  (`src/web/routes.rs`) loads one fixture per producer family plus a class with no schema, POSTs the
+  real route with `Path`/`ConfirmDelete`, and reads every written file back: class 49 `TextAsset` as
+  `bytes` holding `print(1)`, class 28 `Texture2D` as a PNG whose 2x1 pixels the module's existing
+  `assert_png_pixels` inflates and compares, class 43 `Mesh` as a GLB whose declared length is its
+  own, class 128 `Font` as `otf` from its four-character code, and class 83 `AudioClip` as the clip's
+  own bytes under a non-empty extension. The class-7 fixture, whose payload cannot decode, is
+  asserted as `1 x the object's payload did not decode`; the run is asserted to fail no collection
+  and to report no unimplemented extractor.
+- **The regression found two rules that together refused every real 2019.4 texture.**
+  `object_facts_from_payload`'s class-28 arm read only the generated `m_ImageData` spelling, while the
+  release TypeTree names the field `image data` (the spelling `Texture2DView` already reads), so the
+  ported integrity rule saw no inline pixels. The driver separately treated the mere *presence* of
+  `m_StreamData` as "streamed" and reported the object undecidable; but `CheckAssetIntegrity` reads
+  the inline `ImageData` first and only then `Has_StreamData` + `StreamingInfo.IsSet` (a non-empty
+  path) + a resolvable resource. A present but empty stream is not a stream, so the gate was wrong for
+  every texture the reference exports, and the two bugs had been masking each other.
+- Port shape: the facts arm now reads `image data`, `m_ImageData` and `m_ImageData_C28`;
+  `texture2d_stream_is_set` answers `Has_StreamData` + `IsSet` (`None` when the field is absent or
+  unreadable), the driver passes that answer as the extractor's stream check, and only a genuinely
+  set `m_StreamData` stays reported (`the texture streams its pixels and the resource lookup is not
+  wired here`). The obsolete `has_field` helper and its "presence is the gate" test were removed
+  rather than left as a second, contradictory rule.
+- **The regression found a third rule, in the binary arms' reader.** `object_facts_from_payload` took
+  `m_Script` / `m_FontData` / `m_MovieData` through a helper that accepted only packed `Bytes` and
+  `StringBytes`, while the producers (`byte_array_field`, `font_data_bytes`) also accept an element
+  list. A `vector<UInt8>` field decodes as that element list until the array is large enough for the
+  decoder to compact it (over `max_array_elements`, over the allocation budget, or over 64 KiB of
+  expanded values), so a small `m_FontData` made the gate read empty data and *decline* a font whose
+  producer would have written it as `otf` - the gate and the producer disagreed about the payload. The
+  same held for the class-28 image-data length, which the integrity rule measures.
+- Port shape for the third rule: `BinaryAssetFacts` carries the **materialized** bytes, as the
+  reference's generated `byte[]` properties do, and the facts read them through the same
+  `byte_array_field` / `font_data_bytes` readers the producers use, so the two cannot disagree about
+  a shape. `byte_array_field` is now `pub` with that reuse documented, the image arm counts a field's
+  byte length across packed bytes, a string field and an element list without copying it, and a field
+  that is *present but unreadable* is reported as undecidable (`a binary arm's byte field is present
+  but is not readable as bytes on this path`) rather than silently treated as absent, which would look
+  exactly like the reference's own decline. The facts are no longer `Copy`, so the driver clones the
+  per-object facts as it walks the handler stack.
+- Commands run locally: `cargo check --locked --all-targets` (no warnings),
+  `cargo clippy --workspace --all-targets --locked -- -D warnings` (exit 0), `rustfmt --edition 2021
+  --check` on the three changed Rust files (exit 0), and `tools/parity-report.ps1` (409 rows, 29
+  non-verified, 0 duplicate, 0 malformed - the row *statuses* are unchanged; only the stale evidence
+  was corrected). The test suite runs on GitHub Actions, not this machine.
+- What remains unverified on this path: the hierarchy GLB through the driver needs a scene collection
+  in the committed fixtures (the pieces are tested, the composition is not), and the script producer,
+  the movie/video streamed ranges, the class-89/117/187/188 image classes and a genuinely streamed
+  `Texture2D` remain unimplemented or reported.

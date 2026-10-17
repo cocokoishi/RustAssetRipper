@@ -758,12 +758,16 @@ fn binary_plan(name: &str, extension: &str, bytes: Vec<u8>) -> PlannedResourceEx
     }
 }
 
-/// A byte-array field in either serialized shape: packed `Bytes`, or an `Array` of `U8`.
+/// A byte-array field in either serialized shape: packed `Bytes`, a `StringBytes` field, or an
+/// `Array` of `U8`.
 ///
-/// The two shapes are both real: a TypeTree-decoded payload keeps a byte array as `Bytes`, while a
-/// generated-class read may produce the element list. `resource_extensions::font_data_bytes` makes
-/// the same distinction for `m_FontData`, and reports a non-`U8` element rather than coercing it.
-fn byte_array_field(
+/// The shapes are all real: a `TypelessData` decodes as packed `Bytes`, a Unity string field as
+/// `StringBytes`, and a `vector`/`Array` of byte leaves as the element list until the array is large
+/// enough for the decoder to compact it. `resource_extensions::font_data_bytes` makes the same
+/// distinction for `m_FontData`, and reports a non-`U8` element rather than coercing it. The
+/// primary-content facts read their arms' fields through this too, so a claim gate and its producer
+/// cannot disagree about the shape.
+pub fn byte_array_field(
     root: &SerializedValue,
     name: &'static str,
 ) -> Result<Option<Vec<u8>>, ResourceWiringError> {

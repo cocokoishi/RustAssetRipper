@@ -38,6 +38,7 @@ use super::primary_extractors::{
     ScriptClaim, ScriptExtractorState,
 };
 use super::project_exporter::{class_satisfies_target, ObjectClassFacts};
+use super::resource_extensions::font_data_bytes;
 use crate::resources::vertex_data_blob::{EndianType, UnityVersion};
 use crate::serialized_file::object::SerializedValue;
 
@@ -235,8 +236,8 @@ pub fn json_content_document(value: &SerializedValue) -> String {
 /// Every field is a caller-supplied answer, because each one needs decoded asset data: whether a mesh
 /// is set, whether an image texture has intact bytes, which of the binary arms applies. Gathering
 /// them is the adapter's job; deciding from them is this module's.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PrimaryContentObjectFacts<'a> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PrimaryContentObjectFacts {
     /// `GlbModelExporter`: the kind of `asset.MainAsset`.
     pub model_main_asset: GlbModelMainAsset,
     /// `DeletedAssetsExporter`: `asset.MainAsset is DeletedAssetsInformation`.
@@ -259,7 +260,7 @@ pub struct PrimaryContentObjectFacts<'a> {
     /// `ScriptContentExtractor`: `asset is IMonoScript`.
     pub is_mono_script: bool,
     /// `BinaryAssetContentExtractor`: which of its four arms applies, if any.
-    pub binary: Option<BinaryAssetFacts<'a>>,
+    pub binary: Option<BinaryAssetFacts>,
 }
 
 /// `IContentExtractor.TryCreateCollection` for one handler in an object's stack.
@@ -278,7 +279,7 @@ pub struct PrimaryContentObjectFacts<'a> {
 /// exists at all.
 pub fn claim_for_extractor(
     registration: &PrimaryHandlerRegistration,
-    facts: PrimaryContentObjectFacts<'_>,
+    facts: PrimaryContentObjectFacts,
     script_state: &mut ScriptExtractorState,
 ) -> PrimaryContentClaim {
     if registration.is_empty_handler {
@@ -317,7 +318,9 @@ pub fn claim_for_extractor(
             .is_some(),
         ),
         "GlbTerrainExporter" => claimed(glb_asset_claim(GlbAssetFacts::Terrain).is_some()),
-        "BinaryAssetContentExtractor" => claimed(facts.binary.is_some_and(binary_asset_claims)),
+        "BinaryAssetContentExtractor" => {
+            claimed(facts.binary.as_ref().is_some_and(binary_asset_claims))
+        }
         "AudioContentExtractor" => claimed(facts.is_audio_clip),
         "TextureExporter" => claimed(facts.image_texture_intact),
         "ScriptContentExtractor" => match script_state.claim(facts.is_mono_script) {
@@ -366,9 +369,9 @@ pub enum MainAssetFacts {
 }
 
 /// The claim-dispatch facts for one object, or the reason they cannot be determined.
-pub enum PrimaryContentObjectFactsOutcome<'a> {
+pub enum PrimaryContentObjectFactsOutcome {
     /// The facts are determined, so [`claim_for_extractor`] can run.
-    Known(PrimaryContentObjectFacts<'a>),
+    Known(PrimaryContentObjectFacts),
     /// The object's extractor depends on a relation this path does not compute.
     ///
     /// This is deliberately not a decline. Declining sends the object to the JSON fallback, and
@@ -429,13 +432,13 @@ const IMAGE_CLASS_REASON: &str =
 /// texture has no `m_StreamData`, otherwise whether the streamed file resolved. It is a closure
 /// because the file lookup is the caller's, and it is passed straight to the already-ported
 /// [`image_texture_check_asset_integrity`] rather than restating that rule.
-pub fn object_facts_from_payload<'a>(
+pub fn object_facts_from_payload(
     class_id: i32,
-    root: &'a SerializedValue,
+    root: &SerializedValue,
     context: PrimaryContentObjectContext,
     main_asset: MainAssetFacts,
     stream_check: impl FnOnce() -> Option<bool>,
-) -> PrimaryContentObjectFactsOutcome<'a> {
+) -> PrimaryContentObjectFactsOutcome {
     use crate::export::res_wiring::{resource_export_family, ResourceExportFamily};
     use crate::resources::mesh::MeshView;
     use crate::resources::video_clip::VideoClipView;
@@ -505,7 +508,13 @@ pub fn object_facts_from_payload<'a>(
                     reason: IMAGE_CLASS_REASON,
                 };
             }
-            let image_data_len = bytes_field(root, "m_ImageData").map_or(0, <[u8]>::len);
+            // The real 2019.4 release tree names the field `image data`; the generated property is
+            // `m_ImageData`, and `Texture2DView` reads both, so this rule reads the same spellings
+            // rather than only the generated one.
+            let image_data_len = ["image data", "m_ImageData", "m_ImageData_C28"]
+                .into_iter()
+                .find_map(|name| bytes_field_len(root, name))
+                .unwrap_or(0);
             let has_stream = field(root, "m_StreamData").is_some();
             facts.image_texture_intact =
                 image_texture_check_asset_integrity(image_data_len, || {
@@ -532,27 +541,48 @@ pub fn object_facts_from_payload<'a>(
         }
         None => match class_id {
             TEXT_ASSET_CLASS_ID => {
-                facts.binary = Some(BinaryAssetFacts::TextAsset {
-                    script_data: bytes_field(root, "m_Script").unwrap_or(&[]),
-                });
+                let script_data = match binary_bytes(root, "m_Script") {
+                    Ok(data) => data,
+                    Err(reason) => {
+                        return PrimaryContentObjectFactsOutcome::Undecidable { reason };
+                    }
+                };
+                facts.binary = Some(BinaryAssetFacts::TextAsset { script_data });
             }
             FONT_CLASS_ID => {
                 facts.binary = Some(BinaryAssetFacts::Font {
-                    font_data: bytes_field(root, "m_FontData").unwrap_or(&[]),
+                    font_data: match font_data_bytes(root) {
+                        Ok(data) => data.unwrap_or_default(),
+                        Err(_) => {
+                            return PrimaryContentObjectFactsOutcome::Undecidable {
+                                reason: BINARY_DATA_REASON,
+                            }
+                        }
+                    },
                 });
             }
             MOVIE_TEXTURE_CLASS_ID => {
-                // `Has_MovieData` and non-emptiness are separate conditions in the source.
-                facts.binary = Some(BinaryAssetFacts::MovieTexture {
-                    movie_data: bytes_field(root, "m_MovieData"),
-                });
+                // `Has_MovieData` and non-emptiness are separate conditions in the source, so an
+                // absent field stays `None` rather than becoming an empty payload.
+                let movie_data =
+                    match crate::export::res_wiring::byte_array_field(root, "m_MovieData") {
+                        Ok(data) => data,
+                        Err(_) => {
+                            return PrimaryContentObjectFactsOutcome::Undecidable {
+                                reason: BINARY_DATA_REASON,
+                            }
+                        }
+                    };
+                facts.binary = Some(BinaryAssetFacts::MovieTexture { movie_data });
             }
             VIDEO_CLIP_CLASS_ID => {
                 facts.binary = Some(BinaryAssetFacts::VideoClip {
                     intact: VideoClipView::from_value(root)
                         .map(|view| view.check_integrity())
                         .unwrap_or(false),
-                    original_path: string_field(root, "m_OriginalPath").unwrap_or(""),
+                    original_path: string_field(root, "m_OriginalPath")
+                        .unwrap_or("")
+                        .to_owned(),
                 });
             }
             MONO_SCRIPT_CLASS_ID => facts.is_mono_script = true,
@@ -563,17 +593,42 @@ pub fn object_facts_from_payload<'a>(
     PrimaryContentObjectFactsOutcome::Known(facts)
 }
 
+/// The reason a binary arm's byte field is present but not readable as bytes.
+///
+/// Treating it as absent would look exactly like the reference's own decline, which is the silent
+/// degradation this port reports instead.
+const BINARY_DATA_REASON: &str =
+    "a binary arm's byte field is present but is not readable as bytes on this path";
+
+/// A binary arm's byte field, read the way the arm's producer reads it.
+///
+/// `byte_array_field` accepts packed bytes, a string field and an element list, because a
+/// `Array<UInt8>` decodes as elements until the array is large enough to be compacted. Reading only
+/// the packed form here would decline an asset whose producer would have exported it.
+fn binary_bytes(root: &SerializedValue, name: &'static str) -> Result<Vec<u8>, &'static str> {
+    match crate::export::res_wiring::byte_array_field(root, name) {
+        Ok(data) => Ok(data.unwrap_or_default()),
+        Err(_) => Err(BINARY_DATA_REASON),
+    }
+}
+
 /// A uniquely named field, following the `Base` chain that carries inherited asset fields.
 fn field<'a>(root: &'a SerializedValue, name: &'static str) -> Option<&'a SerializedValue> {
     root.unique_field_in_base_chain(name).ok().flatten()
 }
 
-/// A field's raw bytes, for the binary extractor's data arms.
-fn bytes_field<'a>(root: &'a SerializedValue, name: &'static str) -> Option<&'a [u8]> {
+/// A field's byte length, for the image texture integrity rule.
+///
+/// The three shapes are all real - packed `Bytes`, a `StringBytes` field, and the `Array` of byte
+/// leaves a small `vector<UInt8>` decodes as - so the rule counts whichever the payload carries
+/// rather than only the packed form. The length is taken without copying, since inline image data is
+/// usually the largest field in the object.
+fn bytes_field_len(root: &SerializedValue, name: &'static str) -> Option<usize> {
     match field(root, name) {
         Some(SerializedValue::Bytes(bytes)) | Some(SerializedValue::StringBytes(bytes)) => {
-            Some(bytes)
+            Some(bytes.len())
         }
+        Some(SerializedValue::Array(values)) => Some(values.len()),
         _ => None,
     }
 }
@@ -985,7 +1040,7 @@ mod tests {
     }
 
     /// A facts value with every fact absent, so each test states only what it is about.
-    fn no_facts() -> PrimaryContentObjectFacts<'static> {
+    fn no_facts() -> PrimaryContentObjectFacts {
         PrimaryContentObjectFacts {
             model_main_asset: GlbModelMainAsset::Other,
             main_asset_is_deleted_information: false,
@@ -1039,7 +1094,7 @@ mod tests {
     #[test]
     fn the_single_fact_extractors_follow_their_own_fact() {
         let mut script = ScriptExtractorState::new();
-        let mut claim = |extractor: &'static str, facts: PrimaryContentObjectFacts<'static>| {
+        let mut claim = |extractor: &'static str, facts: PrimaryContentObjectFacts| {
             claim_for_extractor(&registration(extractor, false), facts, &mut script)
         };
 
@@ -1175,12 +1230,12 @@ mod tests {
         );
         // The first MonoScript creates the script collection.
         assert_eq!(
-            claim_for_extractor(&registration, script_facts, &mut script),
+            claim_for_extractor(&registration, script_facts.clone(), &mut script),
             PrimaryContentClaim::Claimed
         );
         // Every later one claims into the shared empty collection.
         assert_eq!(
-            claim_for_extractor(&registration, script_facts, &mut script),
+            claim_for_extractor(&registration, script_facts.clone(), &mut script),
             PrimaryContentClaim::Empty
         );
         assert_eq!(
@@ -1197,7 +1252,9 @@ mod tests {
         let registration = registration("BinaryAssetContentExtractor", false);
 
         let with_data = PrimaryContentObjectFacts {
-            binary: Some(BinaryAssetFacts::TextAsset { script_data: b"x" }),
+            binary: Some(BinaryAssetFacts::TextAsset {
+                script_data: b"x".to_vec(),
+            }),
             ..no_facts()
         };
         assert_eq!(
@@ -1206,7 +1263,9 @@ mod tests {
         );
 
         let empty = PrimaryContentObjectFacts {
-            binary: Some(BinaryAssetFacts::TextAsset { script_data: b"" }),
+            binary: Some(BinaryAssetFacts::TextAsset {
+                script_data: Vec::new(),
+            }),
             ..no_facts()
         };
         assert_eq!(
@@ -1297,8 +1356,7 @@ mod tests {
         use crate::export::primary_export::PrimaryContentObjectFactsOutcome;
         use crate::serialized_file::object::SerializedValue;
 
-        // A macro rather than a closure: the facts borrow the payload, and a closure cannot be
-        // generic over the lifetime it returns.
+        // A macro rather than a closure: each arm states its own class id and payload inline.
         macro_rules! known {
             ($class_id:expr, $root:expr) => {
                 match object_facts_from_payload(
@@ -1370,23 +1428,61 @@ mod tests {
                 &payload(vec![("m_Script", SerializedValue::Bytes(vec![1, 2]))])
             ),
             Some(BinaryAssetFacts::TextAsset {
-                script_data: &[1, 2]
+                script_data: vec![1, 2]
             })
         );
         // A TextAsset with no script field is still a TextAsset arm, with empty data, so the gate
         // declines it rather than the class falling through.
         assert_eq!(
             binary!(49, &payload(vec![])),
-            Some(BinaryAssetFacts::TextAsset { script_data: &[] })
+            Some(BinaryAssetFacts::TextAsset {
+                script_data: Vec::new()
+            })
         );
         assert_eq!(
             binary!(
                 128,
                 &payload(vec![("m_FontData", SerializedValue::Bytes(vec![b'O']))])
             ),
-            Some(BinaryAssetFacts::Font { font_data: b"O" })
+            Some(BinaryAssetFacts::Font {
+                font_data: b"O".to_vec()
+            })
         );
-        // `Has_MovieData` and non-emptiness stay separate: absent is `None`, empty is `Some(&[])`.
+        // A `vector<UInt8>` stays structured until the array is large enough for the decoder to
+        // compact it, so the gate has to read an element list as well as packed bytes. A font whose
+        // data took that shape must not decline, which would hand it to the JSON fallback.
+        assert_eq!(
+            binary!(
+                128,
+                &payload(vec![(
+                    "m_FontData",
+                    SerializedValue::Array(vec![
+                        SerializedValue::U8(0x4F),
+                        SerializedValue::U8(0x54),
+                        SerializedValue::U8(0x54),
+                        SerializedValue::U8(0x4F),
+                    ])
+                )])
+            ),
+            Some(BinaryAssetFacts::Font {
+                font_data: b"OTTO".to_vec()
+            })
+        );
+        // The generated class's `m_Script` is a serialized string, so the packed-byte case above is
+        // not the only shape a real TextAsset reaches this arm with.
+        assert_eq!(
+            binary!(
+                49,
+                &payload(vec![(
+                    "m_Script",
+                    SerializedValue::StringBytes(b"print(1)".to_vec())
+                )])
+            ),
+            Some(BinaryAssetFacts::TextAsset {
+                script_data: b"print(1)".to_vec()
+            })
+        );
+        // `Has_MovieData` and non-emptiness stay separate: absent is `None`, empty is `Some(empty)`.
         assert_eq!(
             binary!(152, &payload(vec![])),
             Some(BinaryAssetFacts::MovieTexture { movie_data: None })
@@ -1397,7 +1493,7 @@ mod tests {
                 &payload(vec![("m_MovieData", SerializedValue::Bytes(vec![]))])
             ),
             Some(BinaryAssetFacts::MovieTexture {
-                movie_data: Some(&[])
+                movie_data: Some(Vec::new())
             })
         );
         // A video clip carries its original path, which the producer turns into the extension.
@@ -1411,7 +1507,7 @@ mod tests {
             ),
             Some(BinaryAssetFacts::VideoClip {
                 intact: false,
-                original_path: "clip.mp4"
+                original_path: "clip.mp4".to_owned()
             })
         );
     }
@@ -1425,7 +1521,7 @@ mod tests {
     fn the_main_asset_decides_the_model_classes_and_unknown_is_reported() {
         use crate::export::primary_export::PrimaryContentObjectFactsOutcome;
 
-        // Bound outside the closure: the facts borrow the payload.
+        // One payload reused across classes; the facts copy out what they need.
         let empty = payload(vec![]);
         let facts = |class_id: i32, main_asset: MainAssetFacts| match object_facts_from_payload(
             class_id,
@@ -1505,6 +1601,21 @@ mod tests {
         // Inline data wins and the stream check is never consulted.
         let inline = payload(vec![("m_ImageData", SerializedValue::Bytes(vec![1, 2, 3]))]);
         assert!(intact(&inline, None));
+        // The real release tree spells it `image data`, and the caller's stream answer must not
+        // override inline pixels either.
+        let release = payload(vec![("image data", SerializedValue::Bytes(vec![1, 2, 3]))]);
+        assert!(intact(&release, Some(false)));
+        // A texture whose inline pixels decoded as an element list is still intact: the rule counts
+        // the field's own length rather than requiring the packed representation.
+        let structured = payload(vec![(
+            "m_ImageData",
+            SerializedValue::Array(vec![
+                SerializedValue::U8(1),
+                SerializedValue::U8(2),
+                SerializedValue::U8(3),
+            ]),
+        )]);
+        assert!(intact(&structured, Some(false)));
         // No data and no stream declines.
         let empty = payload(vec![]);
         assert!(!intact(&empty, None));

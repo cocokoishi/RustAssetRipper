@@ -1,6 +1,42 @@
 # RustAssetRipper hand-off — 2026-10-17
 
-## Latest current checkpoint - 2026-10-17 (the collection page lists its dependencies)
+## Latest current checkpoint - 2026-10-17 (the primary-content export is verified end to end)
+
+- **The primary-content export has an end-to-end regression.**
+  `the_primary_content_export_writes_one_file_per_producer_family` (`src/web/routes.rs`) loads one
+  fixture per producer family, POSTs `/Export/PrimaryContent`, and reads the written bytes back:
+  TextAsset `.bytes` holding `print(1)`, Texture2D PNG with its 2x1 pixels asserted, Mesh `.glb`,
+  Font `.otf`, the AudioClip's own bytes, with the undecodable class-7 object reported by reason and
+  no collection failing. Until now the loop had only ever run with caller-supplied payloads.
+- **It found three gate rules that were masking each other, all now fixed.**
+  `object_facts_from_payload` read only the generated `m_ImageData` while the release tree spells the
+  class-28 field `image data`, so the ported integrity rule saw no inline pixels; and the driver
+  refused every texture whose payload merely *had* `m_StreamData`, because it used the field's
+  presence instead of `Has_StreamData` + `StreamingInfo.IsSet`. `CheckAssetIntegrity` reads the
+  inline `ImageData` first and only then the stream, so `texture2d_stream_is_set` now answers those
+  two gates, an unset stream answers `Some(false)`, and only a genuinely set one is reported. The
+  dead `has_field` helper and its "presence is the gate" test were removed rather than kept as a
+  second rule. The third rule is the binary arms: their facts read `m_Script`/`m_FontData`/`m_MovieData`
+  through a packed-bytes-only helper while the producers also accept an element list, and a small
+  `m_FontData` `vector<UInt8>` decodes as exactly that list - so the gate *declined* a font the
+  producer would have written as `otf`. `BinaryAssetFacts` now carries the bytes materialized through
+  the producers' own `byte_array_field`/`font_data_bytes` readers, a field that is present but
+  unreadable is reported instead of looking like a decline, and the image rule counts a field's byte
+  length across all three shapes without copying it.
+- **The two rows' stale claims were corrected** (`PRODUCT-PRIMARY-CONTENT-001`,
+  `PRODUCT-PRIMARY-CONTENT-EXTRACTORS-001`): both said no production caller existed and that
+  `/Export/PrimaryContent` still answered 501. Their statuses stay `已实现但未验证`, because the
+  script producer, the movie/video streamed ranges, the image classes other than 28 and a genuinely
+  streamed `Texture2D` still have no producer on this path; the evidence now says exactly that.
+- Verified by GitHub Actions (the local machine ran only `cargo check`, `clippy`, `rustfmt` and the
+  ledger script): the `Rust CI` run for this commit must be green before the unit counts.
+- **Next:** still the wrap-up plan - the `EXP-GLB-*` hierarchy path through the driver (needs a
+  scene-collection fixture), the movie/video streamed ranges (the resolver this unit reused already
+  exists as `resolve_and_read_streamed_resource_range` in `main_cli_export.rs`), then
+  `RES-TEXTURE-001`/`EXPORT-UNITY-001`, `PRODUCT-CONFIG-001`'s data-set subsystem, and finally the
+  22-sample local replay with the `docs/acceptance-corpus.md` refresh.
+
+## Previous checkpoint - 2026-10-17 (the collection page lists its dependencies)
 
 - **`PRODUCT-GUI-001`'s collection dependency section landed.** The reference's `Collections/ViewPage`
   renders `Localization.AssetTabDependencies` over a `File ID`/`Name` table when

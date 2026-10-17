@@ -1257,6 +1257,171 @@ mod tests {
         assert_eq!(status(&mut state, "POST", "/Privacy"), 405);
     }
 
+    /// `PRODUCT-PRIMARY-CONTENT-001`: the primary-content export, driven through its own route,
+    /// writes one file per producer family and reports the object it cannot decide.
+    ///
+    /// The library tests drive the export loop with caller-supplied payloads and the route test
+    /// above only asserts the redirect, so nothing had shown a *loaded* object reaching a producer
+    /// and a file on disk. This loads one fixture per extractor family plus a class with no schema,
+    /// posts `/Export/PrimaryContent`, and reads the bytes back.
+    #[test]
+    fn the_primary_content_export_writes_one_file_per_producer_family() {
+        use crate::tests::{
+            make_font_file, make_generated_audio_clip_file, make_production_mesh_file,
+            make_reference_texture_file,
+        };
+
+        /// The committed Ogg fixture the audio decoder tests already use.
+        const AUDIO_CLIP_OGG_BYTES: &[u8] = include_bytes!("../export/ogg_to_wav_test_fixture.ogg");
+
+        let fixture_hex = |case: &str| {
+            assetripper::processing::asset_factory::PROBE_FIXTURE
+                .lines()
+                .find_map(|line| line.strip_prefix(&format!("SF_HEX|{case}|")))
+                .unwrap_or_else(|| panic!("the source-factory fixture includes {case}"))
+        };
+        let decode_hex = |hex: &str| {
+            hex.as_bytes()
+                .chunks_exact(2)
+                .map(|pair| {
+                    u8::from_str_radix(std::str::from_utf8(pair).expect("hex is ASCII"), 16)
+                        .expect("hex is valid")
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let directory =
+            PathBuf::from("target/primary-content-e2e").join(std::process::id().to_string());
+        std::fs::create_dir_all(&directory).expect("the probe directory is created");
+
+        // One asset per producer family, each fixture already exercised by the asset pages.
+        let text_input = directory.join("z-textasset.assets");
+        std::fs::write(&text_input, decode_hex(fixture_hex("textasset_notree")))
+            .expect("the no-TypeTree TextAsset is written");
+        // A class with no schema and no TypeTree: its payload cannot decode, so the run has to
+        // report it instead of handing a producer a guess.
+        let unknown_input = directory.join("z-unknown.assets");
+        std::fs::write(&unknown_input, decode_hex(fixture_hex("unknown_class")))
+            .expect("the unknown-class asset is written");
+        // The production 2019.4 tree carries `m_StreamData` even when the pixels are inline, which
+        // is the case this fixture pins.
+        let texture_input = directory.join("z-texture.assets");
+        std::fs::write(
+            &texture_input,
+            make_reference_texture_file(2, 1, &[10, 20, 30, 255, 40, 50, 60, 255]),
+        )
+        .expect("the texture asset is written");
+        let audio_input = directory.join("z-audio.assets");
+        std::fs::write(
+            &audio_input,
+            make_generated_audio_clip_file(AUDIO_CLIP_OGG_BYTES),
+        )
+        .expect("the audio asset is written");
+        let font_input = directory.join("z-font.assets");
+        std::fs::write(&font_input, make_font_file(b"OTTOfont-bytes"))
+            .expect("the font is written");
+        let mesh_input = directory.join("z-mesh.assets");
+        std::fs::write(&mesh_input, make_production_mesh_file()).expect("the mesh is written");
+
+        let _layouts = crate::SourceFactoryLayoutGuard::use_source_factory();
+        let mut state = state();
+        state
+            .load(&[
+                text_input.to_string_lossy().into_owned(),
+                unknown_input.to_string_lossy().into_owned(),
+                texture_input.to_string_lossy().into_owned(),
+                audio_input.to_string_lossy().into_owned(),
+                font_input.to_string_lossy().into_owned(),
+                mesh_input.to_string_lossy().into_owned(),
+            ])
+            .expect("the probe inputs load");
+        assert!(state.is_loaded());
+
+        // The product's own route, not a bypass of it; `/`-separated form values reach the same
+        // `Path` field the page submits.
+        let export_root = directory.join("primary-content");
+        let submitted = export_root.to_string_lossy().replace('\\', "/");
+        let response = dispatch(
+            &mut state,
+            &request_with_body(
+                "/Export/PrimaryContent",
+                &format!("Path={submitted}&ConfirmDelete=true"),
+            ),
+        );
+        assert_eq!(response.status(), 302);
+
+        // The run's own report, through the state's log, is the product's honesty surface.
+        let log = state.take_log().join("\n");
+        assert!(log.contains("Wrote 5 primary-content files to"), "{log}");
+        assert!(log.contains("1 objects could not be decided"), "{log}");
+        assert!(
+            log.contains("1 x the object's payload did not decode"),
+            "{log}"
+        );
+        assert!(!log.contains("collections failed:"), "{log}");
+        assert!(!log.contains("no producer for their extractor"), "{log}");
+
+        let mut files: Vec<(PathBuf, Vec<u8>)> = Vec::new();
+        collect_export_files(&export_root, &mut files);
+        assert_eq!(files.len(), 5, "{log}");
+        let only = |extension: &str| -> &[u8] {
+            let mut matches = files
+                .iter()
+                .filter(|(path, _)| path.extension().is_some_and(|value| value == extension));
+            let (path, bytes) = matches
+                .next()
+                .unwrap_or_else(|| panic!("no .{extension} file was written; the run said: {log}"));
+            assert!(
+                matches.next().is_none(),
+                "more than one .{extension}: {path:?}"
+            );
+            bytes
+        };
+
+        // Class 49 `TextAsset`: `BinaryAssetContentExtractor` writes `m_Script` as `.bytes`.
+        assert_eq!(only("bytes"), b"print(1)");
+        // Class 28 `Texture2D`: `TextureExporter` writes the configured format - PNG by default -
+        // and the pixels survive the primary-content path, not only the image route.
+        assert_png_pixels(only("png"), 2, 1, &[10, 20, 30, 255, 40, 50, 60, 255]);
+        // Class 43 `Mesh`: `GlbMeshExporter` writes a GLB whose declared length is its own.
+        let glb = only("glb");
+        assert_eq!(&glb[..4], b"glTF");
+        assert_eq!(u32::from_le_bytes(glb[4..8].try_into().unwrap()), 2);
+        assert_eq!(
+            u32::from_le_bytes(glb[8..12].try_into().unwrap()) as usize,
+            glb.len()
+        );
+        // Class 128 `Font`: the extension comes from the payload's own four-character code.
+        assert_eq!(only("otf"), b"OTTOfont-bytes");
+        // Class 83 `AudioClip`: the native bytes pass through unchanged, named from the clip's FMOD
+        // sound type. The type table is asserted by shape rather than by value, as the audio route
+        // test does.
+        let audio = files
+            .iter()
+            .find(|(_, bytes)| bytes.as_slice() == AUDIO_CLIP_OGG_BYTES)
+            .expect("the audio clip's bytes were written");
+        assert!(
+            audio.0.extension().is_some_and(|value| !value.is_empty()),
+            "{:?}",
+            audio.0
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// Every file under an export root, in no particular order.
+    fn collect_export_files(root: &std::path::Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
+        for entry in std::fs::read_dir(root).expect("the export root is readable") {
+            let path = entry.expect("the entry is readable").path();
+            if path.is_dir() {
+                collect_export_files(&path, out);
+            } else {
+                let bytes = std::fs::read(&path).expect("the exported file is readable");
+                out.push((path, bytes));
+            }
+        }
+    }
+
     /// Load the committed nested-bundle fixture through the real pipeline and browse it.
     ///
     /// The fixture is a synthetic source-runtime UnityFS bundle (3,323 bytes, two
@@ -1355,8 +1520,9 @@ mod tests {
             make_reference_texture_file(2, 1, &[10, 20, 30, 255, 40, 50, 60, 255]),
         )
         .expect("the texture asset is written");
-        // An AudioClip carrying inline Ogg payload with no sound type, so the audio tab and        // route exercise `AudioClipDecoder.TryDecode` on real Vorbis bytes and the WAV
-        // transcode, rather than only the class-ID test.
+        // An AudioClip carrying inline Ogg payload, so the audio tab and route exercise
+        // `AudioClipDecoder.TryDecode` on real Vorbis bytes and the WAV transcode, rather than only
+        // the class-ID test.
         let audio_input = directory.join("z-audio.assets");
         std::fs::write(
             &audio_input,

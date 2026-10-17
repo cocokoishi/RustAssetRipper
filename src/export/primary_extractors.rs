@@ -43,20 +43,23 @@ pub const FONT_FALLBACK_EXTENSION: &str = "ttf";
 /// One variant per arm of the reference's type switch. Each carries only what the corresponding
 /// collection needs, so a caller cannot accidentally supply a payload the reference would not have
 /// looked at.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum BinaryAssetFacts<'a> {
+///
+/// The bytes are **materialized**, as the reference's generated `byte[]` properties are: a
+/// serialized `Array<UInt8>` decodes as an element list while a `TypelessData` decodes as packed
+/// bytes, and a gate that read only the packed form would decline a font whose data is small enough
+/// to stay structured. The count is what the four gates test, so carrying the data rather than a
+/// length keeps the extension rules reading it the way the reference does.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BinaryAssetFacts {
     /// `ITextAsset`, with `Script_C49.Data`.
-    TextAsset { script_data: &'a [u8] },
+    TextAsset { script_data: Vec<u8> },
     /// `IFont`, with `FontData`.
-    Font { font_data: &'a [u8] },
+    Font { font_data: Vec<u8> },
     /// `IMovieTexture`. `movie_data` is `None` when `Has_MovieData_C152()` is false, which the
     /// reference distinguishes from a present-but-empty payload.
-    MovieTexture { movie_data: Option<&'a [u8]> },
+    MovieTexture { movie_data: Option<Vec<u8>> },
     /// `IVideoClip`. `intact` is `CheckIntegrity()`, the reference's gate for this arm.
-    VideoClip {
-        intact: bool,
-        original_path: &'a str,
-    },
+    VideoClip { intact: bool, original_path: String },
 }
 
 /// What `BinaryAssetContentExtractor` decided for one asset.
@@ -81,7 +84,7 @@ impl BinaryAssetCollection {
 /// of admitting unconditionally. `VideoClip` needs the platform because its extension is taken from
 /// the serialized path with `Path.GetExtension` semantics.
 pub fn binary_asset_claim(
-    facts: BinaryAssetFacts<'_>,
+    facts: &BinaryAssetFacts,
     platform: HostPathPlatform,
 ) -> Option<BinaryAssetCollection> {
     match facts {
@@ -98,6 +101,7 @@ pub fn binary_asset_claim(
         // and a non-empty payload, so an absent payload declines even though an empty one would
         // too - the two conditions are separate in the source and are kept separate here.
         BinaryAssetFacts::MovieTexture { movie_data } => movie_data
+            .as_ref()
             .filter(|data| !data.is_empty())
             .map(|_| BinaryAssetCollection::new(MOVIE_TEXTURE_EXTENSION)),
         // `VideoClipExportCollection.Create`: gated on integrity, not on a length.
@@ -115,7 +119,7 @@ pub fn binary_asset_claim(
 /// needs the real first four bytes and a video clip's needs the original path. This **delegates** to
 /// [`binary_asset_claim`] with whatever data the caller has rather than restating the four gates, so
 /// the claim and the producer cannot drift apart. The extension it computes on the way is discarded.
-pub fn binary_asset_claims(facts: BinaryAssetFacts<'_>) -> bool {
+pub fn binary_asset_claims(facts: &BinaryAssetFacts) -> bool {
     binary_asset_claim(facts, HostPathPlatform::host()).is_some()
 }
 
@@ -296,7 +300,7 @@ mod tests {
 
     const WINDOWS: HostPathPlatform = HostPathPlatform::Windows;
 
-    fn extension_of(facts: BinaryAssetFacts<'_>) -> Option<String> {
+    fn extension_of(facts: &BinaryAssetFacts) -> Option<String> {
         binary_asset_claim(facts, WINDOWS).map(|collection| collection.extension)
     }
 
@@ -304,42 +308,46 @@ mod tests {
     #[test]
     fn binary_arms_require_a_non_empty_payload() {
         assert_eq!(
-            extension_of(BinaryAssetFacts::TextAsset {
-                script_data: b"data"
+            extension_of(&BinaryAssetFacts::TextAsset {
+                script_data: b"data".to_vec()
             }),
             Some(TEXT_ASSET_EXTENSION.to_owned())
         );
         assert_eq!(
-            extension_of(BinaryAssetFacts::TextAsset { script_data: b"" }),
+            extension_of(&BinaryAssetFacts::TextAsset {
+                script_data: Vec::new()
+            }),
             None,
             "an empty TextAsset declines so the stack continues"
         );
 
         assert_eq!(
-            extension_of(BinaryAssetFacts::Font {
-                font_data: b"\x00\x01\x00\x00rest"
+            extension_of(&BinaryAssetFacts::Font {
+                font_data: b"\x00\x01\x00\x00rest".to_vec()
             }),
             Some("ttf".to_owned())
         );
         assert_eq!(
-            extension_of(BinaryAssetFacts::Font { font_data: b"" }),
+            extension_of(&BinaryAssetFacts::Font {
+                font_data: Vec::new()
+            }),
             None
         );
 
         assert_eq!(
-            extension_of(BinaryAssetFacts::MovieTexture {
-                movie_data: Some(b"ogv")
+            extension_of(&BinaryAssetFacts::MovieTexture {
+                movie_data: Some(b"ogv".to_vec())
             }),
             Some(MOVIE_TEXTURE_EXTENSION.to_owned())
         );
         // The two conditions are separate in the source: absent declines, and so does empty.
         assert_eq!(
-            extension_of(BinaryAssetFacts::MovieTexture { movie_data: None }),
+            extension_of(&BinaryAssetFacts::MovieTexture { movie_data: None }),
             None
         );
         assert_eq!(
-            extension_of(BinaryAssetFacts::MovieTexture {
-                movie_data: Some(b"")
+            extension_of(&BinaryAssetFacts::MovieTexture {
+                movie_data: Some(Vec::new())
             }),
             None
         );
@@ -347,16 +355,16 @@ mod tests {
         // A VideoClip with intact resources is admitted regardless of any length, and one without
         // them declines even when its path looks like a video.
         assert_eq!(
-            extension_of(BinaryAssetFacts::VideoClip {
+            extension_of(&BinaryAssetFacts::VideoClip {
                 intact: true,
-                original_path: "clip.mp4"
+                original_path: "clip.mp4".to_owned()
             }),
             Some("mp4".to_owned())
         );
         assert_eq!(
-            extension_of(BinaryAssetFacts::VideoClip {
+            extension_of(&BinaryAssetFacts::VideoClip {
                 intact: false,
-                original_path: "clip.mp4"
+                original_path: "clip.mp4".to_owned()
             }),
             None
         );

@@ -140,7 +140,7 @@ pub(super) fn export_loaded_primary_content<W: io::Write>(
     let mut names: Vec<String> = Vec::with_capacity(objects.len());
     let mut members: Vec<Vec<u64>> = Vec::with_capacity(objects.len());
     let mut entries: HashMap<u64, ObjectEntry> = HashMap::new();
-    let mut facts_by_identity: HashMap<u64, PrimaryContentObjectFacts<'_>> = HashMap::new();
+    let mut facts_by_identity: HashMap<u64, PrimaryContentObjectFacts> = HashMap::new();
     let mut payloads: HashMap<u64, &SerializedValue> = HashMap::new();
     let mut undecidable: Vec<UndecidableObject> = Vec::new();
 
@@ -190,16 +190,27 @@ pub(super) fn export_loaded_primary_content<W: io::Write>(
             continue;
         };
 
-        // A streamed texture's integrity depends on resolving `m_StreamData` against the resource
-        // files, which this path does not do yet. Reporting it is the honest alternative to guessing:
-        // guessing "intact" writes pixels from an unresolved stream, and guessing "not intact" hands
-        // the texture to the JSON fallback.
-        if class_id == TEXTURE2D_CLASS_ID && has_field(&payload.root, "m_StreamData") {
-            undecidable.push(UndecidableObject {
-                name: best_name(&named_name, class_id, None),
-                reason: "the texture streams its pixels and the resource lookup is not wired here",
-            });
-            continue;
+        // `Texture2DExtensions.CheckAssetIntegrity` - and its `ImageTextureExtensions` twin - reads
+        // the inline `ImageData` first and only consults `m_StreamData` when there is none:
+        // `Has_StreamData` plus `StreamingInfo.IsSet` plus a resolvable resource. `m_StreamData` is
+        // present in every 2019.4-and-later tree, so reading its mere presence as "streamed" refused
+        // textures whose pixels are inline; the order inside the rule is what decides. An unset
+        // stream fails the check outright, and a set one needs the resource lookup this path does
+        // not perform yet, so only that case is reported.
+        let mut texture_stream: Option<bool> = None;
+        if class_id == TEXTURE2D_CLASS_ID {
+            if let Some(is_set) = texture2d_stream_is_set(&payload.root) {
+                if is_set {
+                    undecidable.push(UndecidableObject {
+                        name: best_name(&named_name, class_id, None),
+                        reason: "the texture streams its pixels and the resource lookup is not wired here",
+                    });
+                    continue;
+                }
+                // Present with an empty path: `CheckIntegrity` answers false without any lookup, so
+                // the texture is not intact and the stack continues to the JSON fallback.
+                texture_stream = Some(false);
+            }
         }
 
         let context = PrimaryContentObjectContext { version, endian };
@@ -207,7 +218,9 @@ pub(super) fn export_loaded_primary_content<W: io::Write>(
             .get(&identity)
             .copied()
             .unwrap_or(MainAssetFacts::NotAHierarchy);
-        match object_facts_from_payload(class_id, &payload.root, context, main_asset, || None) {
+        match object_facts_from_payload(class_id, &payload.root, context, main_asset, || {
+            texture_stream
+        }) {
             PrimaryContentObjectFactsOutcome::Known(facts) => {
                 names.push(best_name(&named_name, class_id, None));
                 // A single-asset collection claims only its primary. The hierarchy collections,
@@ -268,7 +281,7 @@ pub(super) fn export_loaded_primary_content<W: io::Write>(
         |registration, object| {
             let facts = facts_by_identity
                 .get(&object.identity)
-                .copied()
+                .cloned()
                 .unwrap_or_else(empty_facts);
             claim_for_extractor(registration, facts, &mut script_state)
         },
@@ -481,7 +494,7 @@ fn produced(
 }
 
 /// Facts for an object the driver decided against; unreachable in a well-formed run.
-fn empty_facts<'a>() -> PrimaryContentObjectFacts<'a> {
+fn empty_facts() -> PrimaryContentObjectFacts {
     PrimaryContentObjectFacts {
         model_main_asset: assetripper::export::primary_extractors::GlbModelMainAsset::Other,
         main_asset_is_deleted_information: false,
@@ -574,10 +587,21 @@ fn object_name(root: &SerializedValue) -> Option<String> {
     }
 }
 
-/// Whether a field is present at all, which is what `Has_StreamData` asks.
-fn has_field(root: &SerializedValue, name: &str) -> bool {
-    root.struct_fields()
-        .is_some_and(|fields| fields.iter().any(|field| field.name == name))
+/// Whether a class-28 `m_StreamData` is set, or `None` when the payload has no readable one.
+///
+/// `Has_StreamData` and `StreamingInfoExtensions.IsSet` (a non-empty `path`) are the reference's two
+/// gates, so they are read from the payload rather than through a decoded view, which demands more
+/// fields than either gate does.
+fn texture2d_stream_is_set(root: &SerializedValue) -> Option<bool> {
+    let field = root
+        .struct_fields()?
+        .iter()
+        .find(|field| field.name == "m_StreamData")?;
+    Some(
+        assetripper::resource::extract_streamed_resource_info(&field.value)
+            .ok()?
+            .is_set(),
+    )
 }
 
 /// `AssetBase.GetBestName()`: the name, or the class name when the asset has none.
@@ -763,7 +787,7 @@ fn main_asset_classification(
 
 #[cfg(test)]
 mod tests {
-    use super::{best_name, has_field, object_identity, object_name, RunFileSystem};
+    use super::{best_name, object_identity, object_name, texture2d_stream_is_set, RunFileSystem};
     use assetripper::export::asset_path::ExportFileSystem;
     use assetripper::serialized_file::object::{SerializedFieldValue, SerializedValue};
 
@@ -822,14 +846,42 @@ mod tests {
         assert_eq!(best_name("", 28, None), "Texture2D");
     }
 
-    /// `Has_StreamData` asks whether the field is there, not whether it is meaningful.
+    /// `Has_StreamData` asks whether the field is there; `IsSet` asks whether it names a resource.
     #[test]
-    fn the_stream_field_is_detected_by_presence() {
-        assert!(has_field(
-            &payload(vec![("m_StreamData", SerializedValue::Struct(vec![]))]),
-            "m_StreamData"
-        ));
-        assert!(!has_field(&payload(vec![]), "m_StreamData"));
+    fn a_stream_field_is_set_only_when_it_names_a_resource() {
+        let stream = |path: &[u8]| {
+            SerializedValue::Struct(vec![
+                SerializedFieldValue {
+                    name: "path".to_owned(),
+                    value: SerializedValue::StringBytes(path.to_vec()),
+                },
+                SerializedFieldValue {
+                    name: "offset".to_owned(),
+                    value: SerializedValue::U32(0),
+                },
+                SerializedFieldValue {
+                    name: "size".to_owned(),
+                    value: SerializedValue::U32(4),
+                },
+            ])
+        };
+        // The field is present in every 2019.4-and-later tree; only a non-empty path makes it a
+        // stream, which is what keeps a texture with inline pixels on the integrity rule's first arm.
+        assert_eq!(
+            texture2d_stream_is_set(&payload(vec![("m_StreamData", stream(b""))])),
+            Some(false)
+        );
+        assert_eq!(
+            texture2d_stream_is_set(&payload(vec![("m_StreamData", stream(b"archive.resS"))])),
+            Some(true)
+        );
+        // An absent field and a field that is not a streaming struct are both unanswered rather than
+        // set, so neither can be mistaken for a stream.
+        assert_eq!(texture2d_stream_is_set(&payload(vec![])), None);
+        assert_eq!(
+            texture2d_stream_is_set(&payload(vec![("m_StreamData", SerializedValue::I32(0))])),
+            None
+        );
     }
 
     /// The probe reflects the run's own writes, which is what the collision rules depend on.
