@@ -23,6 +23,7 @@
 
 use super::asset_path::HostPathPlatform;
 use super::resource_extensions::{font_extension, video_export_extension};
+use super::settings::ImageExportFormat;
 
 /// `TextAssetExportCollection.ExportExtension`.
 pub const TEXT_ASSET_EXTENSION: &str = "bytes";
@@ -395,5 +396,195 @@ mod tests {
             video_export_extension("C:\\dir.d\\x", WINDOWS),
             VIDEO_CLIP_FALLBACK_EXTENSION
         );
+    }
+}
+
+/// `ImageTextureExtensions.CheckAssetIntegrity`: an image texture has bytes somewhere.
+///
+/// Inline `ImageData` wins outright. Otherwise the texture needs an `m_StreamData` descriptor *and*
+/// that descriptor must pass its collection check - which is why the check is a closure rather than a
+/// value: the source only consults the collection when there is no inline data, and the caller owns
+/// the file lookup that answers it.
+///
+/// The closure returns `None` when `Has_StreamData_C189()` is false, and `Some(result)` otherwise.
+/// Returning a plain `bool` here instead would force the caller to perform the streamed-file lookup
+/// even for a texture whose bytes are already in memory.
+pub fn image_texture_check_asset_integrity(
+    image_data_len: usize,
+    stream_check: impl FnOnce() -> Option<bool>,
+) -> bool {
+    if image_data_len > 0 {
+        return true;
+    }
+    stream_check() == Some(true)
+}
+
+/// The collection `AudioContentExtractor` admits.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AudioClipCollection {
+    /// The extension the decoder reported, which becomes the export extension.
+    pub extension: String,
+}
+
+/// `AudioExportCollection.TryCreate`: decode, then require the decoded bytes to be non-empty.
+///
+/// `decoded` is the outcome of `AudioClipDecoder.TryDecode` - `Some((extension, byte length))` when
+/// it succeeded. Both gates matter and the source treats them as separate branches with their own
+/// warnings: a clip whose decode fails and one that decodes to nothing are different failures, but
+/// both decline so that a later handler can claim the asset.
+///
+/// The source decodes twice, once here and once in `ExportInner`, to avoid holding the decoded bytes;
+/// only the decision is ported, so the caller supplies the first decode's result.
+pub fn audio_clip_claim(decoded: Option<(&str, usize)>) -> Option<AudioClipCollection> {
+    let (extension, data_len) = decoded?;
+    if data_len == 0 {
+        return None;
+    }
+    Some(AudioClipCollection {
+        extension: extension.to_owned(),
+    })
+}
+
+/// What `ScriptContentExtractor` did with a MonoScript.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScriptClaim {
+    /// The first MonoScript creates the script collection, which emits the assemblies, the
+    /// decompiled sources and the solution file.
+    ScriptCollection,
+    /// Every later MonoScript claims into the shared empty collection instead, so the scripts are
+    /// not written once per script.
+    EmptyCollection,
+}
+
+/// `ScriptContentExtractor`'s one-shot claim flag.
+///
+/// The flag is the only state in the source's extractor, and its exact rule is easy to get wrong: it
+/// is cleared **only** when a MonoScript is claimed. A non-MonoScript returns `false` and leaves the
+/// flag set, so the first MonoScript that reaches this extractor creates the collection no matter how
+/// many other assets passed through it first. Clearing the flag on every call - the reading that
+/// "the first asset wins" suggests - would have made the script export depend on registration order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScriptExtractorState {
+    first: bool,
+}
+
+impl ScriptExtractorState {
+    /// A fresh extractor, whose first MonoScript creates the collection.
+    pub const fn new() -> Self {
+        Self { first: true }
+    }
+
+    /// `TryCreateCollection`. `None` means the extractor declines and the stack continues.
+    pub fn claim(&mut self, is_mono_script: bool) -> Option<ScriptClaim> {
+        if !is_mono_script {
+            return None;
+        }
+        let claim = if self.first {
+            ScriptClaim::ScriptCollection
+        } else {
+            ScriptClaim::EmptyCollection
+        };
+        self.first = false;
+        Some(claim)
+    }
+}
+
+impl Default for ScriptExtractorState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// `DeletedAssetsExporter.TryCreateCollection`.
+///
+/// The caller answers `asset.MainAsset is DeletedAssetsInformation`. The collection it builds
+/// reports `Exportable => false`, so the claim exists to keep the deleted assets grouped with their
+/// information object rather than to write files - which is why this is a separate extractor from
+/// the Unity project pipeline's deleted-assets exporter even though the predicate is the same.
+pub const fn deleted_assets_claim(main_asset_is_deleted_information: bool) -> bool {
+    main_asset_is_deleted_information
+}
+
+/// The extension `TerrainHeatmapExportCollection` reports: the configured image format's.
+///
+/// `TerrainHeatmapExporter` itself claims **every** `ITerrainData` with no condition, so there is no
+/// gate to port; what is worth recording is that the heatmap and the GLB terrain extractors accept
+/// exactly the same set of assets, and only the handler order decides which one runs.
+pub fn terrain_heatmap_extension(format: ImageExportFormat) -> &'static str {
+    format.file_extension()
+}
+
+#[cfg(test)]
+mod remaining_extractor_tests {
+    use super::{
+        audio_clip_claim, deleted_assets_claim, image_texture_check_asset_integrity,
+        terrain_heatmap_extension, ScriptClaim, ScriptExtractorState,
+    };
+    use crate::export::settings::ImageExportFormat;
+
+    /// Inline data wins and the streamed lookup is not consulted.
+    #[test]
+    fn texture_integrity_prefers_inline_data_and_skips_the_lookup() {
+        assert!(image_texture_check_asset_integrity(4, || panic!(
+            "inline data must not trigger the streamed lookup"
+        )));
+
+        // No inline data: the descriptor decides.
+        assert!(image_texture_check_asset_integrity(0, || Some(true)));
+        assert!(!image_texture_check_asset_integrity(0, || Some(false)));
+        // `None` is the "no m_StreamData at all" answer, which declines.
+        assert!(!image_texture_check_asset_integrity(0, || None));
+    }
+
+    /// Both audio gates decline, and they decline for different reasons.
+    #[test]
+    fn audio_requires_a_successful_decode_of_non_empty_data() {
+        assert_eq!(
+            audio_clip_claim(Some(("ogg", 128))),
+            Some(super::AudioClipCollection {
+                extension: "ogg".to_owned()
+            })
+        );
+        assert_eq!(
+            audio_clip_claim(Some(("wav", 0))),
+            None,
+            "a decode to nothing declines"
+        );
+        assert_eq!(audio_clip_claim(None), None, "a failed decode declines");
+    }
+
+    /// The script flag is consumed by a MonoScript and by nothing else.
+    #[test]
+    fn script_flag_is_consumed_only_by_a_mono_script() {
+        let mut state = ScriptExtractorState::default();
+        // Assets that are not MonoScripts decline and leave the flag alone.
+        for _ in 0..3 {
+            assert_eq!(state.claim(false), None);
+        }
+        // So the first MonoScript, however late, still creates the collection.
+        assert_eq!(state.claim(true), Some(ScriptClaim::ScriptCollection));
+        assert_eq!(state.claim(true), Some(ScriptClaim::EmptyCollection));
+        assert_eq!(state.claim(true), Some(ScriptClaim::EmptyCollection));
+        // And a decline after the flag is spent still declines.
+        assert_eq!(state.claim(false), None);
+        assert_eq!(state.claim(true), Some(ScriptClaim::EmptyCollection));
+    }
+
+    /// The heatmap's extension is the configured format's, with the reference's exact spellings.
+    #[test]
+    fn terrain_heatmap_extension_follows_the_image_format() {
+        assert_eq!(terrain_heatmap_extension(ImageExportFormat::Bmp), "bmp");
+        assert_eq!(terrain_heatmap_extension(ImageExportFormat::Exr), "exr");
+        assert_eq!(terrain_heatmap_extension(ImageExportFormat::Hdr), "hdr");
+        assert_eq!(terrain_heatmap_extension(ImageExportFormat::Jpeg), "jpeg");
+        assert_eq!(terrain_heatmap_extension(ImageExportFormat::Png), "png");
+        assert_eq!(terrain_heatmap_extension(ImageExportFormat::Tga), "tga");
+    }
+
+    /// The deleted-assets claim is exactly the main-asset test.
+    #[test]
+    fn deleted_assets_claim_tracks_the_main_asset() {
+        assert!(deleted_assets_claim(true));
+        assert!(!deleted_assets_claim(false));
     }
 }

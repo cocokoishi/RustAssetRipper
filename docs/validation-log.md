@@ -1,5 +1,39 @@
 # Validation log
 
+## 2026-10-16 - The primary-content extractor decision layer is complete
+
+- Outcome: ported the last five extractor gates - texture, audio, script, terrain heatmap and
+  deleted assets - so every extractor in the primary-content stack now has its decision ported.
+  1895 library tests.
+- **The gates, each of which is a rule rather than a one-liner:**
+  - `TextureExporter` admits an `IImageTexture` whose `CheckAssetIntegrity()` passes: inline
+    `ImageData` wins outright, otherwise an `m_StreamData` descriptor must exist **and** pass its
+    collection check. The port takes the collection check as a closure so the file lookup is not even
+    attempted when the bytes are already in memory - the source short-circuits the same way, and a
+    plain `bool` parameter would have quietly forced the lookup.
+  - `AudioContentExtractor` needs **both** a successful `AudioClipDecoder.TryDecode` and non-empty
+    decoded data. The source treats them as two branches with separate warnings, and both decline.
+    The source decodes twice to avoid holding the bytes, so the port takes the first decode's result
+    as its input.
+  - `ScriptContentExtractor` carries a one-shot flag, and its exact rule is the kind that gets
+    misread: the flag is cleared **only** by a MonoScript. A non-MonoScript declines and leaves it
+    set, so the first MonoScript to arrive creates the collection no matter how many other assets
+    passed through first. The plausible alternative reading - "the first asset wins" - would have made
+    the script export depend on registration order, and nothing would have failed.
+  - `TerrainHeatmapExporter` claims **every** `ITerrainData` with no condition, exactly like
+    `GlbTerrainExporter`; only the handler order decides which runs. Recorded so the duplication of
+    their accepted sets is not mistaken for a mistake.
+  - `DeletedAssetsExporter` claims when the main asset is `DeletedAssetsInformation`, and the
+    collection it builds reports `Exportable => false` - the claim exists to group assets, not to
+    write files.
+- **`ImageExportFormat::file_extension` was already ported**, so the heatmap's extension needed no new
+  code; the test pins the reference's exact spellings, including `jpeg` rather than `jpg`.
+- **Every helper this needed already existed**, which is the third round in a row where the
+  duplication search changed the shape of the change. The only new code is the decisions themselves.
+- Evidence: `cargo test --locked --workspace` - **1895** library (up from 1890) + 199 bin tests,
+  0 failed, 1 ignored. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+  CI on `a968099` is green across all eight jobs.
+
 ## 2026-10-16 - The JSON extractor's pointer override, and the base form captured at last
 
 - Outcome: found that `JsonContentExtractor` **overrides `VisitPPtr`**, captured the base pointer form
