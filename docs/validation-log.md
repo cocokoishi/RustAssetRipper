@@ -1,5 +1,26 @@
 # Validation log
 
+## 2026-10-16 - The decoded geometry is cached per mesh, not per node
+
+- Outcome: `attach_plan_geometry` and `export_plan_as_glb` now take the caller's decoded geometry keyed
+  by `GlbSourceMesh` instead of by node position. 1935 library tests (up from 1934).
+- **The keying is the reference's cache.** `BuildParameters.TryGetOrMakeMeshData` caches one `MeshData`
+  per `IMesh`, so a scene that instances a mesh twice decodes it once. Keying by node position made
+  that inexpressible: one entry could serve one node and leave the other without geometry, or the
+  caller would have had to duplicate the data. A node now asks for the mesh it came from.
+- **A test corrected my premise, which is the useful part.** I wrote the sharing test asserting one
+  glTF mesh referenced twice; the JSON showed **two** meshes, each with its own primitive. The
+  reference calls `AddRigidMesh` once per node, so sharing the decoded `MeshData` is **not** sharing
+  the emitted mesh. The assertion now says what is true - both nodes served from one cache entry, each
+  with its own mesh - and the doc records that my first version had it wrong.
+- **The skip path is unchanged in effect and identity-based in form.** A node whose own mesh was not
+  decoded still keeps no geometry and is named in a warning; the fixture now gives the second node a
+  different source mesh, because the first version shared one and the test then proved the opposite of
+  what it was written for.
+- Evidence: `cargo test --locked --workspace` - **1935** library + 206 CLI tests, 0 failed, 1 ignored.
+  `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0. The staged numstat showed
+  four files, the largest being the new test, with no whole-file rewrites.
+
 ## 2026-10-16 - The caller's half of the scene geometry: MeshFilter, mesh facts, renderer fields
 
 - Outcome: `resolve_attached_meshes` reads each Transform's `MeshFilter`, resolves its mesh and yields

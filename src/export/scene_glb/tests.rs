@@ -244,7 +244,8 @@ fn a_self_edge_is_not_a_hierarchy_edge() {
 #[test]
 fn the_export_emits_a_glb_whose_document_matches_the_hierarchy() {
     let collection = hierarchy();
-    let meshes: Vec<Option<crate::resources::mesh_data::MeshData>> = vec![None; 4];
+    // No decoded geometry: every node with a mesh selection is skipped with a warning.
+    let meshes: Vec<(GlbSourceMesh, crate::resources::mesh_data::MeshData)> = Vec::new();
     let export = export_scene_glb(SceneGlbExportInput {
         collection: &collection,
         attached_meshes: &[],
@@ -293,7 +294,8 @@ fn the_export_emits_a_glb_whose_document_matches_the_hierarchy() {
 #[test]
 fn an_asset_export_leaves_roots_untransformed() {
     let collection = hierarchy();
-    let meshes: Vec<Option<crate::resources::mesh_data::MeshData>> = vec![None; 4];
+    // No decoded geometry: every node with a mesh selection is skipped with a warning.
+    let meshes: Vec<(GlbSourceMesh, crate::resources::mesh_data::MeshData)> = Vec::new();
     let export = export_scene_glb(SceneGlbExportInput {
         collection: &collection,
         attached_meshes: &[],
@@ -438,8 +440,7 @@ fn supplied_geometry_is_attached_to_the_plan() {
     let mut attached: Vec<Option<GlbLevelMesh>> = vec![None; collection.transforms.len()];
     let position = collection.transforms.len() - 1;
     attached[position] = Some(mesh);
-    let meshes: Vec<Option<crate::resources::mesh_data::MeshData>> =
-        vec![None; collection.transforms.len()];
+    let meshes: Vec<(GlbSourceMesh, crate::resources::mesh_data::MeshData)> = Vec::new();
 
     let export = export_scene_glb(SceneGlbExportInput {
         collection: &collection,
@@ -531,7 +532,8 @@ fn the_mesh_gate_runs_before_the_renderer_gate() {
 #[test]
 fn the_node_limit_reaches_the_export() {
     let collection = hierarchy();
-    let meshes: Vec<Option<crate::resources::mesh_data::MeshData>> = vec![None; 4];
+    // No decoded geometry: every node with a mesh selection is skipped with a warning.
+    let meshes: Vec<(GlbSourceMesh, crate::resources::mesh_data::MeshData)> = Vec::new();
     let error = export_scene_glb(SceneGlbExportInput {
         collection: &collection,
         attached_meshes: &[],

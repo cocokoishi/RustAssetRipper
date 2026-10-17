@@ -541,11 +541,13 @@ pub struct SceneGlbExportInput<'a> {
     /// `false` preserves the reference-verified `Build` semantics on both arms, which the
     /// fixture-backed tests exercise; it does not mean the shipped product ever sets it.
     pub is_scene: bool,
-    /// Per-node decoded geometry, indexed by node position in the plan.
+    /// The decoded geometry, keyed by the mesh object each entry came from.
     ///
-    /// The reference builds these on demand and caches them; the caller does the same, because
-    /// `MeshData` construction needs the mesh pipeline rather than the scene graph.
-    pub meshes: &'a [Option<crate::resources::mesh_data::MeshData>],
+    /// The reference builds these on demand and caches them **per `IMesh`**, so two nodes sharing a
+    /// mesh share the data. Keying by the source mesh rather than by node position is what makes that
+    /// cache expressible: a node asks for the mesh it came from, and a node whose mesh was not
+    /// decoded is skipped with a warning rather than silently given another node's geometry.
+    pub meshes: &'a [(GlbSourceMesh, crate::resources::mesh_data::MeshData)],
     /// The mesh and renderer facts the caller resolved, indexed by Transform position.
     ///
     /// Empty means nothing was resolved; a collection whose GameObjects carry a `MeshFilter` is then
@@ -589,7 +591,7 @@ pub fn export_scene_glb(
 /// from a prefab hierarchy - can use the same encoder.
 pub fn export_plan_as_glb(
     plan: &GlbLevelPlan,
-    meshes: &[Option<crate::resources::mesh_data::MeshData>],
+    meshes: &[(GlbSourceMesh, crate::resources::mesh_data::MeshData)],
     limits: GlbBuildLimits,
 ) -> Result<SceneGlbExport, SceneGlbExportError> {
     let mut document = build_scene_document(plan);

@@ -169,13 +169,19 @@
             subset_indices_count: 0,
             subset_indices: Some(Vec::new()),
             static_batch_info: None,
-            source: None,
+            source: Some(source_mesh()),
         };
-        // A static renderer that selects sub-mesh 0 explicitly.
+        // A static renderer that selects sub-mesh 0 explicitly, on a **different** mesh object: the
+        // cache is keyed by the mesh a node came from, so a node whose own mesh was not decoded is
+        // skipped rather than handed another node's geometry.
         let static_mesh = GlbLevelMesh {
             has_subset_indices: true,
             subset_indices_count: 1,
             subset_indices: Some(vec![0]),
+            source: Some(crate::resources::glb_level::GlbSourceMesh {
+                file_id: 0,
+                path_id: 8,
+            }),
             ..dynamic.clone()
         };
 
@@ -191,7 +197,9 @@
         let mut document = build_scene_document(&plan);
 
         // Only the first node has decoded geometry; the second has a mesh selection but no data.
-        let meshes = vec![Some(triangle_mesh()), None, None];
+        // The cache is keyed by the mesh each node came from; the second node has a selection but
+        // no decoded data, so it is skipped with a warning.
+        let meshes = vec![(source_mesh(), triangle_mesh())];
         let warnings = attach_plan_geometry(&mut document, &plan, &meshes, GlbBuildLimits::default())
             .expect("geometry attaches");
         assert_eq!(warnings.len(), 1, "{warnings:?}");
@@ -220,6 +228,73 @@
         assert!(bytes.len() > 20 + json.len(), "a binary chunk is present");
     }
 
+    /// Two nodes that came from the same mesh are both served from one cache entry.
+    ///
+    /// `BuildParameters.TryGetOrMakeMeshData` caches one `MeshData` per `IMesh`, so a scene that
+    /// instances a mesh twice decodes it once. Keying the caller's geometry by the source mesh is what
+    /// makes that cache expressible; keying it by node position would have made one entry serve one
+    /// node and left the other without geometry. **The emitted mesh is still per node**, because the
+    /// reference calls `AddRigidMesh` once per node - sharing the decoded data is not sharing the glTF
+    /// mesh, which my first version of this test asserted and the JSON corrected.
+    #[test]
+    fn plan_geometry_shares_one_decoded_mesh_between_nodes() {
+        use crate::resources::glb_level::{
+            build_level_plan, build_scene_document, GlbLevelMesh, GlbLevelTransform,
+        };
+
+        fn node(name: &str, mesh: Option<GlbLevelMesh>) -> GlbLevelTransform {
+            GlbLevelTransform {
+                game_object_name: name.to_owned(),
+                local_position: [0.0, 0.0, 0.0],
+                local_rotation: [0.0, 0.0, 0.0, 1.0],
+                local_scale: [1.0, 1.0, 1.0],
+                children: Vec::new(),
+                mesh,
+            }
+        }
+        let mesh = GlbLevelMesh {
+            sub_mesh_count: 1,
+            is_16_bit_indices: true,
+            mesh_type: None,
+            has_renderer: true,
+            has_static_batch_info: false,
+            static_batch_sub_mesh_count: 0,
+            has_subset_indices: true,
+            subset_indices_count: 0,
+            subset_indices: Some(Vec::new()),
+            static_batch_info: None,
+            source: Some(source_mesh()),
+        };
+        let plan = build_level_plan(
+            &[
+                node("First", Some(mesh.clone())),
+                node("Second", Some(mesh)),
+            ],
+            true,
+        )
+        .expect("the plan builds");
+        let mut document = build_scene_document(&plan);
+        let warnings =
+            attach_plan_geometry(&mut document, &plan, &[(source_mesh(), triangle_mesh())], GlbBuildLimits::default())
+                .expect("geometry attaches");
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        let json = {
+            let bytes = document.into_glb();
+            let length = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]) as usize;
+            String::from_utf8(bytes[20..20 + length].to_vec()).expect("the JSON chunk is UTF-8")
+        };
+        // Both nodes found their geometry in the one-entry cache, so nothing was skipped.
+        assert!(warnings.is_empty(), "{warnings:?}");
+        // Each node still gets its **own** glTF mesh: the reference calls `AddRigidMesh` once per
+        // node, so sharing the decoded `MeshData` does not share the emitted mesh.
+        assert_eq!(json.matches("\"primitives\":[").count(), 2, "{json}");
+        assert!(json.contains("\"mesh\":0"), "{json}");
+        assert!(json.contains("\"mesh\":1"), "{json}");
+        // The two meshes carry identical geometry, which is what a shared `MeshData` means.
+        assert_eq!(json.matches("\"mode\":4").count(), 2, "{json}");
+    }
+
     /// A sub-mesh index the mesh does not have is reported, not panicked on.
     #[test]
     fn plan_geometry_reports_an_out_of_range_sub_mesh() {
@@ -245,7 +320,7 @@
                     subset_indices_count: 1,
                     subset_indices: Some(vec![7]),
                     static_batch_info: None,
-                    source: None,
+                    source: Some(source_mesh()),
                 }),
             }],
             true,
@@ -253,7 +328,7 @@
         .expect("the plan builds");
         let mut document = build_scene_document(&plan);
         let warnings =
-            attach_plan_geometry(&mut document, &plan, &[Some(triangle_mesh())], GlbBuildLimits::default())
+            attach_plan_geometry(&mut document, &plan, &[(source_mesh(), triangle_mesh())], GlbBuildLimits::default())
                 .expect("an out-of-range selection is not fatal");
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains("sub-mesh 7"), "{warnings:?}");
@@ -281,6 +356,14 @@
             vertex_count: 0,
             topology,
             local_bounds: Default::default(),
+        }
+    }
+
+    /// The source mesh every plan fixture in this file records.
+    fn source_mesh() -> crate::resources::glb_level::GlbSourceMesh {
+        crate::resources::glb_level::GlbSourceMesh {
+            file_id: 0,
+            path_id: 7,
         }
     }
 

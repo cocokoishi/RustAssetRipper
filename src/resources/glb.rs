@@ -1418,10 +1418,21 @@ impl SceneDocument {
 /// emits the plan's `subset_indices` through the accumulated transforms. Both were verified
 /// against the shipped `GlbLevelBuilder.Build` node graph, and the sub-mesh selection against
 /// `references_dynamic_mesh`/`subset_indices`.
+/// The decoded mesh for one source mesh, from the caller's per-mesh cache.
+fn lookup_source_mesh(
+    meshes: &[(super::glb_level::GlbSourceMesh, MeshData)],
+    source: super::glb_level::GlbSourceMesh,
+) -> Option<&MeshData> {
+    meshes
+        .iter()
+        .find(|(candidate, _)| *candidate == source)
+        .map(|(_, mesh)| mesh)
+}
+
 pub fn attach_plan_geometry(
     document: &mut SceneDocument,
     plan: &super::glb_level::GlbLevelPlan,
-    meshes: &[Option<MeshData>],
+    meshes: &[(super::glb_level::GlbSourceMesh, MeshData)],
     limits: GlbBuildLimits,
 ) -> Result<Vec<String>, GlbError> {
     let mut builder = GlbBuilder::with_limit(limits.max_output_bytes);
@@ -1434,7 +1445,13 @@ pub fn attach_plan_geometry(
         let Some(attached) = node.mesh.as_ref() else {
             continue;
         };
-        let Some(Some(mesh)) = meshes.get(node_index) else {
+        // The decoded mesh is looked up by the mesh object it came from, not by node position: the
+        // reference caches one `MeshData` per `IMesh` (`TryGetOrMakeMeshData`), so two nodes sharing a
+        // mesh share the data and a node whose mesh was not decoded is skipped with a warning.
+        let Some(mesh) = attached
+            .source
+            .and_then(|source| lookup_source_mesh(meshes, source))
+        else {
             // The reference skips a node whose mesh cannot be built rather than failing the build.
             warnings.push(format!(
                 "node {} ({}) has no decoded mesh data; its geometry is omitted",
