@@ -1,6 +1,33 @@
 # RustAssetRipper hand-off — 2026-10-17
 
-## Latest current checkpoint - 2026-10-17 (the collection and search pages carry their frozen client behaviour)
+## Latest current checkpoint - 2026-10-17 (the collection page lists its dependencies)
+
+- **`PRODUCT-GUI-001`'s collection dependency section landed.** The reference's `Collections/ViewPage`
+  renders `Localization.AssetTabDependencies` over a `File ID`/`Name` table when
+  `Collection.Dependencies.Count > 1`, one row per non-null slot with the 1-based index and a link to
+  the target collection. The port's `collection_page` renders exactly that, driven by a new
+  `TreeCollection.dependencies` slot list.
+- **The slots come from the same lookup the reference edges use.** `SerializedAssetCollection`
+  pushes one slot per external-table identifier through `Bundle.ResolveCollection`; the port exposed
+  that walk as `SerializedFileWorkspace::resolve_dependency_collections`, which runs the very
+  `SourceBundleCollectionLookup` that `reference_graph` installs as its dependency resolver. A
+  separate name-join rule was written first and then withdrawn: it would have disagreed with the
+  edges (and resolved nothing on the duplicate-name web fixture, where the source-scoped walk is
+  exactly what disambiguates).
+- **Coverage:** `dependency_collections_resolve_each_external_identifier_to_its_loaded_file` pins a
+  resolved slot, a name no loaded file carries leaving its slot empty, and an identifier reaching the
+  source's own scope; the web e2e test asserts `<h2>Dependencies</h2>`, the `File ID` column and the
+  nested-collection link on the managed collection page, and that an identifier-free collection
+  renders no section at all. The frozen page's `Count > 1` gate and the port's
+  `!dependencies.is_empty()` are the same condition (`Dependencies[0]` is always null).
+- Verified by GitHub Actions (the local machine is not used for compute): the `Rust CI` run for this
+  commit must be green before the unit counts.
+- **Next:** keep working the wrap-up plan - the primary-content extractor layer's script producer
+  (blocked on the decompiler decision), the remaining `实现中` rows with `RES-TEXTURE-001` /
+  `EXPORT-UNITY-001` first, `PRODUCT-CONFIG-001`'s data-set subsystem, the `EXP-GLB-*` production
+  wiring, then the 22-sample local replay and `docs/acceptance-corpus.md` refresh.
+
+## Previous checkpoint - 2026-10-17 (the collection and search pages carry their frozen client behaviour)
 
 - **`PRODUCT-GUI-001`'s class filter, page control and client script landed.** The reference's
   `Collections/ViewPage` renders a `Localization.Class` label over a `classFilter` select (only when
@@ -30,11 +57,11 @@
   search page both exercise.
 - Verified by GitHub Actions (the local machine is not used for compute): the `Rust CI` run for this
   commit must be green before the unit counts.
-- **Next:** keep working the wrap-up plan - the collection dependency section on the collection page,
-  the primary-content extractor layer's script producer (blocked on the decompiler decision), the
-  remaining `实现中` rows with `RES-TEXTURE-001` / `EXPORT-UNITY-001` first, `PRODUCT-CONFIG-001`'s
-  data-set subsystem, the `EXP-GLB-*` production wiring, then the 22-sample local replay and
-  `docs/acceptance-corpus.md` refresh.
+- **Next:** keep working the wrap-up plan - the collection dependency section on the collection page
+  (landed in the checkpoint above), the primary-content extractor layer's script producer (blocked on
+  the decompiler decision), the remaining `实现中` rows with `RES-TEXTURE-001` / `EXPORT-UNITY-001`
+  first, `PRODUCT-CONFIG-001`'s data-set subsystem, the `EXP-GLB-*` production wiring, then the
+  22-sample local replay and `docs/acceptance-corpus.md` refresh.
 
 ## Previous checkpoint - 2026-10-17 (the scene view is covered end to end)
 

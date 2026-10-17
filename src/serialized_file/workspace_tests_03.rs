@@ -589,6 +589,50 @@
     }
 
     #[test]
+    fn dependency_collections_resolve_each_external_identifier_to_its_loaded_file() {
+        // The per-identifier collection lookup behind `AssetCollection.Dependencies[1..]` runs
+        // the same source-scoped `Bundle.ResolveCollection` walk the joined reference graph
+        // installs as its resolver, so a resolved slot names the file a reference row would
+        // name, a name no loaded file carries leaves its slot empty, and an identifier naming
+        // the source's own scope still reaches that file.
+        let mut filesystem = VirtualFileSystem::new();
+        insert_file(
+            &mut filesystem,
+            "/game/Data/main.assets",
+            &make_generation_10_file_with(&["shared.assets", "absent.assets"], 1, 10, 42),
+        );
+        insert_file(
+            &mut filesystem,
+            "/game/Data/shared.assets",
+            &make_generation_10_file_with(&["third.assets"], 1, 42, 42),
+        );
+        insert_file(
+            &mut filesystem,
+            "/game/Data/third.assets",
+            &make_generation_10_file_with(&["main.assets"], 0, 42, 42),
+        );
+        let inputs = [input("/game/Data/main.assets")];
+        let data_paths = ["/game/Data".to_owned()];
+
+        let (workspace, _dependency_report) =
+            SerializedFileWorkspace::load_from_vfs_with_dependencies(
+                &mut filesystem,
+                &inputs,
+                &[],
+                &data_paths,
+                SerializedFileWorkspaceLimits::default(),
+                DependencyIndexLimits::default(),
+                ContainerMountLimits::default(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            workspace.resolve_dependency_collections().unwrap(),
+            [vec![Some(1), None], vec![Some(2)], vec![Some(0)]]
+        );
+    }
+
+    #[test]
     fn dependency_container_resource_leaf_attaches_to_its_workspace_bundle() {
         let mut filesystem = VirtualFileSystem::new();
         let serialized_leaf = make_generation_10_file();

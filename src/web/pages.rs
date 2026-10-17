@@ -872,8 +872,8 @@ const RESULTS_TABLE_SCRIPT: &str = r##"document.addEventListener('DOMContentLoad
 	}
 });"##;
 
-/// The collection page: the collection name, its bundle, its scene link and the asset table
-/// with the frozen class filter and page control.
+/// The collection page: the collection name, its bundle, its scene link, the asset table with
+/// the frozen class filter and page control, and the dependency table.
 ///
 /// `position` addresses the collection in the bundle at `bundle_index` and `path` is its
 /// `CollectionPath`. The table keeps the frozen columns (path ID, class, name) with one linked
@@ -881,9 +881,9 @@ const RESULTS_TABLE_SCRIPT: &str = r##"document.addEventListener('DOMContentLoad
 /// the page control, and followed by the page script that drives both. `scene` is the scene
 /// definition's display name when the collection is a scene, so the page renders the same
 /// `Localization.Scene` section and `ScenePath` link the baseline's `Collection.IsScene`
-/// branch adds; it is `None` for a non-scene collection. The collection dependency section
-/// still waits for its own data port. A `None` return means the tree disagrees with the
-/// resolved position.
+/// branch adds; it is `None` for a non-scene collection. The dependency section then lists each
+/// external-table slot the tree resolved, with the 1-based slot index in `File ID`. A `None`
+/// return means the tree disagrees with the resolved position.
 pub fn collection_page(
     state: &WebState,
     tree: &super::tree::BundleTree,
@@ -892,7 +892,7 @@ pub fn collection_page(
     path: &assetripper::web_paths::CollectionPath,
     scene: Option<&str>,
 ) -> Option<String> {
-    use assetripper::web_paths::{asset_view_url, bundle_view_url};
+    use assetripper::web_paths::{asset_view_url, bundle_view_url, collection_view_url};
 
     let bundle = tree.bundle(bundle_index)?;
     let collection = bundle.collections.get(position)?;
@@ -946,6 +946,44 @@ pub fn collection_page(
                 &asset_view_url(&path.asset(asset.path_id)),
                 &asset.best_name,
             );
+            inner.close("td");
+            inner.close("tr");
+        }
+        inner.close("tbody");
+        inner.close("table");
+    }
+
+    // The frozen dependency section: one row per external-table slot that resolved to a
+    // collection, with the 1-based slot index in the `File ID` column. The frozen page renders
+    // the section whenever the file has at least one identifier, whose slots the tree holds as
+    // `dependencies`, so an all-unresolved list still renders an empty table.
+    if !collection.dependencies.is_empty() {
+        inner.element("h2", &[], &t(state, "asset_tab_dependencies"));
+        inner.open("table", &[("class", "table")]);
+        inner.open("thead", &[]);
+        inner.open("tr", &[]);
+        inner.element("th", &[], &t(state, "file_id"));
+        inner.element("th", &[], &t(state, "name"));
+        inner.close("tr");
+        inner.close("thead");
+        inner.open("tbody", &[]);
+        for (slot, target) in collection.dependencies.iter().enumerate() {
+            let Some(file_index) = *target else {
+                continue;
+            };
+            // The target came from the same table the snapshot was built from, so both the
+            // address and the name resolve; a mismatch would be an internal inconsistency.
+            let Some(dependency_path) = tree.collection_path_for_file(file_index) else {
+                continue;
+            };
+            let Some(dependency_name) = tree.collection_name(file_index) else {
+                continue;
+            };
+            let dependency_url = collection_view_url(&dependency_path);
+            inner.open("tr", &[]);
+            inner.element("td", &[], &(slot + 1).to_string());
+            inner.open("td", &[]);
+            tree_link(&mut inner, &dependency_url, &dependency_name);
             inner.close("td");
             inner.close("tr");
         }

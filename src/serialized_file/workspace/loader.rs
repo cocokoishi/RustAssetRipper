@@ -1398,4 +1398,44 @@ impl SerializedFileWorkspace {
             },
         )
     }
+
+    /// Resolve every file's external-table entries to the loaded collection files they name,
+    /// mirroring `SerializedAssetCollection.InitializeDependencyList`'s per-identifier lookup.
+    ///
+    /// This runs the very `Bundle.ResolveCollection` walk that [`Self::reference_graph`]
+    /// installs as its dependency resolver, so a surface that renders collection dependencies
+    /// and one that renders reference edges can never disagree about what an identifier means.
+    /// The result holds one slot per file, in file order, each carrying one entry per external
+    /// identifier in table order: the resolved file index, or `None` when the identifier has no
+    /// file path, names no collection the workspace holds, or names an engine or builtin
+    /// collection the source resolver can reach and the port never loads.
+    pub fn resolve_dependency_collections(
+        &self,
+    ) -> Result<Vec<Vec<Option<usize>>>, MultiFileReferenceGraphBuildError> {
+        let collection_lookup =
+            SourceBundleCollectionLookup::build(self, MultiFileReferenceGraphLimits::default())?;
+        let mut resolutions = Vec::new();
+        resolutions
+            .try_reserve_exact(self.files.len())
+            .map_err(|_| MultiFileReferenceGraphBuildError::AllocationFailed {
+                resource: "dependency collection resolutions",
+                requested: self.files.len(),
+            })?;
+        for (file_index, file) in self.files.iter().enumerate() {
+            let mut slots = Vec::new();
+            slots
+                .try_reserve_exact(file.metadata.externals.len())
+                .map_err(|_| MultiFileReferenceGraphBuildError::AllocationFailed {
+                    resource: "dependency collection slots",
+                    requested: file.metadata.externals.len(),
+                })?;
+            for identifier in &file.metadata.externals {
+                slots.push(identifier.get_file_path().and_then(|dependency_name| {
+                    collection_lookup.resolve(file_index, &dependency_name)
+                }));
+            }
+            resolutions.push(slots);
+        }
+        Ok(resolutions)
+    }
 }

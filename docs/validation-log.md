@@ -8885,3 +8885,37 @@ These results do not pass the first-phase gate. The reference .NET solution buil
 - Next step for this arc: the collection dependency section (`Collection.Dependencies.Count > 1`
   -> `Localization.AssetTabDependencies`, `File ID` column, one linked row per non-null external
   slot), reusing the multi-file graph's `dependency_identifier`/`candidate_file_indices`.
+
+## 2026-10-17 - Collection page: the dependency table
+
+- Scope: `PRODUCT-GUI-001`'s last recorded-open collection-page section. The reference
+  `Collections/ViewPage` renders `Localization.AssetTabDependencies`, a `table.table` whose head is
+  `Localization.FileId` + `Localization.Name`, and one row per non-null `Collection.Dependencies[i]`
+  with `i` (1-based) and a link to the target collection, whenever
+  `Collection.Dependencies.Count > 1`. `SerializedAssetCollection.InitializeDependencyList` pushes
+  one slot per external-table identifier through `Bundle.ResolveCollection`, so the port's
+  `TreeCollection.dependencies` holds one slot per identifier and the page renders the same table.
+- **Correction to the previous entry's "next step"**: it named the multi-file graph's
+  `dependency_identifier`/`candidate_file_indices`. That was written first as
+  `MultiFileReferenceGraph::dependency_file_index` (fixed-path name, engine alias, unique-name
+  match) and then withdrawn: the reference edges do **not** use a flat name join. They use
+  `SourceBundleCollectionLookup`, the source-scoped `Bundle.ResolveCollection` walk that
+  `SerializedFileWorkspace::reference_graph` installs as its dependency resolver, and a plain join
+  would disagree with them - on the web fixture it resolves *nothing*, because the two
+  byte-identical bundle inputs make every dependency name ambiguous globally while the source scope
+  disambiguates it. The withdrawn method and its unit test were removed rather than kept as a
+  second, divergent rule.
+- Port shape: `SerializedFileWorkspace::resolve_dependency_collections()` builds that same lookup
+  once and returns one slot list per file (`identifier.get_file_path()` -> `lookup.resolve`),
+  `BundleTree::from_loaded` calls it beside the joined graph and fills each collection, and
+  `collection_page` renders the frozen table (skipping `None` slots, `slot + 1` in the `File ID`
+  cell) with `collection_path_for_file`/`collection_name` and `collection_view_url`.
+- Coverage: `dependency_collections_resolve_each_external_identifier_to_its_loaded_file` (three
+  synthetic generation-10 files chained `main -> shared -> third`, with one absent name) pins a
+  resolved slot (`Some(1)`), an unresolved name (`None`) and a cross-file identifier reaching the
+  source's own scope (`Some(0)`). The web e2e test asserts the header, the `File ID` column and the
+  nested `{"P":[0,0]}` collection link on the managed collection page, and that an identifier-free
+  collection renders no `File ID` header; the frozen `Count > 1` gate equals the port's
+  `!dependencies.is_empty()` because `Dependencies[0]` is always null.
+- Commands run locally: `rustfmt --edition 2021 --check` on the five changed Rust files - exit 0
+  after the authoring pass. Build and test run on GitHub Actions, not this machine.

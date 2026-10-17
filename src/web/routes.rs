@@ -1608,6 +1608,8 @@ mod tests {
                 String::from_utf8(response.body().to_vec()).expect("pages are UTF-8");
             assert!(text_collection.contains(">Hero<"), "{text_collection}");
             assert!(text_collection.contains("TextAsset"), "{text_collection}");
+            // A file with no external table renders no dependency section.
+            assert!(!text_collection.contains(">File ID<"), "{text_collection}");
             let text_hrefs = anchor_hrefs(&text_collection, "/Assets/View?Path=");
             assert_eq!(text_hrefs.len(), 1);
             let response = get(&mut state, &text_hrefs[0]);
@@ -1662,6 +1664,19 @@ mod tests {
                 !collection.contains("<label for=\"classFilter\""),
                 "{collection}"
             );
+
+            // The frozen dependency section lists the file's external-table slots with the
+            // 1-based `File ID` and a link to each resolved collection. The managed file's
+            // cross-file identifier resolves in its source scope to the nested collection,
+            // the same address the asset page links as the edge target, so the section
+            // carries that link.
+            assert!(collection.contains("<h2>Dependencies</h2>"), "{collection}");
+            assert!(collection.contains(">File ID<"), "{collection}");
+            let dependency_link = format!(
+                "/Collections/View?Path={}",
+                url_encode("{\"B\":{\"P\":[0,0]},\"I\":0}")
+            );
+            assert!(collection.contains(&dependency_link), "{collection}");
 
             // A resolved asset renders its information section with the numeric
             // class ID, the class name and the collection link.

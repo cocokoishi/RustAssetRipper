@@ -24,14 +24,16 @@
 //! then to `Bundle`; the frozen side always has a container name, so the fallback only
 //! covers data the workspace did not retain a name for.
 //!
-//! Two deliberate boundaries are recorded here, not hidden:
+//! Each collection also carries one slot per external-table identifier beside its asset rows,
+//! resolved through the same source-scoped `Bundle.ResolveCollection` walk the reference edges
+//! use, so the collection page can list its dependencies exactly like the frozen
+//! `Collection.Dependencies` table.
 //!
-//! * The snapshot carries names and counts only. Asset identities below the collection
-//!   level are the files' object path IDs; anything needing decoded asset fields (asset
-//!   names, scene graphs, resource bytes, failure stack traces) stays on the explicit
-//!   pending pages until its own port lands.
-//! * A workspace index that points outside its list is a projection error: the tree
-//!   reports it instead of dropping the entry silently.
+//! The snapshot is a projection built once per load, not a live graph: it carries what the tree
+//! pages render (names, counts, asset rows with their class, display name and tab flags, and the
+//! reference and dependency targets). Anything the projection does not carry is served from the
+//! workspaces by its own route. A workspace index that points outside its list is a projection
+//! error: the tree reports it instead of dropping the entry silently.
 
 use assetripper::export::project_exporter::object_class_name;
 use assetripper::export::project_workflow::{object_asset_name, text_asset_script_bytes};
@@ -40,7 +42,7 @@ use assetripper::resources::texture::Texture2DView;
 use assetripper::serialized_file::object::ParsedObjectPayload;
 use assetripper::serialized_file::object_workspace::ObjectWorkspace;
 use assetripper::serialized_file::reference_graph::{
-    MultiFilePPtrResolution, MultiFileReferenceGraphLimits,
+    MultiFilePPtrResolution, MultiFileReferenceGraph, MultiFileReferenceGraphLimits,
 };
 use assetripper::serialized_file::workspace::{SerializedFileWorkspace, WorkspaceRootResourceFile};
 use assetripper::web_paths::{AssetPath, BundlePath, CollectionPath, FailedFilePath, ResourcePath};
@@ -102,6 +104,14 @@ pub struct TreeCollection {
     pub asset_count: usize,
     /// One row per object in file order, mirroring the collection's asset list.
     pub assets: Vec<TreeAsset>,
+    /// One slot per external-table identifier, in table order, mirroring
+    /// `AssetCollection.Dependencies[1..]`: the loaded file whose collection the identifier
+    /// resolved to, or `None` when nothing the snapshot holds matches it.
+    ///
+    /// The frozen page prints the 1-based table index in the `File ID` column and skips `None`
+    /// slots. The frozen `Bundle.ResolveCollection` can also reach engine and builtin
+    /// collections, which the port never loads, so those slots stay `None` here.
+    pub dependencies: Vec<Option<usize>>,
 }
 
 /// One asset row: the identity the collection page's table shows.
@@ -335,7 +345,17 @@ impl BundleTree {
             }
         }
 
-        resolve_dependency_edges(workspace, &file_address, &mut tree_bundles)?;
+        // One joined graph backs the reference edges and the workspace's own collection
+        // lookup backs the external dependency slots, so a page and the export never
+        // disagree on what an identifier means.
+        let joined = workspace
+            .reference_graph(MultiFileReferenceGraphLimits::default())
+            .map_err(|error| TreeError::new(format!("reference join failed: {error}")))?;
+        let dependency_collections = workspace
+            .resolve_dependency_collections()
+            .map_err(|error| TreeError::new(format!("dependency resolution failed: {error}")))?;
+        resolve_dependency_edges(&joined, &file_address, &mut tree_bundles)?;
+        resolve_collection_dependencies(&dependency_collections, &file_address, &mut tree_bundles)?;
 
         // Mounted resources follow the same direct-list discipline.
         let mut resource_claimed = vec![false; resources.len()];
@@ -603,6 +623,7 @@ fn collection_from_file(
         name: fix_file_identifier(&file.file_name),
         asset_count: assets.len(),
         assets,
+        dependencies: Vec::new(),
     }
 }
 
@@ -734,13 +755,10 @@ fn texture_has_image_data(payload: &ParsedObjectPayload) -> bool {
 /// asset (dangling, ambiguous, invalid and predefined-engine targets) becomes `Missing`,
 /// matching the frozen page, which links only targets its own lookup resolves.
 fn resolve_dependency_edges(
-    workspace: &SerializedFileWorkspace,
+    joined: &MultiFileReferenceGraph<'_>,
     file_address: &[Option<(usize, usize)>],
     tree_bundles: &mut [TreeBundle],
 ) -> Result<(), TreeError> {
-    let joined = workspace
-        .reference_graph(MultiFileReferenceGraphLimits::default())
-        .map_err(|error| TreeError::new(format!("reference join failed: {error}")))?;
     for reference in joined.references() {
         if matches!(reference.resolution, MultiFilePPtrResolution::Null) {
             continue;
@@ -793,6 +811,43 @@ fn resolve_dependency_edges(
                 )));
             }
         }
+    }
+    Ok(())
+}
+
+/// Fill every collection's external-dependency slots, mirroring
+/// `SerializedAssetCollection.InitializeDependencyList`: one slot per external-table
+/// identifier, in table order, holding the loaded file the identifier resolves to or `None`.
+///
+/// The resolution comes from the workspace's own `Bundle.ResolveCollection` walk, the same one
+/// the joined reference graph installs as its dependency resolver, so a dependency row and a
+/// reference edge always name the same collection. The frozen page renders the section whenever
+/// a file has at least one identifier and prints the 1-based index of each slot that resolved,
+/// so a slot with no loaded target - including the engine and builtin collections the frozen
+/// resolver can reach and the port never loads - renders no row.
+fn resolve_collection_dependencies(
+    dependency_collections: &[Vec<Option<usize>>],
+    file_address: &[Option<(usize, usize)>],
+    tree_bundles: &mut [TreeBundle],
+) -> Result<(), TreeError> {
+    for (file_index, slots) in dependency_collections.iter().enumerate() {
+        if slots.is_empty() {
+            continue;
+        }
+        let Some((bundle, position)) = file_address.get(file_index).copied().flatten() else {
+            return Err(TreeError::new(format!(
+                "file {file_index} has external identifiers but no snapshot collection"
+            )));
+        };
+        let collection = tree_bundles
+            .get_mut(bundle)
+            .and_then(|bundle| bundle.collections.get_mut(position))
+            .ok_or_else(|| {
+                TreeError::new(format!(
+                    "file {file_index} resolves to collection {bundle}/{position}, which the snapshot does not hold"
+                ))
+            })?;
+        collection.dependencies = slots.clone();
     }
     Ok(())
 }
