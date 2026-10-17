@@ -109,6 +109,16 @@ pub fn binary_asset_claim(
     }
 }
 
+/// Whether `BinaryAssetContentExtractor` admits this arm, without keeping the extension.
+///
+/// The claim dispatch only needs the gate, while the extension belongs to the producer - a font's
+/// needs the real first four bytes and a video clip's needs the original path. This **delegates** to
+/// [`binary_asset_claim`] with whatever data the caller has rather than restating the four gates, so
+/// the claim and the producer cannot drift apart. The extension it computes on the way is discarded.
+pub fn binary_asset_claims(facts: BinaryAssetFacts<'_>) -> bool {
+    binary_asset_claim(facts, HostPathPlatform::host()).is_some()
+}
+
 // `FontExtensions.GetFontExtension` is already ported at
 // `resource_extensions::font_extension`, and `VideoClipExtensions.GetExtensionFromPath` at
 // `resource_extensions::video_export_extension`. An earlier version of this module reimplemented

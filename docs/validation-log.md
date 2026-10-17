@@ -1,5 +1,45 @@
 # Validation log
 
+## 2026-10-16 - The claim dispatch and the JSON producer
+
+- Outcome: added `claim_for_extractor` (the per-extractor decisions turned into the assembly rule's
+  three-way claim), `PrimaryContentObjectFacts`, `json_content_document`, and
+  `binary_asset_claims`. 1917 library tests (up from 1910).
+- **The dispatch exists so the route does not have to know extractor names.** A web handler that
+  matched on `"GlbMeshExporter"` and friends would put the pipeline's precedence rules in the HTTP
+  layer, where nothing tests them. `claim_for_extractor` takes the registration plus a facts value and
+  returns `Declined`, `Empty` or `Claimed`, so the route supplies facts and the precedence stays in one
+  tested place.
+- **The empty handlers answer `Empty` unconditionally, first.** All twenty claim every asset they are
+  reached for, into the shared empty collection; that is the reason `PrimaryContentClaim` has three
+  states rather than two, and the dispatch shows it in one line.
+- **The script flag maps exactly onto the claim.** `ScriptExtractorState` returns
+  `ScriptCollection` on the first MonoScript and `EmptyCollection` afterwards, and those become
+  `Claimed` and `Empty`. The stateful flag is not a special case in the dispatch - it is the reason the
+  `Empty` variant exists.
+- **An audio clip is claimed even though its producer cannot run yet.** The reference's gate is a
+  successful decode, which the dispatch cannot perform. Declining would hand the clip to the JSON
+  fallback, which the reference never does for an audio clip, so claiming it and letting the producer
+  report `Unimplemented` is the honest choice: the asset fails visibly instead of being exported as
+  the wrong format.
+- **The JSON producer's line break is the host's, and that is a real difference between two callers.**
+  `JsonContentExtractor.Export` writes through `new StreamWriter(stream)`, which takes
+  `TextWriter.NewLine` from `Environment.NewLine` because nothing sets it; the web asset tab sets
+  `NewLine = "\n"` explicitly. The same asset therefore produces different bytes through the two
+  paths, and the test asserts the host break on whichever platform CI is running.
+- **`binary_asset_claims` delegates rather than restates.** It answers only the gate, since the
+  extension belongs to the producer - a font's needs the real first four bytes, a video clip's needs
+  the original path - and it calls the already-ported `binary_asset_claim` with whatever data the
+  caller has so the two cannot drift.
+- **The stack and the dispatch are tested together.** The final test runs
+  `handler_stack_for_object` and `claim_for_extractor` through
+  `create_primary_content_collections_for_objects` and asserts that a set mesh selects
+  `GlbMeshExporter` while the same mesh with no geometry falls through to `JsonContentExtractor` -
+  the precedence rule end to end, in one assertion.
+- Evidence: `cargo test --locked --workspace` - **1917** library + 199 CLI tests, 0 failed, 1 ignored.
+  `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0. Ledger 409 rows,
+  MALFORMED=0, DUPES=0.
+
 ## 2026-10-16 - Extracting the factory-to-facts rule before the primary-content adapter needed it
 
 - Outcome: lifted the `FactoryAssetKind` to `ObjectClassFacts` mapping out of the project walk's

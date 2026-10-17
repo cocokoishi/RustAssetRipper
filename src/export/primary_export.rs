@@ -26,10 +26,17 @@
 use super::asset_path::{
     ExportAssetPathIdentity, ExportFileSystem, HostPathPlatform, UniqueNameState,
 };
+use super::json_walker::{write_json_body, JsonWalker};
 use super::primary_content::{
     plan_single_export_paths, run_primary_content_export_loop, PlannedSingleAssetPaths,
     PrimaryContentCollection, PrimaryContentExportEvent, PrimaryContentExportStep,
 };
+use super::primary_content::{PrimaryContentClaim, PrimaryHandlerRegistration};
+use super::primary_extractors::{
+    binary_asset_claims, deleted_assets_claim, glb_asset_claim, BinaryAssetFacts, GlbAssetFacts,
+    GlbModelMainAsset, ScriptClaim, ScriptExtractorState,
+};
+use crate::serialized_file::object::SerializedValue;
 
 /// The payload each primary-content extractor produces, taken from its collection class.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -208,14 +215,136 @@ where
     }
 }
 
+/// `JsonContentExtractor.Export`: the JSON document for one asset.
+///
+/// **The line break is the host's, not `\n`.** The reference writes through
+/// `using StreamWriter writer = new(stream)`, which takes `TextWriter.NewLine` from
+/// `Environment.NewLine` because nothing sets it - so the file export's documents use `\r\n` on
+/// Windows. The web surface is the opposite case: `AssetRipper.GUI.Web/Pages/Assets/AssetAPI.cs`
+/// sets `StringWriter { NewLine = "\n" }` explicitly. The two callers therefore produce different
+/// bytes for the same asset, and this function is the file-export one. `JsonWalker::new()` supplies
+/// the host default, which is what `StreamWriter` does.
+pub fn json_content_document(value: &SerializedValue) -> String {
+    let mut walker = JsonWalker::new();
+    write_json_body(&mut walker, value);
+    walker.finish()
+}
+
+/// The facts the claim dispatch reads for one workspace object.
+///
+/// Every field is a caller-supplied answer, because each one needs decoded asset data: whether a mesh
+/// is set, whether an image texture has intact bytes, which of the binary arms applies. Gathering
+/// them is the adapter's job; deciding from them is this module's.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PrimaryContentObjectFacts<'a> {
+    /// `GlbModelExporter`: the kind of `asset.MainAsset`.
+    pub model_main_asset: GlbModelMainAsset,
+    /// `DeletedAssetsExporter`: `asset.MainAsset is DeletedAssetsInformation`.
+    pub main_asset_is_deleted_information: bool,
+    /// `GlbMeshExporter`: `MeshExtensions.IsSet()`.
+    pub mesh_is_set: bool,
+    /// `GlbNavMeshExporter`: `HeightMeshes` is non-null.
+    pub height_meshes_present: bool,
+    /// `GlbTerrainExporter` and `TerrainHeatmapExporter`: `asset is ITerrainData`.
+    pub is_terrain_data: bool,
+    /// `TextureExporter`: `ImageTextureExtensions.CheckAssetIntegrity()`.
+    pub image_texture_intact: bool,
+    /// `AudioContentExtractor`: `asset is IAudioClip`.
+    ///
+    /// The source's gate is a successful decode, which this dispatch cannot perform; an audio clip
+    /// is therefore **claimed** and its producer reports `Unimplemented` until one exists. Claiming
+    /// it is the honest choice: declining would hand the asset to the JSON fallback, which the
+    /// reference never does for an audio clip.
+    pub is_audio_clip: bool,
+    /// `ScriptContentExtractor`: `asset is IMonoScript`.
+    pub is_mono_script: bool,
+    /// `BinaryAssetContentExtractor`: which of its four arms applies, if any.
+    pub binary: Option<BinaryAssetFacts<'a>>,
+}
+
+/// `IContentExtractor.TryCreateCollection` for one handler in an object's stack.
+///
+/// This is the dispatch that turns the per-extractor decisions into the three-way claim the assembly
+/// rule needs, so a route's closure is a facts lookup rather than a `match` on extractor names
+/// scattered through the web layer.
+///
+/// The empty handlers are handled first and unconditionally: all twenty claim every asset they are
+/// reached for, into the shared empty collection, which is why their answer is `Empty` rather than
+/// `Claimed`.
+///
+/// `script_state` is the script extractor's one-shot flag. Its two outcomes map exactly onto the
+/// claim: the first MonoScript creates the script collection, and every later one claims into the
+/// empty collection - so the flag is not a special case here but the reason the `Empty` variant
+/// exists at all.
+pub fn claim_for_extractor(
+    registration: &PrimaryHandlerRegistration,
+    facts: PrimaryContentObjectFacts<'_>,
+    script_state: &mut ScriptExtractorState,
+) -> PrimaryContentClaim {
+    if registration.is_empty_handler {
+        return PrimaryContentClaim::Empty;
+    }
+    let claimed = |admitted: bool| {
+        if admitted {
+            PrimaryContentClaim::Claimed
+        } else {
+            PrimaryContentClaim::Declined
+        }
+    };
+    match registration.extractor {
+        // The catch-all claims everything it is reached for; being last in stack order is what
+        // makes it a fallback rather than a first choice.
+        "JsonContentExtractor" => PrimaryContentClaim::Claimed,
+        "DeletedAssetsExporter" => claimed(deleted_assets_claim(
+            facts.main_asset_is_deleted_information,
+        )),
+        "GlbModelExporter" => claimed(
+            glb_asset_claim(GlbAssetFacts::Model {
+                main_asset: facts.model_main_asset,
+            })
+            .is_some(),
+        ),
+        "GlbMeshExporter" => claimed(
+            glb_asset_claim(GlbAssetFacts::Mesh {
+                mesh_is_set: facts.mesh_is_set,
+            })
+            .is_some(),
+        ),
+        "GlbNavMeshExporter" => claimed(
+            glb_asset_claim(GlbAssetFacts::NavMesh {
+                height_meshes_present: facts.height_meshes_present,
+            })
+            .is_some(),
+        ),
+        "GlbTerrainExporter" => claimed(glb_asset_claim(GlbAssetFacts::Terrain).is_some()),
+        "BinaryAssetContentExtractor" => claimed(facts.binary.is_some_and(binary_asset_claims)),
+        "AudioContentExtractor" => claimed(facts.is_audio_clip),
+        "TextureExporter" => claimed(facts.image_texture_intact),
+        "TerrainHeatmapExporter" => claimed(facts.is_terrain_data),
+        "ScriptContentExtractor" => match script_state.claim(facts.is_mono_script) {
+            None => PrimaryContentClaim::Declined,
+            Some(ScriptClaim::ScriptCollection) => PrimaryContentClaim::Claimed,
+            Some(ScriptClaim::EmptyCollection) => PrimaryContentClaim::Empty,
+        },
+        // An extractor this dispatch does not know cannot be silently declined into the JSON
+        // fallback: `Declined` here means "the stack continues", and a caller that added a handler
+        // would see the asset land somewhere unexpected. Keeping the arm explicit makes that visible.
+        _ => PrimaryContentClaim::Declined,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        export_primary_content, payload_kind, PrimaryContentFailure, PrimaryContentPayload,
+        claim_for_extractor, export_primary_content, json_content_document, payload_kind,
+        PrimaryContentFailure, PrimaryContentObjectFacts, PrimaryContentPayload,
         PrimaryContentPayloadKind, PrimaryContentProduced,
     };
     use crate::export::asset_path::{ExportAssetPathIdentity, ExportFileSystem, HostPathPlatform};
+    use crate::export::primary_content::PrimaryContentClaim;
+    use crate::export::primary_content::PrimaryHandlerRegistration;
     use crate::export::primary_content::{PrimaryContentCollection, PrimaryContentExportStep};
+    use crate::export::primary_extractors::{GlbModelMainAsset, ScriptExtractorState};
 
     /// The unique-name search only probes, so the probe answers "nothing exists".
     struct EmptyFileSystem;
@@ -499,5 +628,347 @@ mod tests {
             2,
             "both writes happened, under different names"
         );
+    }
+
+    /// The JSON extractor's document uses the **host** line break, unlike the web surface.
+    ///
+    /// `JsonContentExtractor.Export` writes through a `StreamWriter` that nobody reconfigures, so
+    /// `TextWriter.NewLine` is `Environment.NewLine`; the web asset tab sets `NewLine = "\n"`
+    /// explicitly. Asserted on both platforms because CI runs on both, and because a hard-coded `\n`
+    /// would pass a single-platform check while producing different bytes from the reference on
+    /// Windows.
+    #[test]
+    fn the_json_document_uses_the_host_line_break() {
+        use crate::serialized_file::object::SerializedFieldValue;
+        use crate::serialized_file::object::SerializedValue;
+
+        let value = SerializedValue::Struct(vec![
+            SerializedFieldValue {
+                name: "m_A".to_owned(),
+                value: SerializedValue::I32(1),
+            },
+            SerializedFieldValue {
+                name: "m_B".to_owned(),
+                value: SerializedValue::Bool(true),
+            },
+        ]);
+        let document = json_content_document(&value);
+
+        if cfg!(windows) {
+            assert!(
+                document.contains("\r\n"),
+                "the file export's writer uses Environment.NewLine: {document:?}"
+            );
+            assert!(
+                !document.replace("\r\n", "").contains('\n'),
+                "no bare newline should remain on Windows: {document:?}"
+            );
+        } else {
+            assert!(
+                !document.contains('\r'),
+                "the host line break is a bare newline off Windows: {document:?}"
+            );
+        }
+        // The document's shape is the walker's, which the shape fixture already pins; this only
+        // needs to show that both fields reached it.
+        assert!(document.contains("\"m_A\""), "{document:?}");
+        assert!(document.contains("\"m_B\""), "{document:?}");
+    }
+
+    /// A facts value with every fact absent, so each test states only what it is about.
+    fn no_facts() -> PrimaryContentObjectFacts<'static> {
+        PrimaryContentObjectFacts {
+            model_main_asset: GlbModelMainAsset::Other,
+            main_asset_is_deleted_information: false,
+            mesh_is_set: false,
+            height_meshes_present: false,
+            is_terrain_data: false,
+            image_texture_intact: false,
+            is_audio_clip: false,
+            is_mono_script: false,
+            binary: None,
+        }
+    }
+
+    fn registration(extractor: &'static str, is_empty_handler: bool) -> PrimaryHandlerRegistration {
+        // The table's entries are `&'static str`, and so are these literals.
+        let target: &'static str = match extractor {
+            "JsonContentExtractor" => "IUnityObjectBase",
+            "DeletedAssetsExporter" => "IUnityObjectBase",
+            "GlbModelExporter" => "IGameObject",
+            "GlbMeshExporter" => "IMesh",
+            "GlbNavMeshExporter" => "INavMeshData",
+            "GlbTerrainExporter" => "ITerrainData",
+            "TerrainHeatmapExporter" => "ITerrainData",
+            "BinaryAssetContentExtractor" => "ITextAsset",
+            "AudioContentExtractor" => "IAudioClip",
+            "TextureExporter" => "IImageTexture",
+            "ScriptContentExtractor" => "IMonoScript",
+            _ => "IAnimation",
+        };
+        PrimaryHandlerRegistration {
+            target,
+            extractor,
+            is_empty_handler,
+        }
+    }
+
+    /// Every empty handler claims, into the shared empty collection.
+    #[test]
+    fn the_empty_handlers_claim_as_empty() {
+        let mut script = ScriptExtractorState::new();
+        assert_eq!(
+            claim_for_extractor(
+                &registration("EmptyContentExtractor", true),
+                no_facts(),
+                &mut script
+            ),
+            PrimaryContentClaim::Empty
+        );
+    }
+
+    /// The single-fact extractors, each driven by its own fact and nothing else.
+    #[test]
+    fn the_single_fact_extractors_follow_their_own_fact() {
+        let mut script = ScriptExtractorState::new();
+        let mut claim = |extractor: &'static str, facts: PrimaryContentObjectFacts<'static>| {
+            claim_for_extractor(&registration(extractor, false), facts, &mut script)
+        };
+
+        // The catch-all always claims.
+        assert_eq!(
+            claim("JsonContentExtractor", no_facts()),
+            PrimaryContentClaim::Claimed
+        );
+        // Deleted assets need their main asset, and decline otherwise.
+        assert_eq!(
+            claim("DeletedAssetsExporter", no_facts()),
+            PrimaryContentClaim::Declined
+        );
+        assert_eq!(
+            claim(
+                "DeletedAssetsExporter",
+                PrimaryContentObjectFacts {
+                    main_asset_is_deleted_information: true,
+                    ..no_facts()
+                }
+            ),
+            PrimaryContentClaim::Claimed
+        );
+        // A mesh is admitted only when it is set.
+        assert_eq!(
+            claim("GlbMeshExporter", no_facts()),
+            PrimaryContentClaim::Declined
+        );
+        assert_eq!(
+            claim(
+                "GlbMeshExporter",
+                PrimaryContentObjectFacts {
+                    mesh_is_set: true,
+                    ..no_facts()
+                }
+            ),
+            PrimaryContentClaim::Claimed
+        );
+        // A navmesh needs a non-null height-mesh list.
+        assert_eq!(
+            claim("GlbNavMeshExporter", no_facts()),
+            PrimaryContentClaim::Declined
+        );
+        assert_eq!(
+            claim(
+                "GlbNavMeshExporter",
+                PrimaryContentObjectFacts {
+                    height_meshes_present: true,
+                    ..no_facts()
+                }
+            ),
+            PrimaryContentClaim::Claimed
+        );
+        // The GLB terrain extractor has no condition, so its stack membership is its only gate.
+        assert_eq!(
+            claim("GlbTerrainExporter", no_facts()),
+            PrimaryContentClaim::Claimed
+        );
+        // An image texture needs intact bytes.
+        assert_eq!(
+            claim("TextureExporter", no_facts()),
+            PrimaryContentClaim::Declined
+        );
+        assert_eq!(
+            claim(
+                "TextureExporter",
+                PrimaryContentObjectFacts {
+                    image_texture_intact: true,
+                    ..no_facts()
+                }
+            ),
+            PrimaryContentClaim::Claimed
+        );
+        // The heatmap claims any terrain data, like the GLB terrain extractor.
+        assert_eq!(
+            claim("TerrainHeatmapExporter", no_facts()),
+            PrimaryContentClaim::Declined
+        );
+        assert_eq!(
+            claim(
+                "TerrainHeatmapExporter",
+                PrimaryContentObjectFacts {
+                    is_terrain_data: true,
+                    ..no_facts()
+                }
+            ),
+            PrimaryContentClaim::Claimed
+        );
+        // An audio clip is claimed so its producer can report that it is unimplemented; declining
+        // would hand it to the JSON fallback, which the reference never does.
+        assert_eq!(
+            claim("AudioContentExtractor", no_facts()),
+            PrimaryContentClaim::Declined
+        );
+        assert_eq!(
+            claim(
+                "AudioContentExtractor",
+                PrimaryContentObjectFacts {
+                    is_audio_clip: true,
+                    ..no_facts()
+                }
+            ),
+            PrimaryContentClaim::Claimed
+        );
+    }
+
+    /// The GLB model extractor admits only a hierarchy main asset.
+    #[test]
+    fn the_model_extractor_admits_only_a_hierarchy() {
+        let mut script = ScriptExtractorState::new();
+        for (main_asset, expected) in [
+            (
+                GlbModelMainAsset::SceneHierarchy,
+                PrimaryContentClaim::Claimed,
+            ),
+            (
+                GlbModelMainAsset::PrefabHierarchy,
+                PrimaryContentClaim::Claimed,
+            ),
+            (GlbModelMainAsset::Other, PrimaryContentClaim::Declined),
+        ] {
+            let facts = PrimaryContentObjectFacts {
+                model_main_asset: main_asset,
+                ..no_facts()
+            };
+            assert_eq!(
+                claim_for_extractor(&registration("GlbModelExporter", false), facts, &mut script),
+                expected,
+                "{main_asset:?}"
+            );
+        }
+    }
+
+    /// The script flag's two outcomes become the claim's `Claimed` and `Empty`.
+    #[test]
+    fn the_script_flag_becomes_claimed_then_empty() {
+        let mut script = ScriptExtractorState::new();
+        let script_facts = PrimaryContentObjectFacts {
+            is_mono_script: true,
+            ..no_facts()
+        };
+        let registration = registration("ScriptContentExtractor", false);
+
+        // A non-MonoScript declines and leaves the flag alone.
+        assert_eq!(
+            claim_for_extractor(&registration, no_facts(), &mut script),
+            PrimaryContentClaim::Declined
+        );
+        // The first MonoScript creates the script collection.
+        assert_eq!(
+            claim_for_extractor(&registration, script_facts, &mut script),
+            PrimaryContentClaim::Claimed
+        );
+        // Every later one claims into the shared empty collection.
+        assert_eq!(
+            claim_for_extractor(&registration, script_facts, &mut script),
+            PrimaryContentClaim::Empty
+        );
+        assert_eq!(
+            claim_for_extractor(&registration, script_facts, &mut script),
+            PrimaryContentClaim::Empty
+        );
+    }
+
+    /// The binary arms go through the ported gate rather than a restated one.
+    #[test]
+    fn the_binary_extractor_reuses_the_ported_gate() {
+        use crate::export::primary_extractors::BinaryAssetFacts;
+        let mut script = ScriptExtractorState::new();
+        let registration = registration("BinaryAssetContentExtractor", false);
+
+        let with_data = PrimaryContentObjectFacts {
+            binary: Some(BinaryAssetFacts::TextAsset { script_data: b"x" }),
+            ..no_facts()
+        };
+        assert_eq!(
+            claim_for_extractor(&registration, with_data, &mut script),
+            PrimaryContentClaim::Claimed
+        );
+
+        let empty = PrimaryContentObjectFacts {
+            binary: Some(BinaryAssetFacts::TextAsset { script_data: b"" }),
+            ..no_facts()
+        };
+        assert_eq!(
+            claim_for_extractor(&registration, empty, &mut script),
+            PrimaryContentClaim::Declined,
+            "an empty payload declines so the stack continues"
+        );
+
+        // No arm at all is a decline, not a claim.
+        assert_eq!(
+            claim_for_extractor(&registration, no_facts(), &mut script),
+            PrimaryContentClaim::Declined
+        );
+    }
+
+    /// The stack and the dispatch together select the extractor the reference would select.
+    ///
+    /// This is the payoff: `handler_stack_for_object` supplies the order, `claim_for_extractor`
+    /// supplies the answers, and the assembly rule runs between them.
+    #[test]
+    fn the_stack_and_dispatch_select_the_reference_extractor() {
+        use crate::export::primary_content::{
+            create_primary_content_collections_for_objects, PrimaryContentObject,
+        };
+        use crate::export::project_exporter::ObjectClassFacts;
+
+        let objects = [PrimaryContentObject {
+            identity: 1,
+            facts: ObjectClassFacts::new(43, false),
+            collection_name: "Tri",
+            collection_assets: &[1],
+        }];
+
+        // A mesh that is set goes to the mesh exporter even though JSON is in the stack.
+        let mut script = ScriptExtractorState::new();
+        let collections = create_primary_content_collections_for_objects(&objects, |reg, _| {
+            claim_for_extractor(
+                reg,
+                PrimaryContentObjectFacts {
+                    mesh_is_set: true,
+                    ..no_facts()
+                },
+                &mut script,
+            )
+        })
+        .unwrap();
+        assert_eq!(collections.len(), 1);
+        assert_eq!(collections[0].extractor, "GlbMeshExporter");
+
+        // The same mesh with no geometry falls through to the JSON catch-all.
+        let mut script = ScriptExtractorState::new();
+        let collections = create_primary_content_collections_for_objects(&objects, |reg, _| {
+            claim_for_extractor(reg, no_facts(), &mut script)
+        })
+        .unwrap();
+        assert_eq!(collections[0].extractor, "JsonContentExtractor");
     }
 }
