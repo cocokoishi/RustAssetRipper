@@ -1,5 +1,26 @@
 # Source behavior and differential findings
 
+## SCOPE-GLB-RIGID-MESH-001 - the baseline emits rigid meshes only, so an exported GLB has no skeleton (baseline boundary, reproduced deliberately)
+
+A GLB produced by either the baseline or the port carries per-vertex `JOINTS_0` and `WEIGHTS_0`
+attributes and **no glTF `skin` object and no inverse bind matrices**. That looks like a missing
+feature and is not one: it is what the baseline does.
+
+`GlbMeshBuilder` and `GlbSubMeshBuilder` build every sub-mesh through
+`sceneBuilder.AddRigidMesh(subMeshBuilder, node)` - including the terrain and level builders - and the
+entire `AssetRipper.Export.Modules.Models` module contains no `inverseBind` accessor and no code that
+constructs a SharpGLTF skin. The skin data is not dropped: `GlbSubMeshBuilder.GetSkin` reads
+`MeshData.TryGetSkinAtIndex` and feeds `BoneWeight4` into the vertex builder as `IVertexSkinning`, so
+the bone indices and weights reach the file as attributes. What is absent is the glTF-side skeleton
+binding that would make a viewer articulate the mesh.
+
+**Why this is recorded.** The port reproduces the behaviour, and a future reader comparing an exported
+GLB against a viewer's expectation would find no skeleton in either `AssetRipper.GUI.Free` output or
+the port's, then plausibly "fix" the port by emitting a `skins` array. That change would make the port
+diverge from the baseline on every skinned asset while looking like an improvement. The boundary is
+therefore written down, with the exact call site as evidence, so the difference is attributed
+correctly: not a port gap, and not a reason to leave 实现中 on the mesh row.
+
 ## SCOPE-SCRIPT-DECOMPILER-001 - the script export's decompilation half is a third-party library, and no mature Rust equivalent exists (blocked, recorded rather than omitted)
 
 Every other gap this log records is a port that was missing. This one is different: part of the

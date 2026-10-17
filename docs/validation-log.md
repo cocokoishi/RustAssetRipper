@@ -1,5 +1,38 @@
 # Validation log
 
+## 2026-10-16 - Auditing an 实现中 row against the code: RES-MODEL-001 was both understated and wrong
+
+- Outcome: audited the mesh/model row against the current tree and re-statused it from 实现中 to
+  已实现但未验证. Two of its cells were not merely stale but **false**, and one genuine baseline
+  boundary was found and recorded. Ledger: 实现中 now 8, 已实现但未验证 19.
+- **The detail that turned this into real work rather than a re-wording.** The decisive question was
+  whether the port's GLB is missing skinning. It is not: `glb.rs` builds `JOINTS_0` and `WEIGHTS_0`,
+  and `process_skin_bindings` reproduces `SparseWeight8.Create` (duplicate merge, exact-zero drop),
+  `OrderedByWeight` (strongest first, magnitude-compared, smaller indices on ties) and the
+  `VertexJoints4` renormalization that is skipped at an exact zero sum. The row's gap cell claimed
+  weights and bind poses were still *required*, which was false.
+- **What is actually absent is absent in the baseline too, and that distinction is the finding.** The
+  port emits no glTF `skin` object and no inverse bind matrices - and neither does the reference.
+  `GlbMeshBuilder` and `GlbSubMeshBuilder` call `sceneBuilder.AddRigidMesh` for every sub-mesh,
+  including terrain and level, and the whole `AssetRipper.Export.Modules.Models` module contains no
+  `inverseBind` accessor. Skin data does reach the file as vertex attributes; what is missing is the
+  glTF-side skeleton binding. Recorded as `SCOPE-GLB-RIGID-MESH-001` precisely so a later reader does
+  not "fix" the port by adding a `skins` array and diverge from the baseline on every skinned asset.
+- **A cell that was simply false.** The row's bounds cell read "model export settings pending". The
+  baseline has **no** model export setting at all: `ExportSettings` carries audio, image, lightmap,
+  script, shader, sprite, text, unreadable and texture-extension options and nothing model-related,
+  and the only model-adjacent enum, `TerrainExportMode`, is declared and shown in the GUI but never
+  consumed. There was never an option to port.
+- **What is genuinely open, stated as such:** neither the mesh nor the scene GLB builder has a
+  production caller, so nothing exports a GLB end-to-end and no geometry lane has been compared
+  against a reference export. That is wiring (`EXP-GLB-001`, `EXP-GLB-SCENE-001`), not conversion.
+- **Method note:** the row's evidence cell quoted "1216 library and 55 CLI tests" and "1236 library
+  and 55 CLI tests" while the suite is now 1897 and 199. Counts in evidence cells rot silently as the
+  codebase grows, and a stale count is the cheapest signal that nobody has re-read the row. Every
+  re-statused row should carry the count from the run that justified it.
+- Evidence: `cargo test --locked --workspace` - 1897 library + 199 bin tests, 0 failed. Ledger 409
+  rows, 已验证 380, 实现中 8, 已实现但未验证 19, 受外部条件阻塞 2, MALFORMED=0, DUPES=0.
+
 ## 2026-10-16 - A baseline capability that is not in the baseline source: C# decompilation
 
 - Outcome: investigated what the primary-content script export actually requires, and found that the
