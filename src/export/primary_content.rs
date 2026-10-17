@@ -30,6 +30,7 @@ use super::asset_path::{
     remove_instance_suffixes, AssetPathError, ExportAssetPathIdentity, ExportFileSystem,
     HostPathPlatform, MAX_FILE_NAME_LENGTH,
 };
+use super::project_exporter::{class_satisfies_target, ObjectClassFacts};
 
 /// One `RegisterHandler` call in `RegisterDefaultHandlers` source order.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -431,13 +432,113 @@ pub fn create_primary_content_collections<'a>(
 /// `CreateCollection` failed to find a handler for the asset.
 ///
 /// The source throws `There is no exporter that can handle '<asset>'`. It is unreachable through
-/// the default registration because `RegisterHandler<IUnityObjectBase>(JsonContentExtractor)` is
-/// first and `DeletedAssetsExporter` is last, but the port keeps the failure loud rather than
+/// the default registration because `JsonContentExtractor` is the **last** entry in stack order -
+/// it is registered first, and the stack runs in reverse registration order - so it is the final
+/// fallback after every other handler has declined. The port keeps the failure loud rather than
 /// inventing a fallback: a silently-dropped asset would be a lost resource.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PrimaryContentNoHandler {
     /// A stable identity for the asset, matching [`PrimaryContentAsset::identity`].
     pub identity: u64,
+}
+
+/// What one extractor's `TryCreateCollection` decided for an object.
+///
+/// The reference separates two facts that are easy to conflate: whether an extractor **claimed** the
+/// asset, and whether the collection it built is the shared empty one. The empty handlers claim
+/// every asset they are reached for, so "claimed" alone cannot decide whether the asset is dropped.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PrimaryContentClaim {
+    /// The extractor declined; the stack continues to the next handler.
+    Declined,
+    /// The extractor claimed into `EmptyExportCollection`, so the asset is queued and then dropped.
+    Empty,
+    /// The extractor claimed into a real collection.
+    Claimed,
+}
+
+/// One workspace object presented to the primary-content pipeline.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PrimaryContentObject<'a> {
+    /// A stable identity for the `queued` set.
+    pub identity: u64,
+    /// The generated-type facts that decide which registration targets this object satisfies.
+    pub facts: ObjectClassFacts,
+    /// `ExportCollectionBase.Name` for the collection this object creates.
+    pub collection_name: &'a str,
+    /// Every asset the created collection would claim, this object first.
+    pub collection_assets: &'a [u64],
+}
+
+/// `ObjectHandlerStack.GetHandlerStack` for one workspace object, in stack order.
+///
+/// The reference matches on the runtime type with `type == baseType || allowInheritance &&
+/// type.IsAssignableTo(baseType)`. [`class_satisfies_target`] already answers both disjuncts for a
+/// class id, including the `TypeTreeObject`, `UnknownObject` and `UnreadableObject` fallbacks that a
+/// generated-interface check alone would miss, so it *is* the predicate - there is no second rule to
+/// write here.
+pub fn handler_stack_for_object(
+    facts: ObjectClassFacts,
+) -> Vec<&'static PrimaryHandlerRegistration> {
+    handler_stack_from(PRIMARY_HANDLERS, |registration| {
+        class_satisfies_target(facts, registration.target)
+    })
+}
+
+/// `PrimaryContentExporter.CreateCollections` over workspace objects.
+///
+/// This is [`create_primary_content_collections`] with the stack derived per object instead of
+/// supplied: the caller answers only the extractor's own `TryCreateCollection`, which is the part
+/// that needs decoded asset data. The ordering rules are the same ones that function documents - the
+/// asset enters `queued` **before** the empty check, a non-empty collection queues all its members,
+/// and an exhausted stack is an error rather than a silent skip.
+pub fn create_primary_content_collections_for_objects(
+    objects: &[PrimaryContentObject<'_>],
+    mut claim: impl FnMut(&PrimaryHandlerRegistration, &PrimaryContentObject<'_>) -> PrimaryContentClaim,
+) -> Result<Vec<PrimaryContentCollection>, PrimaryContentNoHandler> {
+    let mut queued: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let mut collections = Vec::new();
+    for object in objects {
+        if !queued.insert(object.identity) {
+            continue;
+        }
+        let stack = handler_stack_for_object(object.facts);
+        let mut selected = None;
+        let mut is_empty = false;
+        for registration in &stack {
+            match claim(registration, object) {
+                PrimaryContentClaim::Declined => continue,
+                PrimaryContentClaim::Empty => {
+                    selected = Some(*registration);
+                    is_empty = true;
+                    break;
+                }
+                PrimaryContentClaim::Claimed => {
+                    selected = Some(*registration);
+                    break;
+                }
+            }
+        }
+        let Some(registration) = selected else {
+            return Err(PrimaryContentNoHandler {
+                identity: object.identity,
+            });
+        };
+        if is_empty {
+            // Queued above, members deliberately not queued.
+            continue;
+        }
+        for member in object.collection_assets {
+            queued.insert(*member);
+        }
+        collections.push(PrimaryContentCollection {
+            extractor: registration.extractor,
+            primary: object.identity,
+            assets: object.collection_assets.to_vec(),
+            name: object.collection_name.to_owned(),
+        });
+    }
+    Ok(collections)
 }
 
 impl core::fmt::Display for PrimaryContentNoHandler {
@@ -644,16 +745,18 @@ pub fn plan_single_export_paths(
 mod tests {
     use super::{
         create_primary_content_collection, create_primary_content_collections,
-        format_export_progress, handler_stack_for, handler_stack_from, handlers_for_target,
+        create_primary_content_collections_for_objects, format_export_progress, handler_stack_for,
+        handler_stack_for_object, handler_stack_from, handlers_for_target,
         plan_single_export_paths, primary_content_progress_total, run_primary_content_export_loop,
-        select_primary_content_extractor, PrimaryContentAsset, PrimaryContentExportEvent,
-        PrimaryContentExportStep, PrimaryContentNoHandler, PrimaryHandlerRegistration,
-        PRIMARY_HANDLERS,
+        select_primary_content_extractor, PrimaryContentAsset, PrimaryContentClaim,
+        PrimaryContentExportEvent, PrimaryContentExportStep, PrimaryContentNoHandler,
+        PrimaryContentObject, PrimaryHandlerRegistration, PRIMARY_HANDLERS,
     };
     use crate::export::asset_path::{
         join_path, ExportAssetPathIdentity, ExportFileSystem, HostPathPlatform, UniqueNameState,
         MAX_FILE_NAME_LENGTH,
     };
+    use crate::export::project_exporter::ObjectClassFacts;
 
     /// A collection that claims only `identity`, which is what the single-asset extractors do.
     ///
@@ -1172,6 +1275,207 @@ mod tests {
         assert_eq!(extractors, ["GlbModelExporter", "EmptyContentExtractor"]);
     }
 
+    /// The per-object stack, asserted against the real interface table.
+    ///
+    /// Four classes with different interface sets pin the reverse-registration rule and the
+    /// inheritance filter together: a class only sees the handlers whose registered target it
+    /// satisfies, and among those the last registered is first.
+    #[test]
+    fn object_stack_runs_in_reverse_registration_order() {
+        fn extractors(facts: ObjectClassFacts) -> Vec<&'static str> {
+            handler_stack_for_object(facts)
+                .iter()
+                .map(|registration| registration.extractor)
+                .collect()
+        }
+
+        // Class 43 is `IMesh,IUnityObjectBase`.
+        assert_eq!(
+            extractors(ObjectClassFacts::new(43, false)),
+            [
+                "DeletedAssetsExporter",
+                "GlbMeshExporter",
+                "JsonContentExtractor"
+            ]
+        );
+        // Class 1 is `IGameObject,IUnityObjectBase`, so the model exporter appears between them.
+        assert_eq!(
+            extractors(ObjectClassFacts::new(1, false)),
+            [
+                "DeletedAssetsExporter",
+                "GlbModelExporter",
+                "JsonContentExtractor"
+            ]
+        );
+        // Class 115 is `IMonoScript,ITextAsset,IUnityObjectBase`: three different extractors, and
+        // the binary handler is reached through `ITextAsset` rather than through the script one.
+        assert_eq!(
+            extractors(ObjectClassFacts::new(115, false)),
+            [
+                "DeletedAssetsExporter",
+                "ScriptContentExtractor",
+                "BinaryAssetContentExtractor",
+                "JsonContentExtractor"
+            ]
+        );
+        // Class 28 is `IImageTexture,ITexture,ITexture2D,IUnityObjectBase`.
+        assert_eq!(
+            extractors(ObjectClassFacts::new(28, false)),
+            [
+                "DeletedAssetsExporter",
+                "TextureExporter",
+                "JsonContentExtractor"
+            ]
+        );
+    }
+
+    /// Selection walks the stack and takes the first claimant, so a declining tail falls to JSON.
+    #[test]
+    fn selection_takes_the_first_claimant_in_stack_order() {
+        let objects = [PrimaryContentObject {
+            identity: 1,
+            facts: ObjectClassFacts::new(43, false),
+            collection_name: "Tri",
+            collection_assets: &[1],
+        }];
+
+        // Every handler declines except the JSON fallback.
+        let collections =
+            create_primary_content_collections_for_objects(&objects, |registration, _| {
+                if registration.extractor == "JsonContentExtractor" {
+                    PrimaryContentClaim::Claimed
+                } else {
+                    PrimaryContentClaim::Declined
+                }
+            })
+            .unwrap();
+        assert_eq!(collections.len(), 1);
+        assert_eq!(collections[0].extractor, "JsonContentExtractor");
+
+        // The mesh handler claims first when it accepts, and JSON is never reached.
+        let collections =
+            create_primary_content_collections_for_objects(&objects, |registration, _| {
+                match registration.extractor {
+                    "GlbMeshExporter" => PrimaryContentClaim::Claimed,
+                    "JsonContentExtractor" => PrimaryContentClaim::Claimed,
+                    _ => PrimaryContentClaim::Declined,
+                }
+            })
+            .unwrap();
+        assert_eq!(collections[0].extractor, "GlbMeshExporter");
+    }
+
+    /// The empty-versus-non-empty queueing rule, contrasted on the same two objects.
+    ///
+    /// This is the documented difference from the Unity-project pipeline, and the two halves are the
+    /// only way to see it: the *same* member list either queues its members or does not, purely
+    /// depending on whether the claiming collection was the empty one.
+    #[test]
+    fn an_empty_claim_drops_the_collection_but_keeps_the_asset_queued() {
+        let objects = [
+            PrimaryContentObject {
+                identity: 7,
+                facts: ObjectClassFacts::new(115, false),
+                collection_name: "Script",
+                collection_assets: &[7, 8],
+            },
+            PrimaryContentObject {
+                identity: 8,
+                facts: ObjectClassFacts::new(43, false),
+                collection_name: "Tri",
+                collection_assets: &[8],
+            },
+        ];
+        let json_claims = |registration: &PrimaryHandlerRegistration| {
+            registration.extractor == "JsonContentExtractor"
+        };
+
+        // The script claim is the empty one: no collection is added, and member 8 is NOT queued,
+        // so asset 8 is still visited and produces its own JSON collection.
+        let collections =
+            create_primary_content_collections_for_objects(&objects, |registration, _| {
+                if registration.extractor == "ScriptContentExtractor" {
+                    PrimaryContentClaim::Empty
+                } else if json_claims(registration) {
+                    PrimaryContentClaim::Claimed
+                } else {
+                    PrimaryContentClaim::Declined
+                }
+            })
+            .unwrap();
+        assert_eq!(collections.len(), 1, "the empty claim added no collection");
+        assert_eq!(
+            collections[0].primary, 8,
+            "member 8 was not queued, so it was visited on its own"
+        );
+
+        // The same claim as a real collection: member 8 IS queued, so it is skipped entirely.
+        let collections =
+            create_primary_content_collections_for_objects(&objects, |registration, _| {
+                if registration.extractor == "ScriptContentExtractor" || json_claims(registration) {
+                    PrimaryContentClaim::Claimed
+                } else {
+                    PrimaryContentClaim::Declined
+                }
+            })
+            .unwrap();
+        assert_eq!(collections.len(), 1);
+        assert_eq!(collections[0].primary, 7);
+        assert_eq!(collections[0].assets, vec![7, 8]);
+    }
+
+    /// A non-empty collection queues every member, so a later visit is skipped.
+    #[test]
+    fn a_non_empty_collection_queues_all_of_its_members() {
+        let objects = [
+            PrimaryContentObject {
+                identity: 1,
+                facts: ObjectClassFacts::new(1, false),
+                collection_name: "Scene",
+                collection_assets: &[1, 2, 3],
+            },
+            PrimaryContentObject {
+                identity: 2,
+                facts: ObjectClassFacts::new(43, false),
+                collection_name: "Tri",
+                collection_assets: &[2],
+            },
+        ];
+        let collections =
+            create_primary_content_collections_for_objects(&objects, |registration, object| {
+                if (object.identity == 1 && registration.extractor == "GlbModelExporter")
+                    || registration.extractor == "JsonContentExtractor"
+                {
+                    PrimaryContentClaim::Claimed
+                } else {
+                    PrimaryContentClaim::Declined
+                }
+            })
+            .unwrap();
+        assert_eq!(
+            collections.len(),
+            1,
+            "asset 2 was queued by asset 1's collection"
+        );
+        assert_eq!(collections[0].extractor, "GlbModelExporter");
+        assert_eq!(collections[0].assets, vec![1, 2, 3]);
+    }
+
+    /// An exhausted stack is the source's thrown exception, not a skipped asset.
+    #[test]
+    fn an_exhausted_object_stack_is_an_error() {
+        let objects = [PrimaryContentObject {
+            identity: 42,
+            facts: ObjectClassFacts::new(43, false),
+            collection_name: "Tri",
+            collection_assets: &[42],
+        }];
+        let error = create_primary_content_collections_for_objects(&objects, |_, _| {
+            PrimaryContentClaim::Declined
+        })
+        .unwrap_err();
+        assert_eq!(error.identity, 42);
+    }
     #[test]
     fn handler_table_opens_json_first_and_closes_deleted_last() {
         // 1 catch-all plus 20 empty handlers plus 14 content handlers plus the deleted tail.

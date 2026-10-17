@@ -1,5 +1,40 @@
 # Validation log
 
+## 2026-10-16 - The per-object handler stack, and the assembly rule over it
+
+- Outcome: first implementation step toward the primary-content route. The pipeline could previously
+  assemble collections only from a **caller-supplied** stack; it can now derive the stack from a
+  workspace object's class facts and run the assembly rule over it. 1902 library tests (up from 1897).
+- **`handler_stack_for_object` needs no second type rule.** The reference matches on the runtime type
+  with `type == baseType OR allowInheritance AND type.IsAssignableTo(baseType)`, and the port's
+  existing `class_satisfies_target` already answers both disjuncts for a class id - including the
+  `TypeTreeObject`, `UnknownObject` and `UnreadableObject` fallbacks that a generated-interface check
+  alone would miss. So the bridge is one line: filter the table by `class_satisfies_target` and reverse
+  it. Writing a new interface-membership rule here would have been the third duplicate in this area.
+- **`PrimaryContentClaim` keeps two facts apart that the source keeps apart.** Whether an extractor
+  *claimed* an asset and whether it claimed into the shared **empty** collection are different: the
+  twenty empty handlers claim every asset they are reached for, and only the second fact decides
+  whether the collection is dropped. A two-state answer could not express that, and the difference is
+  exactly the queueing rule the row documents.
+- **The stack order is asserted against the real interface table, not a stub.** Four classes with
+  different interface sets pin the reversal and the inheritance filter together: class 43 (Mesh) gives
+  `DeletedAssetsExporter, GlbMeshExporter, JsonContentExtractor`; class 1 (GameObject) inserts
+  `GlbModelExporter`; class 115 (MonoScript) gives `DeletedAssetsExporter, ScriptContentExtractor,
+  BinaryAssetContentExtractor, JsonContentExtractor`, reaching the binary handler through `ITextAsset`
+  rather than the script one; class 28 (Texture2D) gives `DeletedAssetsExporter, TextureExporter,
+  JsonContentExtractor`.
+- **The empty-versus-non-empty queueing rule is pinned by contrast.** The same two objects are run
+  twice: with the script claim empty, member 8 is not queued and is visited on its own; with the same
+  claim non-empty, member 8 is queued and skipped. That is the documented difference from the
+  Unity-project pipeline, and it is only visible with both halves.
+- **My own documented trap, hit within the hour.** The ledger edit adding this evidence contained a
+  raw `||` inside a code span - the exact thing the handoff warns about - which split the row and made
+  the parity report flag it. Repaired by merging the fragments and writing `OR`. The checker caught it
+  immediately, which is the point of running it after every ledger edit.
+- Evidence: `cargo test --locked --workspace` - **1902** library + 199 CLI tests, 0 failed, 1 ignored.
+  `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0. Ledger 409 rows,
+  已验证 380, 实现中 7, 已实现但未验证 20, 受外部条件阻塞 2, MALFORMED=0, DUPES=0.
+
 ## 2026-10-16 - Three parts of the primary-content collection contract that must NOT be ported
 
 - Outcome: closed the primary-content pipeline audit by establishing that its observable contract is
