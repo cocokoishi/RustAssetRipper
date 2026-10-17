@@ -1,5 +1,41 @@
 # Source behavior and differential findings
 
+## DIFF-JSON-PPTR-FORM-001 - the primary-content JSON extractor overrides the pointer form for dependency targets (base form verified, override ported from source)
+
+`JsonContentExtractor.Export` does not use `DefaultJsonWalker` directly: it subclasses it and
+**overrides `VisitPPtr`**. When the pointer's file id names one of the exporting collection's
+dependencies - the test is `pptr.FileID >= 0 && pptr.FileID < collection.Dependencies.Count`, checked
+in that order - the override writes
+
+```
+{ "m_Collection": "<the dependency collection's name, escaped>", "m_PathID": <path id> }
+```
+
+instead of the base `{ "m_FileID": n, "m_PathID": m }`. Everything else, including a negative file id
+(the local-file sentinel) and an id past the end of the dependency list, falls back to the base form.
+
+**What was verified how.** The **base** form is captured from the runtime by
+`tools/probes/json-walker`, which constructs a `PPtr<TAsset>` - the type is a struct with
+`(int FileID, long PathID)` and a constraint on `T`, so the probe instantiates `PPtr<IUnityObjectBase>` -
+and drives `VisitPPtr` directly. Five rows are committed as `src/export/json_walker_pptr_fixture.txt`
+and replayed, covering zero, ordinary, negative file id, negative path id and `i64::MAX`. The port's
+base form was asserted from its own code before this; it turned out to be right, including that a
+negative path id keeps its sign and that `i64::MAX` prints in full rather than in exponent form.
+
+The **override** is ported from the source rather than probed, and that limit should be stated
+plainly: the override lives in a `private sealed class JsonWalker` nested inside `JsonContentExtractor`
+whose constructor takes a live `AssetCollection`, and building one would drag in the whole asset
+collection model for a single text shape. So `pptr_targets_dependency` and `visit_pptr_resolved` are
+source-derived, with the boundary cases pinned by unit tests written from the two comparisons the
+source performs. Its escaping is delegated to the walker's existing encoder, which *is* fixture
+verified, so the only unprobed part is the surrounding literal text.
+
+**A self-derived expectation was rejected during this work, which is the pattern repeating.** My first
+assertion for the resolved form's escaping expected `\n`. The encoder emits `\u000A` with uppercase
+hex, as `json_escape_fixture.txt` states explicitly on line 17 and as the replay test enforces. The
+naive-JSON habit is exactly what that fixture exists to catch, and it is why the assertion now carries
+a note naming the mistake.
+
 ## DIFF-VIDEO-PATH-SEPARATOR-001 - the video-clip path extension ignored the Windows separator (fix implemented and verified against captured runtime rows)
 
 `VideoClipExtensions.GetExtensionFromPath` returns `Path.GetExtension(clip.OriginalPath_R)` with the

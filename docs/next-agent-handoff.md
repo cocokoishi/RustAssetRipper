@@ -1,6 +1,8 @@
 # RustAssetRipper hand-off — 2026-10-16
 
-## Latest current checkpoint - 2026-10-16 (primary-content extractor decisions ported)
+## Latest current checkpoint - 2026-10-16 (the JSON extractor's pointer override)
+
+## Previous checkpoint - 2026-10-16 (primary-content extractor decisions ported)
 
 - **The primary-content pipeline's missing half is started**: the handler table, dispatch, assembly,
   loop and membership were already ported, but nothing decided *what each extractor does*. New
@@ -40,8 +42,9 @@
 - **A GLB is binary: decode the JSON chunk before asserting on text.**
 - **Run `tools/parity-report.ps1` after every ledger edit**; a literal `||` inside a cell splits the
   row.
+- **`JsonContentExtractor` overrides `VisitPPtr`**: a file id naming a dependency renders `{ "m_Collection": "<name>", "m_PathID": <id> }`, not the base `{ "m_FileID": n, "m_PathID": m }`. Both forms are ported; the base form is replayed from 5 runtime rows (`json_walker_pptr_fixture.txt`), the override is source-derived (private nested class needing a live `AssetCollection`). See `DIFF-JSON-PPTR-FORM-001`. **Next: wire `binary_asset_claim` / `glb_asset_claim` / `write_json_body` into a production primary-content path, and port the texture, audio, script, terrain-heatmap and deleted-asset extractor gates.**
 - Parity ledger: 408 rows, 380 verified, 28 non-verified, DUPES=0, MALFORMED=0, gate OPEN.
-- Verified: **1883** library + 199 bin tests, 0 failed; warnings-denied Clippy exit 0.
+- Verified: **1890** library + 199 bin tests, 0 failed; warnings-denied Clippy exit 0.
 
 ## Previous checkpoint - 2026-10-16 (duplicate .NET float formatter removed)
 

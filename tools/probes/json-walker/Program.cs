@@ -155,7 +155,75 @@ public static class Program
             Primitive(w, typeof(byte[]), new byte[] { 1, 2, 3, 4 }));
         Dump(walkerType, "primitive-float", w => Primitive(w, typeof(float), 1.5f));
         Dump(walkerType, "primitive-char", w => Primitive(w, typeof(char), 'A'));
+
+        // `VisitPPtr` takes a `PPtr<TAsset>`, so the shape of that type has to be known before the
+        // callback can be driven at all. Dump it once so the construction is recorded rather than
+        // guessed.
+        DumpPptrType(root);
+        DumpPptr(walkerType, root, "pptr-zero", 0, 0L);
+        DumpPptr(walkerType, root, "pptr-ordinary", 1, 33L);
+        DumpPptr(walkerType, root, "pptr-negative-file", -1, 5L);
+        DumpPptr(walkerType, root, "pptr-negative-path", 2, -7L);
+        DumpPptr(walkerType, root, "pptr-max-path", 0, long.MaxValue);
         return 0;
+    }
+
+    /// Drive `VisitPPtr<TAsset>` with a constructed `PPtr<TAsset>`.
+    ///
+    /// `PPtr<T>` constrains `T`, so the type argument cannot be `object`; the interface
+    /// `IUnityObjectBase` satisfies the constraint and the callback only reads `FileID` and
+    /// `PathID`, so the asset type does not affect the text.
+    private static void DumpPptr(Type walkerType, string root, string name, int fileId, long pathId)
+    {
+        Assembly assets = Assembly.LoadFrom(Path.Combine(root, "AssetRipper.Assets.dll"));
+        Type[] types = SafeTypes(assets).ToArray();
+        Type pptrOpen = types.First(t => t.Name == "PPtr`1");
+        Type argument = types.First(t => t.Name == "IUnityObjectBase");
+        Type pptrType = pptrOpen.MakeGenericType(argument);
+        object pptr = Activator.CreateInstance(pptrType, fileId, pathId)!;
+        var writer = new StringWriter();
+        object walker = Activator.CreateInstance(walkerType, writer)!;
+        MethodInfo visit = walkerType.GetMethods(BindingFlags.Public | BindingFlags.Instance)
+            .First(m => m.Name == "VisitPPtr")
+            .MakeGenericMethod(argument);
+        try
+        {
+            visit.Invoke(walker, new[] { pptr });
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"PPTR|{name}|{fileId}|{pathId}|<threw {ex.GetType().Name}>");
+            return;
+        }
+        Console.WriteLine($"PPTR|{name}|{fileId}|{pathId}|{Visible(writer.ToString())}");
+    }
+
+    /// Record how to build a `PPtr<TAsset>` and a `PPtr`-derived `m_Collection` node.
+    private static void DumpPptrType(string root)
+    {
+        Assembly assets = Assembly.LoadFrom(Path.Combine(root, "AssetRipper.Assets.dll"));
+        Type? pptr = SafeTypes(assets).FirstOrDefault(t => t.Name == "PPtr`1");
+        if (pptr is null)
+        {
+            Console.WriteLine("PPTRTYPE|missing");
+            return;
+        }
+        Console.WriteLine($"PPTRTYPE|{pptr.FullName}|struct={pptr.IsValueType}");
+        foreach (ConstructorInfo ctor in pptr.GetConstructors())
+        {
+            string parameters = string.Join(
+                ", ",
+                ctor.GetParameters().Select(p => $"{Short(p.ParameterType)} {p.Name}"));
+            Console.WriteLine($"PPTRCTOR|{parameters}");
+        }
+        foreach (PropertyInfo property in pptr.GetProperties())
+        {
+            Console.WriteLine($"PPTRPROP|{Short(property.PropertyType)} {property.Name}|set={property.CanWrite}");
+        }
+        foreach (FieldInfo field in pptr.GetFields())
+        {
+            Console.WriteLine($"PPTRFIELD|{Short(field.FieldType)} {field.Name}");
+        }
     }
 
     private static void Dump(Type walkerType, string name, Action<object> body)

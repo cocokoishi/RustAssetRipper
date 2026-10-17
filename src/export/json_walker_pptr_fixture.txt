@@ -1,0 +1,20 @@
+# `DefaultJsonWalker.VisitPPtr` output, captured from the reference runtime
+#
+# Produced by tools/probes/json-walker, which constructs a `PPtr<TAsset>` - the type is a struct with
+# `(int FileID, long PathID)` and a constraint on `T`, so the probe instantiates it as
+# `PPtr<IUnityObjectBase>` - and drives the walker's `VisitPPtr` callback directly.
+#
+# Columns: PPTR|<case>|<file id>|<path id>|<escaped output>
+#
+# This is the base form. `JsonContentExtractor` **overrides** `VisitPPtr` and prints a different
+# object when the file id resolves to a dependency collection; see `pptr_targets_dependency` and
+# `visit_pptr_resolved` in `json_walker.rs`. The rows below pin the form used for every other case,
+# including the extremes that a hand-written formatter could get wrong.
+#
+# The port previously asserted this shape from its own code rather than from the runtime. It was
+# right, but that is exactly the class of expectation this project has been bitten by three times.
+PPTR|pptr-zero|0|0|{ "m_FileID": 0, "m_PathID": 0 }
+PPTR|pptr-ordinary|1|33|{ "m_FileID": 1, "m_PathID": 33 }
+PPTR|pptr-negative-file|-1|5|{ "m_FileID": -1, "m_PathID": 5 }
+PPTR|pptr-negative-path|2|-7|{ "m_FileID": 2, "m_PathID": -7 }
+PPTR|pptr-max-path|0|9223372036854775807|{ "m_FileID": 0, "m_PathID": 9223372036854775807 }

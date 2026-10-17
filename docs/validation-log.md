@@ -1,5 +1,39 @@
 # Validation log
 
+## 2026-10-16 - The JSON extractor's pointer override, and the base form captured at last
+
+- Outcome: found that `JsonContentExtractor` **overrides `VisitPPtr`**, captured the base pointer form
+  from the runtime, ported the override's decision and text, and rejected one self-derived
+  expectation. 1890 library tests.
+- **The override was a real gap.** For a pointer whose file id names a dependency of the exporting
+  collection - `FileID >= 0 && FileID < Dependencies.Count`, checked in that order - the primary
+  content JSON extractor writes `{ "m_Collection": "<name>", "m_PathID": <id> }` rather than the base
+  `{ "m_FileID": n, "m_PathID": m }`. The port had only the base form, labelled as "the fixed shape",
+  so every dependency-crossing pointer in a primary-content JSON export would have been written as a
+  bare index that means nothing outside the exporting collection. The name goes through the walker's
+  own encoder, because a collection name can contain anything.
+- **The base form is now runtime evidence rather than an assertion about its own code.**
+  `tools/probes/json-walker` was extended to construct a `PPtr<TAsset>` and drive `VisitPPtr`. The
+  type is a struct with `(int FileID, long PathID)` and a **constraint on `T`** - instantiating it as
+  `PPtr<object>` fails with a `TypeLoadException`, so the probe uses `PPtr<IUnityObjectBase>`. Five
+  captured rows replay in `pptr_form_matches_the_reference_runtime_rows`: zero, ordinary, negative
+  file id, negative path id, and `i64::MAX`. The port was right, including the sign and the absence of
+  exponent notation at the extreme - but "it was right" is not the same evidence as "it was measured".
+- **The override is source-derived, and that limit is recorded.** It lives in a `private sealed class`
+  nested in `JsonContentExtractor` whose constructor needs a live `AssetCollection`, so probing it
+  would drag the asset-collection model in for one text shape. The decision function is pinned by
+  tests written from the source's two comparisons, and only the surrounding literal text is unprobed;
+  its escaping is delegated to the fixture-verified encoder.
+- **A self-derived expectation was caught in the act.** My first assertion for the resolved form
+  expected `\n` for a control character. The reference emits `\u000A` with **uppercase** hex, stated
+  on line 17 of `json_escape_fixture.txt` and enforced by its replay test. This is the naive-JSON
+  habit that fixture exists to catch, and the assertion now carries a note saying so - the same
+  mistake in miniature that produced the three earlier defects, caught this time within minutes by
+  running the test rather than by reading the code.
+- Evidence: `cargo test --locked --workspace` - **1890** library (up from 1887) + 199 bin tests,
+  0 failed, 1 ignored. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+  CI on the previous commit `d165c53` is green across all eight jobs.
+
 ## 2026-10-16 - The four GLB extractors' gates, and the composite `Mesh.IsSet`
 
 - Outcome: extended the primary-content extractor layer with the GLB family's admission rules, and

@@ -269,12 +269,32 @@ impl JsonWalker {
     }
 
     /// `VisitPPtr`: the fixed `{ "m_FileID": n, "m_PathID": m }` shape.
+    ///
+    /// Captured from the runtime in `json_walker_pptr_fixture.txt`, including the negative and
+    /// `i64::MAX` path ids.
     pub fn visit_pptr(&mut self, file_id: i32, path_id: i64) {
         self.separator();
         let _ = write!(
             self.output,
             "{{ \"m_FileID\": {file_id}, \"m_PathID\": {path_id} }}"
         );
+    }
+
+    /// The `JsonContentExtractor` override of `VisitPPtr`, for a pointer into a dependency.
+    ///
+    /// The primary-content JSON extractor does not use the base form for every pointer. When the
+    /// pointer's file id names one of the collection's dependencies it writes
+    /// `{ "m_Collection": "<name>", "m_PathID": <id> }` instead, substituting the dependency
+    /// collection's name for the numeric file id - so the document says *which* file the pointer
+    /// leaves through rather than an index that is meaningless outside the exporting collection.
+    ///
+    /// The name is escaped with the same encoder the rest of the walker uses, because it is a
+    /// collection name and can contain any character.
+    pub fn visit_pptr_resolved(&mut self, collection_name: &str, path_id: i64) {
+        self.separator();
+        self.output.push_str("{ \"m_Collection\": ");
+        write_json_string(&mut self.output, collection_name);
+        let _ = write!(self.output, ", \"m_PathID\": {path_id} }}");
     }
 
     /// `VisitPrimitive` over one decoded value, positioned as the next entry in the current
@@ -372,6 +392,16 @@ fn write_decoded_value(walker: &mut JsonWalker, value: &SerializedValue, positio
             }
         }
     }
+}
+
+/// Whether a pointer's file id names one of the exporting collection's dependencies.
+///
+/// `JsonContentExtractor`'s override tests `pptr.FileID >= 0 && pptr.FileID < collection.Dependencies.Count`
+/// before it switches to the resolved form, so a negative file id - the local-file sentinel - and an
+/// id past the end both fall back to the base form. The comparison is signed-then-ranged in that
+/// order in the source and the same order here, which is what keeps `-1` out.
+pub fn pptr_targets_dependency(file_id: i32, dependency_count: usize) -> bool {
+    file_id >= 0 && (file_id as usize) < dependency_count
 }
 
 /// Write one decoded value as JSON (`VisitPrimitive` plus the reference's value mapping).
@@ -772,6 +802,90 @@ mod tests {
             checked += 1;
         }
         assert_eq!(checked, 13, "every recorded scenario is replayed");
+    }
+
+    /// Replay the reference runtime's `VisitPPtr` output.
+    ///
+    /// The port asserted this shape from its own code before this test existed. It turned out to be
+    /// right - including that a negative path id prints with its sign and that `i64::MAX` prints in
+    /// full rather than in exponent form - but "it turned out to be right" is exactly the audit trail
+    /// this project keeps getting burned by, so the rows are captured and replayed.
+    #[test]
+    fn pptr_form_matches_the_reference_runtime_rows() {
+        let fixture = include_str!("json_walker_pptr_fixture.txt");
+        let mut checked = 0usize;
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let rest = line.strip_prefix("PPTR|").expect("PPTR row");
+            let mut parts = rest.splitn(4, '|');
+            let name = parts.next().expect("case name");
+            let file_id: i32 = parts.next().expect("file id").parse().expect("file id");
+            let path_id: i64 = parts.next().expect("path id").parse().expect("path id");
+            let expected = parts.next().expect("expected text");
+            let actual = render_pptr(file_id, path_id);
+            assert_eq!(actual, expected, "case {name}");
+            checked += 1;
+        }
+        assert_eq!(checked, 5, "every recorded row is replayed");
+
+        fn render_pptr(file_id: i32, path_id: i64) -> String {
+            let mut walker = JsonWalker::with_line_break("\n");
+            walker.visit_pptr(file_id, path_id);
+            walker.finish()
+        }
+    }
+
+    /// The dependency decision, including the boundaries the reference's two comparisons create.
+    #[test]
+    fn dependency_test_matches_the_source_comparisons() {
+        assert!(
+            !pptr_targets_dependency(-1, 4),
+            "a negative file id is local"
+        );
+        assert!(
+            !pptr_targets_dependency(0, 0),
+            "no dependencies means no target"
+        );
+        assert!(
+            pptr_targets_dependency(0, 1),
+            "the first dependency is in range"
+        );
+        assert!(
+            pptr_targets_dependency(3, 4),
+            "the last dependency is in range"
+        );
+        assert!(
+            !pptr_targets_dependency(4, 4),
+            "the id past the end falls back to the base form"
+        );
+        assert!(!pptr_targets_dependency(i32::MIN, 4));
+    }
+
+    /// The override's object, including that the collection name goes through the string encoder.
+    #[test]
+    fn resolved_pptr_names_the_collection_and_escapes_it() {
+        let mut walker = JsonWalker::with_line_break("\n");
+        walker.visit_pptr_resolved("CAB-1", 33);
+        assert_eq!(
+            walker.finish(),
+            "{ \"m_Collection\": \"CAB-1\", \"m_PathID\": 33 }"
+        );
+
+        // The name is a collection name, so a quote or a control character must be escaped with the
+        // same encoder the walker uses elsewhere rather than interpolated raw. Control characters
+        // become `\uXXXX` with **uppercase** hex - there is no `\n` shorthand in the reference's
+        // encoder, which `json_escape_fixture.txt` records explicitly. My first version of this
+        // assertion expected `\n`, which is the naive-JSON habit the fixture exists to catch, and it
+        // is worth leaving that note here.
+        let mut walker = JsonWalker::with_line_break("\n");
+        walker.visit_pptr_resolved("a\"b\n", -7);
+        assert_eq!(
+            walker.finish(),
+            "{ \"m_Collection\": \"a\\\"b\\u000A\", \"m_PathID\": -7 }"
+        );
     }
 
     /// The default line break is the host's, and an explicit one overrides it.
