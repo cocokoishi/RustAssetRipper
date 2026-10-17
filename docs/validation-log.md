@@ -1,5 +1,35 @@
 # Validation log
 
+## 2026-10-16 - The scene GLB path cannot produce geometry, and now says so
+
+- Outcome: found that the scene GLB path resolves no mesh for any Transform, so a real scene's GLB
+  would carry a node graph and no geometry. `export_scene_glb` now **refuses** that case instead of
+  writing it. 1927 library tests (up from 1926).
+- **What I found.** `MaterializedSceneGraphView::mesh` returns `None` for every Transform. Its doc
+  says the caller supplies geometry through `SceneGlbExportInput::meshes`, but that is only half true:
+  the walk attaches geometry from the plan's per-node mesh selection, so a plan with no mesh nodes
+  consumes **no** `meshes` entries. The parameter is dead in production, exactly like `isScene` was.
+- **Why it looked complete.** `export_scene_glb`'s tests build plans through `build_level_plan` with
+  hand-made transforms that carry `GlbLevelMesh` facts directly, so the mesh selection is present in
+  every test and absent in every production call. The untested half was the half that matters. This is
+  the third capability in this project that looked done because its fixtures supplied the missing
+  piece - after `isScene` and the heatmap exporter - and the pattern is now familiar enough to name:
+  **a module whose tests construct its inputs by hand has not been tested against real inputs.**
+- **What is missing, in order, so the next round is a plan rather than a search.** The materialized
+  collection records each GameObject's component slots and class ids but **not the MeshFilter's mesh
+  reference**, so the mesh identity cannot be resolved; and `GlbLevelMesh` carries only the mesh's
+  *facts* - sub-mesh count, index width, vertex type - with **no source identity**, so even a caller
+  that found the mesh could not say which node wanted it. Both are needed before the walk can attach
+  geometry.
+- **The fix while the gap is open.** `export_scene_glb` now returns
+  `GeometryNotResolved { mesh_filter_count }` when the plan has no mesh node and the collection has a
+  GameObject with a class-33 `MeshFilter`. A GameObject with no `MeshFilter` has no geometry to lose
+  and still exports, so the check distinguishes "this scene has nothing to draw" from "this port
+  cannot draw it yet" - which is the distinction the silent version destroyed.
+- Recorded as `SCOPE-GLB-SCENE-GEOMETRY-001`.
+- Evidence: `cargo test --locked --workspace` - **1927** library + 204 CLI tests, 0 failed, 1 ignored.
+  `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+
 ## 2026-10-16 - The main-asset relation, so the hierarchy classes stop being undecidable
 
 - Outcome: added `MainAssetFacts` and the parameter that carries it into

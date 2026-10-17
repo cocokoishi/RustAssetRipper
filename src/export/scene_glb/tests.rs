@@ -332,6 +332,62 @@ fn an_empty_hierarchy_reports_no_nodes_rather_than_writing_an_empty_file() {
     assert!(error.to_string().contains("no nodes"));
 }
 
+/// A collection with geometry the view cannot resolve is refused, not written as a scene.
+///
+/// `MaterializedSceneGraphView::mesh` answers `None` for every Transform because the MeshFilter's
+/// mesh reference is not materialized yet, so a real scene's plan has no mesh nodes. Without this
+/// check the export would succeed with a node graph and no geometry - a file that looks like a scene
+/// export and is not one. The `MeshFilter` count is what distinguishes that from a scene that simply
+/// has nothing to draw.
+#[test]
+fn a_collection_with_mesh_filters_and_no_resolved_mesh_is_refused() {
+    use crate::export::scene_wiring::MaterializedComponentSlot;
+    use crate::export::scene_wiring::MaterializedComponentTarget;
+    use crate::processing::scene::SceneRelationshipTarget;
+
+    // The existing helpers give a GameObject and a Transform; only the MeshFilter slot is added.
+    let mut collection = hierarchy();
+    let mut with_filter = game_object(50, "WithGeometry");
+    with_filter.components.push(MaterializedComponentSlot {
+        source_array_index: 0,
+        class_id: Some(33),
+        target: MaterializedComponentTarget::Source {
+            relationship_index: 0,
+            file_id: 0,
+            path_id: 51,
+            target: SceneRelationshipTarget::LocalObject { object_index: 51 },
+        },
+    });
+    collection.game_objects.push(with_filter);
+
+    let error = export_scene_glb(SceneGlbExportInput {
+        collection: &collection,
+        is_scene: true,
+        meshes: &[],
+        level_limits: GlbLevelLimits::default(),
+        glb_limits: GlbBuildLimits::default(),
+    })
+    .expect_err("a geometry-less scene export is refused");
+    assert_eq!(
+        error,
+        SceneGlbExportError::GeometryNotResolved {
+            mesh_filter_count: 1
+        }
+    );
+    assert!(error.to_string().contains("no geometry"), "{error}");
+
+    // The same hierarchy without a MeshFilter still exports: it genuinely has nothing to draw.
+    let without_geometry = hierarchy();
+    export_scene_glb(SceneGlbExportInput {
+        collection: &without_geometry,
+        is_scene: true,
+        meshes: &[],
+        level_limits: GlbLevelLimits::default(),
+        glb_limits: GlbBuildLimits::default(),
+    })
+    .expect("a scene with no MeshFilter has no geometry to lose");
+}
+
 #[test]
 fn the_node_limit_reaches_the_export() {
     let collection = hierarchy();

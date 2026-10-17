@@ -1,5 +1,31 @@
 # Source behavior and differential findings
 
+## SCOPE-GLB-SCENE-GEOMETRY-001 - the scene GLB path resolves no mesh, so it cannot yet produce geometry (port gap, now refused rather than written)
+
+`MaterializedSceneGraphView::mesh` answers `None` for **every** Transform, and its doc says the
+caller supplies geometry through `SceneGlbExportInput::meshes`. That is only half true: the walk
+attaches geometry from the plan's per-node `mesh` selection, so a plan with no mesh nodes consumes no
+`meshes` entries at all. A real scene therefore produced a GLB with a node graph and **no geometry**.
+
+**Why it looked complete.** `export_scene_glb`'s tests build their plans through `build_level_plan`
+with hand-made `GlbLevelTransform`s that carry `GlbLevelMesh` facts directly, so the mesh selection is
+present in every test and absent in every production call. The missing half was never exercised.
+
+**What is missing, in order.** The materialized collection records each GameObject's component slots
+and class ids but not the MeshFilter's **mesh reference**, so the mesh identity cannot be resolved;
+`GlbLevelMesh` carries only the mesh's *facts* (sub-mesh count, index width, vertex type) and no
+source identity, so even a caller that found the mesh could not say which node wanted it. Both have to
+be added before the walk can attach geometry.
+
+**The port now refuses instead of writing the geometry-less file.** `export_scene_glb` returns
+`SceneGlbExportError::GeometryNotResolved { mesh_filter_count }` when the plan has no mesh node and
+the collection has any GameObject with a class-33 `MeshFilter` - a GameObject with no MeshFilter has no
+geometry to lose, and still exports. That converts a silently wrong success into a reported failure,
+which is what the acceptance rules require while the gap is open.
+
+**Independent evidence.** `scene_glb.rs`'s trait impl for `MaterializedSceneGraphView` returns `None`
+from `mesh` unconditionally; the same file's tests construct `GlbLevelMesh` values by hand and never
+call `mesh` on a materialized collection.
 ## DIFF-HEATMAP-UNREGISTERED-001 - the baseline's terrain heatmap exporter is complete and never registered (port corrected to match)
 
 `TerrainHeatmapExporter` and `TerrainHeatmapExportCollection` exist in

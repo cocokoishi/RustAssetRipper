@@ -46,6 +46,18 @@ pub enum SceneGlbExportError {
     /// The reference writes an empty `SceneBuilder` in this case; the port reports it instead so a
     /// caller can distinguish "no geometry" from "an empty file was written".
     NoNodes,
+    /// The collection carries geometry the plan did not resolve, so the GLB would have no meshes.
+    ///
+    /// **This is a refusal, not a warning.** [`MaterializedSceneGraphView::mesh`] answers `None` for
+    /// every Transform because the MeshFilter's mesh reference is not materialized yet, so a plan
+    /// built from a real collection has **no mesh nodes at all** and the export would write a file
+    /// with a node graph and no geometry - which looks like a successful scene export and is not one.
+    /// Refusing turns that into a reported failure. The check is a `MeshFilter` component on any
+    /// GameObject: a GameObject with no MeshFilter has no geometry to lose.
+    GeometryNotResolved {
+        /// How many GameObjects carry a `MeshFilter`.
+        mesh_filter_count: usize,
+    },
 }
 
 impl core::fmt::Display for SceneGlbExportError {
@@ -54,6 +66,11 @@ impl core::fmt::Display for SceneGlbExportError {
             Self::Level(error) => write!(formatter, "scene hierarchy walk failed: {error}"),
             Self::Glb(error) => write!(formatter, "scene GLB encoding failed: {error}"),
             Self::NoNodes => write!(formatter, "the scene hierarchy has no nodes to export"),
+            Self::GeometryNotResolved { mesh_filter_count } => write!(
+                formatter,
+                "{mesh_filter_count} GameObjects carry a MeshFilter but the plan resolved no mesh, \
+                 so the export would carry a node graph with no geometry"
+            ),
         }
     }
 }
@@ -135,7 +152,28 @@ impl<'a> MaterializedSceneGraphView<'a> {
     fn values(&self, index: usize) -> Option<&SceneTransformValues> {
         self.collection.transforms.get(index)?.values.as_ref()
     }
+
+    /// How many GameObjects in this collection carry a `MeshFilter` (class 33).
+    ///
+    /// A `MeshFilter` is what gives a GameObject geometry, so this is the count of GameObjects that
+    /// would lose geometry if the mesh reference were not resolved. It is a property of the
+    /// materialized collection, which is why the check lives here rather than in the walk.
+    fn mesh_filter_count(&self) -> usize {
+        self.collection
+            .game_objects
+            .iter()
+            .filter(|object| {
+                object
+                    .components
+                    .iter()
+                    .any(|slot| slot.class_id == Some(MESH_FILTER_CLASS_ID))
+            })
+            .count()
+    }
 }
+
+/// Class-33 `MeshFilter`, the component that attaches a mesh to a GameObject.
+const MESH_FILTER_CLASS_ID: i32 = 33;
 
 /// Unity's default local transform, which the reference's `Transformation` identity uses when a
 /// Transform carries no serialized values.
@@ -271,6 +309,15 @@ pub fn export_scene_glb(
     let plan = build_scene_plan_with_limits(&view, input.is_scene, input.level_limits)?;
     if plan.nodes.is_empty() {
         return Err(SceneGlbExportError::NoNodes);
+    }
+    // A plan with no mesh nodes for a collection that has MeshFilters is a geometry-less export,
+    // not a scene with nothing in it: the view does not resolve mesh references yet, so this is the
+    // shape the gap takes. Refusing keeps it from being written as a successful scene.
+    if plan.nodes.iter().all(|node| node.mesh.is_none()) {
+        let mesh_filter_count = view.mesh_filter_count();
+        if mesh_filter_count > 0 {
+            return Err(SceneGlbExportError::GeometryNotResolved { mesh_filter_count });
+        }
     }
     export_plan_as_glb(&plan, input.meshes, input.glb_limits)
 }
