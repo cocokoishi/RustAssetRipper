@@ -1,6 +1,35 @@
 # RustAssetRipper hand-off — 2026-10-16
 
-## Latest current checkpoint - 2026-10-16 (FSB5 Vorbis setup table verified byte-exact)
+## Latest current checkpoint - 2026-10-16 (Crunch dispatch proven load-bearing)
+
+- **The Crunch dispatch is now cross-checked against the reference runtime**, not taken on faith.
+  `tools/probes/crunch-faces` loads the shipped `AssetRipper.Conversions.Crunch.dll` and
+  `AssetRipper.Conversions.UnityCrunch.dll` and runs **both** decoders over every committed CRN
+  fixture; the rows are committed as `src/resources/crunch_dispatch_fixture.txt`. Both branches
+  matter:
+  - The ETC payloads **cannot** go through the classic decoder - `unity_etc1.crn` makes it
+    **throw**, `unity_etc2a.crn` makes it **fail**. The format branch prevents a crash.
+  - The DXT payloads decode through both decoders to **different bytes**. The version branch
+    prevents a silently wrong image, which is the worse failure mode.
+- `RES-TEXTURE-CRUNCH-001` **keeps 已实现但未验证**: CRN variants beyond the six fixtures, real
+  multi-face/multi-mip payloads, real-sample coverage and Unity import behaviour are still open.
+  Do not re-litigate the *gate* - that part is settled.
+- **Probe trap:** the shipped entry point takes `ReadOnlySpan<byte>`, and a span **cannot be boxed**
+  for `MethodBase.Invoke` - it throws `ArgumentException: Object of type 'System.Byte[]' cannot be
+  converted to type 'System.ReadOnlySpan\`1[System.Byte]'`. Invoke through a delegate whose
+  signature matches instead.
+- **Next candidates, in order:** `RES-BLENDSHAPE-001` (MeshData geometry and frame/delta/weight
+  decoding is the named gap), `RES-TEXTURE-001` (`实现中`), then the scene export's real-file
+  verification (`EXP-GLB-SCENE-001`).
+- **Never format `src/resources/glb_tests_01.rs`** (nor `main_tests_01.rs`/`main_tests_03.rs`).
+- **A GLB is binary: decode the JSON chunk before asserting on text** (12-byte header, then the
+  chunk header).
+- Parity ledger: 406 rows, 381 verified, 25 non-verified, DUPES=0, MALFORMED=0, gate OPEN.
+- `/Scenes/View` still returns 501 (`load_game` does not run `process_workspace_scenes_and_prefabs`).
+- Corpus replays are local-only and have not run in these rounds.
+- Verified: **1862** library + 199 bin tests, 0 failed; warnings-denied Clippy exit 0.
+
+## Previous checkpoint - 2026-10-16 (FSB5 Vorbis setup table verified byte-exact)
 
 - **`RES-AUDIO-001`'s "real-audio table decode stays open" gap was investigated and the table is
   complete and byte-identical to the reference's.** 161 entries in both, matching keys, matching

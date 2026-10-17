@@ -1,5 +1,40 @@
 # Validation log
 
+## 2026-10-16 - Both Crunch dispatch branches proven load-bearing by the reference runtime
+
+- Outcome: `RES-TEXTURE-CRUNCH-001` claimed "multi-face/multi-mip payloads ... remain unverified".
+  Investigating it produced a *different* and more valuable result: the **dispatch itself** is now
+  cross-checked against the reference runtime, and both of its branches turn out to be
+  load-bearing rather than cosmetic.
+- **A new probe runs BOTH decoders over every fixture.** `tools/probes/crunch-faces` loads the
+  shipped `AssetRipper.Conversions.Crunch.dll` and `AssetRipper.Conversions.UnityCrunch.dll` from
+  the isolated baseline build and calls each one's `TryDecompress` on all six committed CRN files.
+  Running the *wrong* decoder is the point - it shows what the gate protects against:
+  - `unity_etc1.crn` through the classic decoder **throws `NullReferenceException`**, and
+    `unity_etc2a.crn` through the classic decoder **returns false**. So the format branch
+    (`ETC_RGB4Crunched`/`ETC2_RGBA8Crunched` use UnityCrunch on any version) prevents a *crash*,
+    not just a wrong colour.
+  - `classic_dxt1.crn` and `classic_dxt5.crn` decode through **both** decoders but to **different
+    bytes** (`A7BBF6B5…` vs `5F58A335…`, `BD60F235…` vs `933886AF…`). So the version branch
+    changes the *pixels*: choosing wrong there is a silent wrong-image bug rather than an error,
+    which is exactly the class of defect that needs a differential rather than a smoke test.
+- The rows are committed as `src/resources/crunch_dispatch_fixture.txt`, and
+  `every_fixture_decodes_only_under_the_decoder_the_gate_selects` replays all twelve rows, asserts
+  the gate picks the recorded decoder, and asserts the recorded *outcome* of the decoder the gate
+  rejected (throw, failure, or a differing success). Twenty tests pass in the module.
+- **What this does not settle, stated plainly:** the row keeps 已实现但未验证. CRN variants beyond
+  the six attributed fixtures, genuine multi-face/multi-mip payloads, real-sample CRN coverage, and
+  Unity import behaviour are all still unverified. What changed is that the gate is no longer taken
+  on faith.
+- **A probe detail worth recording:** the shipped entry point takes `ReadOnlySpan<byte>`, and a
+  span **cannot be boxed** into the `object[]` that `MethodBase.Invoke` expects - reflection throws
+  `ArgumentException: Object of type 'System.Byte[]' cannot be converted to type
+  'System.ReadOnlySpan\`1[System.Byte]'`. The call has to go through a delegate whose signature
+  matches, which is what the probe does.
+- Evidence: `cargo test --locked --workspace` - **1862** library (up from 1861) + 199 bin tests,
+  0 failed, 1 ignored. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+  Parity: TOTAL=406, NONVERIFIED=25, DUPES=0, MALFORMED=0, GATE=OPEN.
+
 ## 2026-10-16 - The FSB5 Vorbis setup table is complete and byte-identical to the reference's
 
 - Outcome: a stated gap on `RES-AUDIO-001` - "real-audio table decode stays open" - was

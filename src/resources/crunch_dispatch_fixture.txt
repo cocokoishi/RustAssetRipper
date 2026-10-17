@@ -1,0 +1,44 @@
+# Crunch decode dispatch: reference-runtime evidence
+#
+# Captured from the frozen reference's own conversion assemblies by
+#   dotnet run --project tools/probes/crunch-faces/CrunchFacesProbe.csproj -c Release -- <refroot> <fixtureDir>
+# which loads `AssetRipper.Conversions.Crunch.dll` and `AssetRipper.Conversions.UnityCrunch.dll` out
+# of the isolated baseline build and calls the shipped `TryDecompress` entry point on every
+# committed CRN fixture, through BOTH decoders.
+#
+# Columns:
+#   OUT|<decoder>|<fixture>|ok|<byteLength>|<sha256[:16]>
+#   OUT|<decoder>|<fixture>|<failed>              the entry point returned false
+#   OUT|<decoder>|<fixture>|<threw ExceptionType> the entry point crashed
+#
+# Why both decoders are run over every fixture: `CrunchHandler.IsUseUnityCrunch` claims the source
+# version alone decides for 2017.3+, and that the *format* decides for older versions. Running the
+# wrong decoder over a fixture shows what that gate is actually protecting against, rather than
+# merely asserting that the gate exists.
+#
+# Reading the rows:
+#   * `unity_etc1.crn` through the classic decoder THROWS a NullReferenceException, and
+#     `unity_etc2a.crn` through the classic decoder explicitly FAILS. So an ETC-crunched payload
+#     cannot be handled by the classic path at all - the format branch is load-bearing, not
+#     cosmetic.
+#   * `classic_dxt1.crn` and `classic_dxt5.crn` decode through BOTH decoders but to different
+#     bytes, so the version branch changes the *pixels*, not just success or failure. Choosing the
+#     wrong side here would be a silent wrong-image bug rather than an error.
+#   * The three `unity_*` fixtures all decode through the Unity decoder, matching the port's gate:
+#     formats 64/65 select UnityCrunch on any version, and 2017.3+ selects it unconditionally.
+#
+# The port's own 64-bit RGBA oracle hashes are pinned separately in
+# `src/resources/texture_converter.rs`; these rows are the reference-runtime cross-check that the
+# dispatch itself is right.
+OUT|classic|classic_dxt1.crn|ok|174776|A7BBF6B5D0B2C2E0
+OUT|unity|classic_dxt1.crn|ok|174776|5F58A33539DAFE37
+OUT|classic|classic_dxt5.crn|ok|349552|BD60F2358DC6B28A
+OUT|unity|classic_dxt5.crn|ok|349552|933886AF439AE40E
+OUT|classic|unity_dxt1.crn|ok|174776|0FE04C3F41A6CA97
+OUT|unity|unity_dxt1.crn|ok|174776|3051E709AD93467D
+OUT|classic|unity_dxt5.crn|ok|349552|A1930809F979487B
+OUT|unity|unity_dxt5.crn|ok|349552|12EFC390BBC2A9A2
+OUT|classic|unity_etc1.crn|threw NullReferenceException
+OUT|unity|unity_etc1.crn|ok|174776|7D5B186BEE79AA1A
+OUT|classic|unity_etc2a.crn|failed
+OUT|unity|unity_etc2a.crn|ok|349552|51100FB928E5CD2E

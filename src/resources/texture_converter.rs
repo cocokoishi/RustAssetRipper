@@ -947,6 +947,65 @@ mod tests {
         assert!(!is_use_unity_crunch(old, 10));
     }
 
+    /// The gate's two branches are both load-bearing, checked against reference-runtime rows.
+    ///
+    /// `crunch_dispatch_fixture.txt` records what each shipped decoder does with each committed
+    /// CRN fixture. Reading it is more informative than asserting the gate exists:
+    ///
+    /// * The ETC payloads cannot go through the classic decoder at all - `unity_etc1.crn` makes it
+    ///   **throw** and `unity_etc2a.crn` makes it **fail** - so the format branch prevents a crash,
+    ///   not merely a wrong colour.
+    /// * The DXT payloads decode through *both* decoders but to **different bytes**, so the version
+    ///   branch changes the pixels. Getting it wrong there is a silent wrong-image bug.
+    #[test]
+    fn every_fixture_decodes_only_under_the_decoder_the_gate_selects() {
+        let fixture = include_str!("crunch_dispatch_fixture.txt");
+        // The version the reference's own `IsUseUnityCrunch` assigns each fixture.
+        let mut checked = 0usize;
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let fields: Vec<&str> = line.split('|').collect();
+            assert_eq!(fields[0], "OUT", "{line}");
+            let (decoder, name, outcome) = (fields[1], fields[2], fields[3]);
+            // The gate the port implements, evaluated the way the caller does.
+            let (version, format, expected_decoder) = match name {
+                "classic_dxt1.crn" => ("2017.2.0f1", 28, "classic"),
+                "classic_dxt5.crn" => ("2017.2.0f1", 29, "classic"),
+                "unity_dxt1.crn" => ("2017.3.0f1", 28, "unity"),
+                "unity_dxt5.crn" => ("2017.3.0f1", 29, "unity"),
+                "unity_etc1.crn" => ("2017.2.0f1", 64, "unity"),
+                "unity_etc2a.crn" => ("2017.2.0f1", 65, "unity"),
+                other => panic!("unexpected fixture {other}"),
+            };
+            let version = UnityVersion::parse(version).unwrap();
+            let selected = if is_use_unity_crunch(version, format) {
+                "unity"
+            } else {
+                "classic"
+            };
+            assert_eq!(selected, expected_decoder, "{name}");
+
+            // The recorded outcome of the decoder the gate did NOT select: a payload the wrong
+            // path cannot handle must be recorded as such, so the branch's value is visible.
+            if decoder != selected {
+                match name {
+                    "unity_etc1.crn" => assert_eq!(outcome, "threw NullReferenceException", "{line}"),
+                    "unity_etc2a.crn" => assert_eq!(outcome, "failed", "{line}"),
+                    // The DXT payloads are handled by both paths, to different bytes.
+                    _ => assert_eq!(outcome, "ok", "{line}"),
+                }
+            } else {
+                // The selected decoder always succeeds on its own fixture.
+                assert_eq!(outcome, "ok", "{line}");
+            }
+            checked += 1;
+        }
+        assert_eq!(checked, 12, "every recorded row is checked");
+    }
+
     #[test]
     fn valid_crunch_payloads_match_independent_rgba_oracle_hashes() {
         let cases: [(&str, i32, &str, &[u8], u64); 6] = [
