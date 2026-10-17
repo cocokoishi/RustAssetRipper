@@ -1,5 +1,46 @@
 # Validation log
 
+## 2026-10-16 - The primary-content extractor layer starts, and a host-dependent path rule is fixed
+
+- Outcome: ported `BinaryAssetContentExtractor`'s decisions into `src/export/primary_extractors.rs`,
+  recorded what the two unconditional extractors do, pinned `Path.GetExtension` against the runtime,
+  and fixed a host-dependent divergence in the video-clip path extension. 1883 library tests.
+- **The extractor decisions were the missing half of the primary-content pipeline.** The handler
+  table, dispatch, assembly, loop and membership were already ported; nothing decided *what each
+  extractor does*. Now ported:
+  - `BinaryAssetContentExtractor` switches on four interfaces, and **every arm requires a non-empty
+    payload before it admits** - an asset with an empty payload falls through to the next handler
+    instead of exporting an empty file. `VideoClip` is the exception: it tests `CheckIntegrity()`
+    rather than a length, and `MovieTexture` keeps `Has_MovieData` and non-emptiness as **two**
+    separate conditions, as the source does.
+  - `TextAsset` exports `bytes`, `MovieTexture` exports `ogv`, and the font and video extensions come
+    from the payload and the path respectively.
+  - `EmptyContentExtractor` **claims** into the shared empty collection rather than declining, which
+    is why an asset reaching one of those twenty handlers is never reconsidered: `CreateCollections`
+    queues the asset before it drops the empty collection.
+  - `JsonContentExtractor` claims everything it is reached for with the `json` extension, and is
+    registered first for `IUnityObjectBase`, which is what makes `CreateCollection`'s "no exporter
+    can handle this" unreachable in the default stack.
+- **`Path.GetExtension` is host-dependent, and the port had assumed one host.** The video-clip path
+  extension split on `/` alone, so on Windows it produced `d\x` for `C:\dir.d\x` where the reference
+  produces nothing and falls back to `bytes`. Fixed by delegating to the fixture-verified
+  `asset_path::get_extension` and threading a new `HostPathPlatform::host()` through both helpers and
+  the `VideoClip` accessor the browser route uses.
+- **`Path.GetExtension` is now runtime-verified rather than self-derived.**
+  `tools/probes/path-extension` calls the real method on eighteen edge inputs; the rows are replayed
+  by `get_extension_matches_the_reference_runtime_rows` on both platforms where the answer is
+  platform-independent. The existing assertions were already correct - including that a trailing dot
+  yields the empty string - which is what makes the caller's dot-strip safe, and that is now evidence
+  rather than assumption.
+- **The duplication check earned its keep in the same round it was written.** My first version of the
+  new module reimplemented `GetFontExtension` and `GetExtensionFromPath`; a grep for the reference
+  symbol names found that `resource_extensions` already ports both, and the copies were replaced with
+  imports. That is the second duplicate in two rounds, both caught by the same cheap search. The rule
+  is now stated in `differential-findings.md`: **before writing a port of a reference behaviour,
+  search the tree for the reference symbol.**
+- Evidence: `cargo test --locked --workspace` - **1883** library (up from 1878) + 199 bin tests,
+  0 failed, 1 ignored. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+
 ## 2026-10-16 - GUID rendering pinned on the metadata path, and a CI formatting trap fixed
 
 - Outcome: closed the sweep's own remaining item by widening the `UnityGuid` evidence, and fixed a

@@ -1,0 +1,35 @@
+# `Path.GetExtension` at its edges, captured from the reference runtime
+#
+# Produced by tools/probes/path-extension, which calls the real `Path.GetExtension`. The port
+# implements the same rule in `asset_path::get_extension`, and the rule decides the export
+# extension `VideoClipExtensions.TryGetExtensionFromPath` derives: it tests the result for
+# emptiness and then strips the leading character, so an empty result means the `bytes` fallback
+# while any non-empty result becomes the extension itself.
+#
+# Columns: EXT|<platform>|<input>|<result>, with `<empty>` standing for the empty string.
+# A row is `windows` when the answer depends on `\\` counting as a separator; the rest are
+# `both` because `/` separates on either platform.
+#
+# The rows worth reading twice:
+#   `video.` and `..` and `trailing..` all give the empty string, not a dot, so the strip
+#   in the caller can never produce an empty extension from a non-empty result.
+#   `.bashrc` gives `.bashrc` - a leading dot is an extension when it is the only dot.
+#   `x. y` gives `. y` - the space is kept, so the extension is not trimmed.
+EXT|both|video.mp4|.mp4
+EXT|both|video|<empty>
+EXT|both|video.|<empty>
+EXT|both|a.b.c|.c
+EXT|both|.bashrc|.bashrc
+EXT|both|<empty>|<empty>
+EXT|both|.|<empty>
+EXT|both|..|<empty>
+EXT|both|dir.d/file|<empty>
+EXT|both|dir/file.mp4|.mp4
+EXT|both|dir/file.|<empty>
+EXT|both|/abs/path/x.ogv|.ogv
+EXT|windows|C:\dir\x.mp4|.mp4
+EXT|windows|C:\dir.d\x|<empty>
+EXT|both|x..y|.y
+EXT|both|x. y|. y
+EXT|both|sp ace.mp4|.mp4
+EXT|both|trailing..|<empty>

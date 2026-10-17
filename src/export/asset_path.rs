@@ -43,6 +43,20 @@ pub enum HostPathPlatform {
 }
 
 impl HostPathPlatform {
+    /// The platform the reference itself would be running on.
+    ///
+    /// The frozen source calls `Path.GetExtension`, `Path.GetInvalidFileNameChars` and friends, all
+    /// of which are **host-dependent** in .NET: a backslash separates path components on Windows and
+    /// does not on Unix. A port that hard-codes one platform therefore diverges whenever it runs on
+    /// the other, and comparisons are always made against a reference running on the same host, so
+    /// the host is the right answer rather than a choice.
+    pub const fn host() -> Self {
+        if cfg!(windows) {
+            Self::Windows
+        } else {
+            Self::Unix
+        }
+    }
     /// The `Path.GetInvalidFileNameChars()` set plus the baseline's always-added characters.
     ///
     /// The baseline appends `:` when the host set does not already contain it, and its regular
@@ -797,6 +811,43 @@ mod tests {
         for name in ["co", "com0", "com10", "lpt", "console", "conx"] {
             assert!(!is_reserved_name(name, HostPathPlatform::Windows), "{name}");
         }
+    }
+
+    /// Replay `Path.GetExtension` against the reference runtime.
+    ///
+    /// The assertions in `path_helpers_match_the_source_semantics` above cover the common shapes; the
+    /// rows here are captured from the real `Path.GetExtension` by `tools/probes/path-extension` and
+    /// concentrate on the edges, which is where a hand-written rule usually diverges. `VideoClip`
+    /// extension selection depends on this function, so the `bytes` fallback versus a real extension
+    /// turns on these rows.
+    #[test]
+    fn get_extension_matches_the_reference_runtime_rows() {
+        let fixture = include_str!("path_extension_fixture.txt");
+        let mut rows = 0usize;
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let rest = line.strip_prefix("EXT|").expect("EXT row");
+            let mut parts = rest.splitn(3, '|');
+            let platform = parts.next().expect("platform");
+            let input = parts.next().expect("input");
+            let expected = parts.next().expect("expected");
+            // `<empty>` is the fixture's spelling for the empty string, because a trailing
+            // separator would otherwise be invisible.
+            let expected = if expected == "<empty>" { "" } else { expected };
+            let platforms: &[HostPathPlatform] = match platform {
+                "windows" => &[HostPathPlatform::Windows],
+                "both" => &[HostPathPlatform::Windows, HostPathPlatform::Unix],
+                other => panic!("unexpected platform {other}"),
+            };
+            for host in platforms {
+                assert_eq!(get_extension(input, *host), expected, "{line} on {host:?}");
+            }
+            rows += 1;
+        }
+        assert_eq!(rows, 18, "every recorded row is replayed");
     }
 
     #[test]

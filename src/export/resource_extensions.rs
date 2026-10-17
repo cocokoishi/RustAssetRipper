@@ -23,6 +23,7 @@
 //! of 64; content rules (`IsPlainText`, control/whitespace classes) match Unicode behavior.
 //! Number-range and encoder edge cases beyond the grammar stay open.
 
+use super::asset_path::HostPathPlatform;
 use super::settings::{ImageExportFormat, TextExportMode};
 use crate::serialized_file::object::SerializedValue;
 
@@ -455,26 +456,30 @@ impl From<crate::serialized_file::object::SerializedValueLookupError> for FontDa
     }
 }
 
-/// `VideoClipExtensions.TryGetExtensionFromPath`: the original path's extension.
+/// `VideoClipExtensions.TryGetExtensionFromPath`: the original path's extension, dot stripped.
 ///
-/// Takes the filename tail after the last `/`, then the text after its last dot; a missing
-/// or trailing dot yields nothing. The dot itself is stripped by the caller rule.
-pub fn video_extension_from_path(original_path: &str) -> Option<&str> {
-    let file_name = original_path.rsplit('/').next().unwrap_or(original_path);
-    let dot = file_name.rfind('.')?;
-    if dot + 1 >= file_name.len() {
-        return None;
-    }
-    Some(&file_name[dot + 1..])
+/// Delegates to [`crate::export::asset_path::get_extension`], which is `Path.GetExtension` and is
+/// replayed against the reference runtime by
+/// `asset_path::get_extension_matches_the_reference_runtime_rows`. That matters for a reason worth
+/// recording: the earlier version of this function split on `/` alone, so a Windows-style path such
+/// as `C:\dir.d\x` returned `d\x` where the reference - running on Windows - returns nothing,
+/// because a backslash **is** a separator there. The host platform is therefore a parameter rather
+/// than an assumption.
+pub fn video_extension_from_path(original_path: &str, platform: HostPathPlatform) -> Option<&str> {
+    let extension = crate::export::asset_path::get_extension(original_path, platform);
+    // `Path.GetExtension` never returns a bare dot, so a non-empty result always has at least one
+    // character after it.
+    extension.strip_prefix('.').filter(|rest| !rest.is_empty())
 }
 
 /// `VideoClipExtensions.GetExtensionFromPath`: the path extension or `bytes`.
-pub fn video_export_extension(original_path: &str) -> &str {
-    video_extension_from_path(original_path).unwrap_or(BYTES_EXTENSION)
+pub fn video_export_extension(original_path: &str, platform: HostPathPlatform) -> &str {
+    video_extension_from_path(original_path, platform).unwrap_or(BYTES_EXTENSION)
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::asset_path::HostPathPlatform;
     use super::super::settings::{ImageExportFormat, TextExportMode};
     use super::{
         best_extension, font_extension, is_dangerous_extension, is_plain_text, is_valid_json_text,
@@ -605,15 +610,43 @@ mod tests {
 
     #[test]
     fn video_extensions_come_from_the_path_or_bytes() {
+        let windows = HostPathPlatform::Windows;
         assert_eq!(
-            video_extension_from_path("Assets/Videos/clip.mp4"),
+            video_extension_from_path("Assets/Videos/clip.mp4", windows),
             Some("mp4")
         );
-        assert_eq!(video_extension_from_path("clip.MP4"), Some("MP4"));
-        assert_eq!(video_extension_from_path("a.b/c"), None);
-        assert_eq!(video_extension_from_path("clip."), None);
-        assert_eq!(video_extension_from_path("clip"), None);
-        assert_eq!(video_export_extension("Assets/Videos/clip.mp4"), "mp4");
-        assert_eq!(video_export_extension("clip"), BYTES_EXTENSION);
+        assert_eq!(video_extension_from_path("clip.MP4", windows), Some("MP4"));
+        assert_eq!(video_extension_from_path("a.b/c", windows), None);
+        assert_eq!(video_extension_from_path("clip.", windows), None);
+        assert_eq!(video_extension_from_path("clip", windows), None);
+        assert_eq!(
+            video_export_extension("Assets/Videos/clip.mp4", windows),
+            "mp4"
+        );
+        assert_eq!(video_export_extension("clip", windows), BYTES_EXTENSION);
+    }
+
+    /// The separator set is the host's, which the runtime fixture pins for `Path.GetExtension`.
+    ///
+    /// The earlier implementation split on `/` alone, so it read an extension out of a
+    /// Windows-style path where the reference - running on Windows - finds none.
+    #[test]
+    fn video_extension_separators_follow_the_platform() {
+        let windows = HostPathPlatform::Windows;
+        let unix = HostPathPlatform::Unix;
+        assert_eq!(
+            video_extension_from_path("C:\\dir.d\\x", windows),
+            None,
+            "a backslash separates on Windows"
+        );
+        assert_eq!(
+            video_export_extension("C:\\dir.d\\x", windows),
+            BYTES_EXTENSION
+        );
+        assert_eq!(
+            video_extension_from_path("C:\\dir.d\\x", unix),
+            Some("d\\x"),
+            "a backslash is an ordinary character on Unix, so the dot after it wins"
+        );
     }
 }

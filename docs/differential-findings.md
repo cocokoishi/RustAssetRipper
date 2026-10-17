@@ -1,5 +1,39 @@
 # Source behavior and differential findings
 
+## DIFF-VIDEO-PATH-SEPARATOR-001 - the video-clip path extension ignored the Windows separator (fix implemented and verified against captured runtime rows)
+
+`VideoClipExtensions.GetExtensionFromPath` returns `Path.GetExtension(clip.OriginalPath_R)` with the
+leading dot stripped, falling back to `bytes`. `Path.GetExtension` is **host-dependent**: a backslash
+separates path components on Windows and is an ordinary character on Unix. The port's
+`resource_extensions::video_extension_from_path` split on `/` alone, so on Windows it read an
+extension out of a path the reference sees as extension-less.
+
+The case that separates the two: `C:\dir.d\x` returns nothing under the reference on Windows, because
+the last separator is the backslash before the final component and no dot follows it. The port's
+version looked for the last dot anywhere before the `/` boundary, found the one in `dir.d`, and
+returned `d\x` as the extension - a different export file name for the same asset.
+
+**Evidence.** `tools/probes/path-extension` calls the real `Path.GetExtension` on eighteen edge
+inputs, and the rows are committed as `src/export/path_extension_fixture.txt`, replayed by
+`asset_path::get_extension_matches_the_reference_runtime_rows`. The fixture tags the rows whose
+answer depends on `\` separating, so both platforms are pinned. It also confirmed the port's existing
+`get_extension` was already correct on every other edge - `video.`, `..` and `trailing..` all yield
+the empty string rather than a dot, and `.bashrc` yields `.bashrc` - which is what makes the dot-strip
+in the caller safe.
+
+**Fix.** Both video path helpers now take a `HostPathPlatform` and delegate to the
+fixture-verified `asset_path::get_extension`, and a new `HostPathPlatform::host()` supplies the
+running host rather than a hard-coded choice. `VideoClip::try_get_extension_from_path` - the accessor
+the browser route uses to advertise the video tab - passes the host platform.
+
+**A duplication that was caught before it landed.** The first version of this change reimplemented
+`GetFontExtension` and `GetExtensionFromPath` inside the new primary-content extractor module,
+without noticing that `resource_extensions` already ports both. A grep for the reference symbol names
+found the originals and the copies were removed in favour of imports. This is the **second**
+occurrence of the same mistake in two rounds - the first was a duplicate .NET float formatter - and
+both were found by the same cheap check: before writing a port of a reference behaviour, search the
+tree for the reference symbol.
+
 ## DIFF-JSON-INDENT-001 - the JSON surface emitted compact text where the reference emits the indented walker text (fix implemented and verified against captured runtime rows)
 
 `DefaultJsonWalker` writes tab-indented, line-broken JSON as it walks an asset. The port had the

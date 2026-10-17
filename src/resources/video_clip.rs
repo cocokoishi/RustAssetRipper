@@ -49,7 +49,12 @@ impl VideoClipView {
     /// stripped, or `None` when the path carries no extension.
     pub fn try_get_extension_from_path(&self) -> Option<&str> {
         let path = self.original_path.as_deref()?;
-        crate::export::resource_extensions::video_extension_from_path(path)
+        // `Path.GetExtension` is host-dependent: a backslash separates on Windows and does not on
+        // Unix, so the host decides rather than a hard-coded separator set.
+        crate::export::resource_extensions::video_extension_from_path(
+            path,
+            crate::export::asset_path::HostPathPlatform::host(),
+        )
     }
 
     /// `VideoClipExtensions.GetExtensionFromPath`: the extension or the `bytes` fallback.

@@ -1,6 +1,44 @@
 # RustAssetRipper hand-off — 2026-10-16
 
-## Latest current checkpoint - 2026-10-16 (duplicate .NET float formatter removed)
+## Latest current checkpoint - 2026-10-16 (primary-content extractor decisions ported)
+
+- **The primary-content pipeline's missing half is started**: the handler table, dispatch, assembly,
+  loop and membership were already ported, but nothing decided *what each extractor does*. New
+  `src/export/primary_extractors.rs` ports `BinaryAssetContentExtractor` and records the two
+  unconditional extractors. New ledger row `PRODUCT-PRIMARY-CONTENT-EXTRACTORS-001`.
+- **Every binary arm requires a non-empty payload before admitting**, so an empty payload falls
+  through to the next handler instead of exporting an empty file. `VideoClip` is gated on
+  `CheckIntegrity()` rather than a length, and `MovieTexture` keeps `Has_MovieData` and
+  non-emptiness as **two** separate conditions. `EmptyContentExtractor` **claims** into the shared
+  empty collection - it does not decline - which is why an asset reaching one of those handlers is
+  never reconsidered.
+- **`Path.GetExtension` is host-dependent and the port had assumed `/`.** The video-clip path
+  extension produced `d\x` for `C:\dir.d\x` on Windows where the reference produces nothing. Fixed
+  by delegating to the fixture-verified `asset_path::get_extension` with a new
+  `HostPathPlatform::host()`; `src/export/path_extension_fixture.txt` (18 runtime rows) now pins the
+  helper, and the divergence is `DIFF-VIDEO-PATH-SEPARATOR-001`.
+- **Duplicate port check, second hit in two rounds.** My first version reimplemented
+  `GetFontExtension` and `GetExtensionFromPath`; `resource_extensions` already ported both. Replaced
+  with imports. **Rule: before porting a reference behaviour, grep the tree for the reference symbol
+  name.** Both duplicates were caught by exactly that search.
+- **Remaining for `/Export/PrimaryContent` (still 501):** the audio, texture, script, GLB
+  model/mesh/terrain/navmesh and deleted-asset extractors, plus a production caller for
+  `binary_asset_claim` and for `json_walker::write_json_body`.
+- **Next steps, in order:** finish the extractor layer (texture + script + GLB are the largest
+  remaining), then wire the route, then the 9 `实现中` rows (`RES-TEXTURE-001`, `RES-MODEL-001`,
+  `EXPORT-UNITY-001` first).
+- **Corpus note:** `docs/acceptance-corpus.md` marks all 22 samples CONVERGED but those verdicts are
+  dated 2026-10-15 and predate 60+ commits. They must be re-replayed locally before they count.
+- **Never format `src/resources/glb_tests_01.rs` via the repo check without knowing it differs even
+  when wrapped**; the CI script now wraps every `src/**/*_tests_NN.rs` fragment, which is verified for
+  four of them.
+- **A GLB is binary: decode the JSON chunk before asserting on text.**
+- **Run `tools/parity-report.ps1` after every ledger edit**; a literal `||` inside a cell splits the
+  row.
+- Parity ledger: 408 rows, 380 verified, 28 non-verified, DUPES=0, MALFORMED=0, gate OPEN.
+- Verified: **1883** library + 199 bin tests, 0 failed; warnings-denied Clippy exit 0.
+
+## Previous checkpoint - 2026-10-16 (duplicate .NET float formatter removed)
 
 - **The .NET-semantics sweep found its first hit in code committed one round earlier.** The JSON
   walker's float formatter was a *second* implementation of .NET `ToString`; `unity_yaml::
