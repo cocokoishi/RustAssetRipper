@@ -1,5 +1,30 @@
 # Validation log
 
+## 2026-10-16 - Collection membership rules, and a second asymmetry checked rather than "fixed"
+
+- Outcome: ported the membership half of `SingleExportCollection` / `MultipleExportCollection`:
+  `PrimaryContentCollection::contains` and `add_asset`. 1872 library tests.
+- **Membership is by asset identity, not by name.** `SingleExportCollection.Contains` compares
+  `Asset.AssetInfo`, and `AssetInfo` is `readonly record struct AssetInfo(AssetCollection
+  Collection, long PathID, int ClassID)` - structural equality over that triple. The test pins the
+  consequence directly: two assets with the *same* display name stay in two separate collections,
+  and neither claims the other.
+- **`AddAsset` refuses to append the primary.** The source tests `!ReferenceEquals(asset, Asset)`
+  and skips it, because `Assets` already yields the primary first; without the guard the primary
+  would be written twice. The test asserts the primary is rejected, a secondary is appended once,
+  a repeat is rejected, and the primary keeps its leading position.
+- **A second asymmetry in the same file turned out to be benign, and that is now documented so it
+  is not "fixed" later.** `SingleExportCollection.Name` returns `Asset.GetBestName()` **raw**, while
+  the *filename* goes through `FixInvalidFileNameCharacters`. That looks like the class-name defect
+  from `DIFF-PRIMARY-CONTENT-CLASSNAME-001`, but it is not: the only consumers of `Name` are the two
+  progress/warning log lines in `PrimaryContentExporter.Export`, so a raw name can reach a log
+  message and can never reach a path. I checked the consumers before writing this down rather than
+  pattern-matching on the previous finding - the two look identical and are not.
+- Evidence: `cargo test --locked --workspace` - **1872** library (up from 1871) + 199 bin tests,
+  0 failed, 1 ignored. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+  `rustfmt --edition 2021 --check` on the changed file - clean. Parity: TOTAL=407, NONVERIFIED=26,
+  DUPES=0, MALFORMED=0, GATE=OPEN.
+
 ## 2026-10-16 - A primary-content path escape in the frozen source, fixed generically
 
 - Outcome: `ExportCollectionBase.GetUniqueFileName` sanitizes the asset-derived name on **one**

@@ -282,6 +282,14 @@ pub struct PrimaryContentCollection {
     /// The source declares this abstract and each collection derives it differently - a single
     /// asset collection uses the asset's best name, `EmptyExportCollection` uses its own type
     /// name - so the caller supplies the resolved name rather than this module guessing a rule.
+    ///
+    /// This is deliberately the **unsanitized** name, matching `SingleExportCollection.Name`,
+    /// which returns `Asset.GetBestName()` raw while the *filename* goes through
+    /// `FixInvalidFileNameCharacters`. Checked rather than assumed benign: the only consumers of
+    /// `Name` are the progress and warning log lines in `PrimaryContentExporter.Export`, so a raw
+    /// name can appear in a log message but can never reach a path. That asymmetry is therefore
+    /// **not** a defect, unlike the class-name one recorded in
+    /// `DIFF-PRIMARY-CONTENT-CLASSNAME-001` - do not "fix" this one.
     pub name: String,
 }
 
@@ -289,6 +297,30 @@ impl PrimaryContentCollection {
     /// `ExportCollectionBase.Name`.
     pub fn collection_name(&self) -> String {
         self.name.clone()
+    }
+
+    /// `MultipleExportCollection.Contains` / `SingleExportCollection.Contains`.
+    ///
+    /// Membership is by **asset identity** (`AssetInfo` is `(Collection, PathID, ClassID)`, a
+    /// record struct, so equality is structural), never by name. Two assets in different
+    /// collections can share a name and remain distinct, and a multi-asset collection claims its
+    /// primary plus every secondary it was given.
+    pub fn contains(&self, identity: u64) -> bool {
+        self.assets.contains(&identity)
+    }
+
+    /// `MultipleExportCollection.AddAsset`.
+    ///
+    /// The primary asset is never added as a secondary: the source tests
+    /// `!ReferenceEquals(asset, Asset)` and skips it, because `Assets` already yields the primary
+    /// first. Without that guard the primary would be written twice. Returns true when the asset
+    /// was actually appended.
+    pub fn add_asset(&mut self, identity: u64) -> bool {
+        if identity == self.primary || self.assets.contains(&identity) {
+            return false;
+        }
+        self.assets.push(identity);
+        true
     }
 }
 
@@ -755,6 +787,42 @@ mod tests {
             class_name: class_name.to_owned(),
             ..Default::default()
         }
+    }
+
+    /// Membership is by identity, and the primary is never appended as a secondary.
+    #[test]
+    fn primary_content_collection_membership_is_by_identity() {
+        let collections =
+            create_primary_content_collections(&[solo(7, "Seven")], catch_all).unwrap();
+        let mut collection = collections.into_iter().next().expect("one collection");
+        assert_eq!(collection.primary, 7);
+        assert_eq!(collection.assets, [7]);
+        assert!(collection.contains(7));
+        assert!(!collection.contains(8));
+
+        // A secondary is appended exactly once, and the primary is never appended at all - it is
+        // already the first member, so letting it in would export it twice.
+        assert!(!collection.add_asset(7), "the primary is not a secondary");
+        assert!(collection.add_asset(8));
+        assert!(
+            !collection.add_asset(8),
+            "an existing secondary is not re-added"
+        );
+        assert_eq!(collection.assets, [7, 8], "the primary stays first");
+        assert!(collection.contains(8));
+        // Membership is by identity even when every collection shares a display name: two assets
+        // in different collections stay distinct.
+        let same_name =
+            create_primary_content_collections(&[solo(2, "Shared"), solo(3, "Shared")], catch_all)
+                .unwrap();
+        assert_eq!(same_name.len(), 2, "a shared name does not merge assets");
+        assert_eq!(
+            same_name[0].collection_name(),
+            same_name[1].collection_name()
+        );
+        assert!(same_name[0].contains(2));
+        assert!(!same_name[0].contains(3));
+        assert!(same_name[1].contains(3));
     }
 
     /// A class-name fallback is sanitized, closing a path-escape the frozen source allows.

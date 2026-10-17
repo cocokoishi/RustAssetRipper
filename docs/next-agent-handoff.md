@@ -1,6 +1,37 @@
 # RustAssetRipper hand-off — 2026-10-16
 
-## Latest current checkpoint - 2026-10-16 (primary-content path escape fixed)
+## Latest current checkpoint - 2026-10-16 (collection membership rules ported)
+
+- **Ported the membership half of `SingleExportCollection`/`MultipleExportCollection`**:
+  `PrimaryContentCollection::contains` and `add_asset`.
+- **Membership is by asset identity, never by name.** `Contains` compares `AssetInfo`, which is
+  `readonly record struct AssetInfo(AssetCollection Collection, long PathID, int ClassID)` -
+  structural equality over that triple. Pinned directly: two assets with the *same* display name
+  stay in separate collections and neither claims the other.
+- **`AddAsset` refuses to append the primary** (`!ReferenceEquals(asset, Asset)`), because `Assets`
+  already yields the primary first; without the guard it would be written twice.
+- **A second asymmetry in the same file is benign - documented so nobody "fixes" it later.**
+  `SingleExportCollection.Name` returns `GetBestName()` **raw** while the *filename* is sanitized.
+  Unlike `DIFF-PRIMARY-CONTENT-CLASSNAME-001`, this cannot cause harm: the only consumers of `Name`
+  are the progress/warning **log** lines, so a raw name never reaches a path. **I checked the
+  consumers rather than pattern-matching on the earlier finding** - the two look identical and are
+  not. Do not change it.
+- **General lesson from the last two rounds:** the same-looking asymmetry can be a defect in one
+  place and harmless in another. Check where the value goes before deciding.
+- **Next concrete step for the scene GLB:** give `export_scene_glb` a caller reachable from the
+  primary-content path, and resolve per-node geometry (the reference reaches a mesh through
+  `BuildParameters.TryGetOrMakeMeshData`). `EXP-GLB-001` and `EXP-GLB-SCENE-001` share this work.
+- **Never format `src/resources/glb_tests_01.rs`** (nor `main_tests_01.rs`/`main_tests_03.rs`).
+- **A GLB is binary: decode the JSON chunk before asserting on text** (12-byte header, then the
+  chunk header).
+- **When a feature a gap cell calls unported lands, re-check that cell in the same round** - four
+  cells have been wrong this way (`EXP-GLB-001` twice, `RES-MODEL-001`, `RES-BLENDSHAPE-001`).
+- Parity ledger: 407 rows, 381 verified, 26 non-verified, DUPES=0, MALFORMED=0, gate OPEN.
+- `/Scenes/View` and `/Export/PrimaryContent` both still return 501.
+- Corpus replays are local-only and have not run in these rounds.
+- Verified: **1872** library + 199 bin tests, 0 failed; warnings-denied Clippy exit 0.
+
+## Previous checkpoint - 2026-10-16 (primary-content path escape fixed)
 
 - **Found and fixed a real path escape in the frozen source.**
   `ExportCollectionBase.GetUniqueFileName` sanitizes the asset-derived name on **one** branch only:
