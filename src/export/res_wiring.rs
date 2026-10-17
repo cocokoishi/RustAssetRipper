@@ -66,12 +66,22 @@ use crate::serialized_file::object::{SerializedFieldValue, SerializedValue};
 pub const TEXTURE2D_CLASS_ID: i32 = 28;
 /// Class-43 `Mesh`.
 pub const MESH_CLASS_ID: i32 = 43;
+/// Class-49 `TextAsset`.
+pub const TEXT_ASSET_CLASS_ID: i32 = 49;
 /// Class-83 `AudioClip`.
 pub const AUDIO_CLIP_CLASS_ID: i32 = 83;
+/// Class-115 `MonoScript`.
+pub const MONO_SCRIPT_CLASS_ID: i32 = 115;
+/// Class-128 `Font`.
+pub const FONT_CLASS_ID: i32 = 128;
+/// Class-152 `MovieTexture`.
+pub const MOVIE_TEXTURE_CLASS_ID: i32 = 152;
 /// Class-156 `TerrainData`.
 pub const TERRAIN_CLASS_ID: i32 = 156;
 /// Class-238 `NavMeshData`.
 pub const NAVMESH_CLASS_ID: i32 = 238;
+/// Class-329 `VideoClip`.
+pub const VIDEO_CLIP_CLASS_ID: i32 = 329;
 
 /// The exporter family a class ID belongs to.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -86,6 +96,13 @@ pub enum ResourceExportFamily {
     NavMesh,
     /// A native audio passthrough (class 83).
     Audio,
+    /// `BinaryAssetContentExtractor`'s four arms: classes 49, 128, 152, 329.
+    ///
+    /// Unlike the other families this one has no single extension: a text asset is `bytes`, a font's
+    /// comes from its own four-character code, a movie texture is `ogv`, and a video clip's comes from
+    /// its original path. The planned file name carries the right one, so
+    /// [`ResourceExportFamily::export_extension`] answers only the fallback.
+    Binary,
     /// Shader text (class 48).
     ShaderText,
     /// A YAML text asset owned by the project YAML path (class 21).
@@ -112,6 +129,8 @@ impl ResourceExportFamily {
             Self::Mesh | Self::Terrain | Self::NavMesh | Self::HierarchyGlb => "glb",
             Self::Audio => "wav",
             Self::ShaderText | Self::MaterialText => "asset",
+            // Only a fallback: each binary arm's real extension is in the planned file name.
+            Self::Binary => "bytes",
         }
     }
 
@@ -208,6 +227,10 @@ pub enum ResourceWiringError {
     Audio(AudioDecodeError),
     /// The audio clip fields could not be read.
     AudioView(String),
+    /// A font's `m_FontData` could not be read.
+    FontData(String),
+    /// The video clip fields could not be read, or its content was not supplied.
+    VideoClip(String),
     /// The shader text could not be produced.
     Shader(ShaderTextExportError),
     /// A field lookup in the decoded payload failed.
@@ -248,6 +271,8 @@ impl Display for ResourceWiringError {
             Self::Glb(error) => write!(formatter, "{error}"),
             Self::Audio(error) => write!(formatter, "{error}"),
             Self::AudioView(message) => write!(formatter, "audio clip read failed: {message}"),
+            Self::FontData(message) => write!(formatter, "font data read failed: {message}"),
+            Self::VideoClip(message) => write!(formatter, "video clip read failed: {message}"),
             Self::Shader(error) => write!(formatter, "{error}"),
             Self::FieldLookup(message) => write!(formatter, "field lookup failed: {message}"),
             Self::WrongType { field, actual } => {
@@ -652,6 +677,118 @@ pub fn plan_audio_export(
     })
 }
 
+/// Plans one of `BinaryAssetContentExtractor`'s four arms.
+///
+/// The primary-content binary extractor writes an asset's own bytes with an arm-specific extension.
+/// It is the one extractor whose payload had no producer in this module, because the Unity-project
+/// pipeline exports these assets as YAML rather than as raw bytes.
+///
+/// `Ok(None)` means the arm **declines**, matching [`plan_resource_export`]'s convention: the caller
+/// falls through to the next handler. Every arm requires a non-empty payload, which is what makes an
+/// empty asset decline rather than write an empty file. `MovieTexture` keeps `Has_MovieData` and
+/// non-emptiness as two separate conditions, as the source does, so an absent field and an empty one
+/// are distinguishable even though both decline.
+///
+/// `stream_content` is the resolved `m_ExternalResources` range for a video clip. A clip whose
+/// descriptor passed the integrity gate but whose bytes were not supplied is an error rather than a
+/// decline, because the reference reaches its `GetContent` and fails there.
+pub fn plan_binary_export(
+    name: &str,
+    class_id: i32,
+    root: &SerializedValue,
+    stream_content: Option<&[u8]>,
+) -> Result<Option<PlannedResourceExport>, ResourceWiringError> {
+    let plan = match class_id {
+        TEXT_ASSET_CLASS_ID => {
+            let data = byte_array_field(root, "m_Script")?.unwrap_or_default();
+            if data.is_empty() {
+                return Ok(None);
+            }
+            binary_plan(name, "bytes", data)
+        }
+        FONT_CLASS_ID => {
+            let data = crate::export::resource_extensions::font_data_bytes(root)
+                .map_err(|error| ResourceWiringError::FontData(error.to_string()))?
+                .unwrap_or_default();
+            if data.is_empty() {
+                return Ok(None);
+            }
+            // The extension is read from the payload's own four-character code.
+            let extension = crate::export::resource_extensions::font_extension(&data);
+            binary_plan(name, extension, data)
+        }
+        MOVIE_TEXTURE_CLASS_ID => {
+            let Some(data) = byte_array_field(root, "m_MovieData")? else {
+                return Ok(None);
+            };
+            if data.is_empty() {
+                return Ok(None);
+            }
+            binary_plan(name, "ogv", data)
+        }
+        VIDEO_CLIP_CLASS_ID => {
+            let view = crate::resources::video_clip::VideoClipView::from_value(root)
+                .map_err(|error| ResourceWiringError::VideoClip(error.to_string()))?;
+            if !view.check_integrity() {
+                return Ok(None);
+            }
+            let Some(data) = stream_content else {
+                return Err(ResourceWiringError::VideoClip(
+                    "video clip passed its integrity gate but no resource content was supplied"
+                        .to_owned(),
+                ));
+            };
+            let extension = crate::export::resource_extensions::video_export_extension(
+                view.original_path.as_deref().unwrap_or(""),
+                crate::export::asset_path::HostPathPlatform::host(),
+            );
+            binary_plan(name, extension, data.to_vec())
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(plan))
+}
+
+/// The planned export for one binary arm.
+fn binary_plan(name: &str, extension: &str, bytes: Vec<u8>) -> PlannedResourceExport {
+    PlannedResourceExport {
+        file_name: format!("{name}.{extension}"),
+        bytes,
+        family: ResourceExportFamily::Binary,
+    }
+}
+
+/// A byte-array field in either serialized shape: packed `Bytes`, or an `Array` of `U8`.
+///
+/// The two shapes are both real: a TypeTree-decoded payload keeps a byte array as `Bytes`, while a
+/// generated-class read may produce the element list. `resource_extensions::font_data_bytes` makes
+/// the same distinction for `m_FontData`, and reports a non-`U8` element rather than coercing it.
+fn byte_array_field(
+    root: &SerializedValue,
+    name: &'static str,
+) -> Result<Option<Vec<u8>>, ResourceWiringError> {
+    let Some(value) = lookup_field(root, name)? else {
+        return Ok(None);
+    };
+    match value {
+        SerializedValue::Bytes(bytes) => Ok(Some(bytes.clone())),
+        SerializedValue::StringBytes(bytes) => Ok(Some(bytes.clone())),
+        SerializedValue::Array(values) => {
+            let mut output = Vec::with_capacity(values.len());
+            for (index, value) in values.iter().enumerate() {
+                let SerializedValue::U8(byte) = value else {
+                    return Err(ResourceWiringError::FieldLookup(format!(
+                        "{name}[{index}] is not a byte"
+                    )));
+                };
+                output.push(*byte);
+            }
+            Ok(Some(output))
+        }
+        _ => Ok(None),
+    }
+}
+
 /// Plans one class-48 shader text export. `ShaderExportMode::Yaml` has no text form and stays
 /// with the YAML collection, reported as [`ShaderTextExportError::YamlModeWritesAsset`].
 pub fn plan_shader_export(
@@ -769,6 +906,9 @@ pub fn plan_resource_export(
             plan_shader_export(request.name, &view, request.shader_mode)?
         }
         ResourceExportFamily::MaterialText => return Ok(None),
+        // The binary arms are not dispatched here: their classes are absent from
+        // `resource_export_family` and go through `plan_binary_export`, whose gates differ per arm.
+        ResourceExportFamily::Binary => return Ok(None),
     };
     Ok(Some(plan))
 }
@@ -846,6 +986,169 @@ mod tests {
 
     fn struct_value(fields: Vec<SerializedFieldValue>) -> SerializedValue {
         SerializedValue::Struct(fields)
+    }
+
+    /// A payload with one byte-array field, in the packed shape.
+    fn bytes_payload(name: &str, bytes: &[u8]) -> SerializedValue {
+        struct_value(vec![field(name, SerializedValue::Bytes(bytes.to_vec()))])
+    }
+
+    /// `BinaryAssetContentExtractor`'s four arms, each with its own gate and extension.
+    #[test]
+    fn the_binary_arms_plan_their_own_extension_and_gate() {
+        // A text asset with data writes `.bytes`; an empty one declines so the stack continues.
+        let plan = plan_binary_export(
+            "story",
+            TEXT_ASSET_CLASS_ID,
+            &bytes_payload("m_Script", b"hello"),
+            None,
+        )
+        .unwrap()
+        .expect("a non-empty text asset is planned");
+        assert_eq!(plan.file_name, "story.bytes");
+        assert_eq!(plan.bytes, b"hello");
+        assert_eq!(plan.family, ResourceExportFamily::Binary);
+        assert_eq!(
+            plan_binary_export(
+                "story",
+                TEXT_ASSET_CLASS_ID,
+                &bytes_payload("m_Script", b""),
+                None
+            )
+            .unwrap(),
+            None,
+            "an empty payload declines rather than writing an empty file"
+        );
+        // A missing field is also a decline.
+        assert_eq!(
+            plan_binary_export("story", TEXT_ASSET_CLASS_ID, &struct_value(vec![]), None).unwrap(),
+            None
+        );
+
+        // A font's extension comes from its own four-character code.
+        let ttf = plan_binary_export(
+            "face",
+            FONT_CLASS_ID,
+            &bytes_payload("m_FontData", &[0x00, 0x01, 0x00, 0x00, 0xAA]),
+            None,
+        )
+        .unwrap()
+        .expect("a non-empty font is planned");
+        assert_eq!(ttf.file_name, "face.ttf");
+        let otf = plan_binary_export(
+            "face",
+            FONT_CLASS_ID,
+            &bytes_payload("m_FontData", b"OTTOxxxx"),
+            None,
+        )
+        .unwrap()
+        .expect("a non-empty font is planned");
+        assert_eq!(otf.file_name, "face.otf");
+
+        // A movie texture keeps `Has_MovieData` and non-emptiness separate: both decline, but for
+        // different reasons, and the field's absence is not treated as an empty one.
+        assert_eq!(
+            plan_binary_export("clip", MOVIE_TEXTURE_CLASS_ID, &struct_value(vec![]), None)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            plan_binary_export(
+                "clip",
+                MOVIE_TEXTURE_CLASS_ID,
+                &bytes_payload("m_MovieData", b""),
+                None
+            )
+            .unwrap(),
+            None
+        );
+        let movie = plan_binary_export(
+            "clip",
+            MOVIE_TEXTURE_CLASS_ID,
+            &bytes_payload("m_MovieData", b"OGVDATA"),
+            None,
+        )
+        .unwrap()
+        .expect("a non-empty movie texture is planned");
+        assert_eq!(movie.file_name, "clip.ogv");
+        assert_eq!(movie.bytes, b"OGVDATA");
+
+        // A class outside the four arms is not this planner's business.
+        assert_eq!(
+            plan_binary_export("mesh", MESH_CLASS_ID, &struct_value(vec![]), None).unwrap(),
+            None
+        );
+    }
+
+    /// A video clip's extension comes from its original path, and its bytes from the caller.
+    #[test]
+    fn the_video_clip_arm_needs_both_a_descriptor_and_content() {
+        let intact = || {
+            struct_value(vec![
+                field(
+                    "m_ExternalResources",
+                    SerializedValue::Struct(vec![
+                        field(
+                            "m_Source",
+                            SerializedValue::StringBytes(b"shared.resS".to_vec()),
+                        ),
+                        field("m_Offset", SerializedValue::U64(0)),
+                        field("m_Size", SerializedValue::U64(64)),
+                    ]),
+                ),
+                field(
+                    "m_OriginalPath",
+                    SerializedValue::StringBytes(b"movies/intro.webm".to_vec()),
+                ),
+            ])
+        };
+
+        let plan = plan_binary_export("intro", VIDEO_CLIP_CLASS_ID, &intact(), Some(b"BYTES"))
+            .unwrap()
+            .expect("an intact clip with content is planned");
+        assert_eq!(plan.file_name, "intro.webm");
+        assert_eq!(plan.bytes, b"BYTES");
+
+        // A clip that passed its descriptor gate but has no content is an error, not a decline:
+        // the reference reaches its `GetContent` and fails there.
+        assert!(plan_binary_export("intro", VIDEO_CLIP_CLASS_ID, &intact(), None).is_err());
+
+        // A clip whose descriptor names no usable range declines before any content is needed.
+        let broken = struct_value(vec![field(
+            "m_OriginalPath",
+            SerializedValue::StringBytes(b"movies/intro.webm".to_vec()),
+        )]);
+        assert_eq!(
+            plan_binary_export("intro", VIDEO_CLIP_CLASS_ID, &broken, Some(b"BYTES")).unwrap(),
+            None
+        );
+    }
+
+    /// The packed-bytes and element-list shapes are both accepted, and a non-byte element is
+    /// reported rather than coerced.
+    #[test]
+    fn a_byte_array_field_accepts_both_shapes() {
+        let listed = struct_value(vec![field(
+            "m_Script",
+            SerializedValue::Array(vec![
+                SerializedValue::U8(1),
+                SerializedValue::U8(2),
+                SerializedValue::U8(3),
+            ]),
+        )]);
+        let plan = plan_binary_export("story", TEXT_ASSET_CLASS_ID, &listed, None)
+            .unwrap()
+            .expect("the element-list shape is accepted");
+        assert_eq!(plan.bytes, vec![1, 2, 3]);
+
+        let wrong = struct_value(vec![field(
+            "m_Script",
+            SerializedValue::Array(vec![SerializedValue::I32(1)]),
+        )]);
+        assert!(
+            plan_binary_export("story", TEXT_ASSET_CLASS_ID, &wrong, None).is_err(),
+            "a non-byte element is reported"
+        );
     }
 
     #[test]

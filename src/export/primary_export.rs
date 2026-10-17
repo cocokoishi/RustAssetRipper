@@ -475,6 +475,10 @@ pub fn object_facts_from_payload<'a>(
         }
         // The shader and material families are not primary-content extractors: a shader reaches the
         // JSON fallback and a material belongs to the Unity-project YAML route.
+        // `resource_export_family` never answers `Binary`: those four classes are decided by the
+        // binary extractor's own per-arm gate rather than by the family table, and they reach the
+        // facts below through the `None` branch.
+        Some(ResourceExportFamily::Binary) => {}
         Some(ResourceExportFamily::ShaderText | ResourceExportFamily::MaterialText) => {}
         // The hierarchy family is not a per-object export at all; `plan_resource_export` returns
         // `None` for it and `scene_glb` owns it.

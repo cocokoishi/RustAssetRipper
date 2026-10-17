@@ -1,5 +1,34 @@
 # Validation log
 
+## 2026-10-16 - The binary extractor's payload producer, the last genuinely missing one
+
+- Outcome: added `res_wiring::plan_binary_export`, covering all four `BinaryAssetContentExtractor`
+  arms with their own gates and extensions. 1924 library tests (up from 1921).
+- **Why this and not the route.** The route is an adapter over producers that mostly exist, but the
+  binary arms were the one gap with no producer at all, because the Unity-project pipeline exports
+  these assets as YAML rather than as raw bytes. It is small, self-contained and fully testable from a
+  payload, which is what a round should deliver when the route itself needs more plumbing than fits.
+- **Each arm's extension comes from where the reference gets it.** A text asset writes `bytes`; a
+  font's comes from its own four-character code through the already-ported `font_extension`, so a TTF
+  and an OTF font are distinguished by their magic and not by the asset name; a movie texture writes
+  `ogv`; and a video clip's comes from its original path through the ported `video_export_extension`.
+- **Every arm declines on an empty payload rather than writing an empty file**, and `MovieTexture`
+  keeps `Has_MovieData` and non-emptiness as **two separate conditions** as the source does - both
+  decline, but an absent field and an empty one remain distinguishable, which is the kind of thing that
+  silently collapses if the two conditions are folded into one.
+- **A clip that passed its descriptor gate but whose bytes were not supplied is an error, not a
+  decline.** The reference reaches its `GetContent` at that point and fails there; declining instead
+  would hand the asset to the JSON fallback and export it as something the reference never would.
+- **`byte_array_field` accepts both serialized shapes** - packed `Bytes` and an element list - because
+  both are real: a TypeTree-decoded payload keeps a byte array packed, while a generated-class read may
+  produce the element list. A non-byte element is reported rather than coerced.
+- **The class-id constants now have one home.** The four binary arms plus `MonoScript` live in this
+  module beside the five that were already there, which also removed the copy `primary_export` had
+  introduced last round - the second time this round's work was to stop a duplication I had created.
+- Evidence: `cargo test --locked --workspace` - **1924** library + 199 CLI tests, 0 failed, 1 ignored.
+  `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0. Ledger 409 rows,
+  MALFORMED=0, DUPES=0.
+
 ## 2026-10-16 - The facts adapter, and the classes that must be reported rather than guessed
 
 - Outcome: added `object_facts_from_payload`, which derives the claim-dispatch facts from an object's
