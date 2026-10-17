@@ -13,7 +13,16 @@ from pathlib import Path
 
 HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 ZERO_SHA = "0" * 40
-INCLUDED_TEST_FRAGMENT = re.compile(r"^src/main_tests_[0-9]+\.rs$")
+# Every `*_tests_NN.rs` file is spliced in with `include!` and carries the parent module's
+# indentation, so rustfmt must see it inside a module to judge it. This started as
+# `^src/main_tests_[0-9]+\.rs$`, which covered only the first fragments written; there are now a
+# dozen more under `src/**`, and for those the check would report every line as misformatted, so
+# **any** edit to them failed CI regardless of what the edit did. Verified after widening:
+# `serialized_file/metadata_tests_01.rs`, `io/stream_tests_01.rs`,
+# `export/scene_wiring_tests_01.rs` and `processing/managed_assembly_tests_01.rs` are byte-identical
+# to their wrapped rustfmt output. The remaining fragments still differ in a few lines, which the
+# changed-range comparison tolerates as long as an edit does not touch one of them.
+INCLUDED_TEST_FRAGMENT = re.compile(r"^src/(?:[^/]+/)*[A-Za-z0-9_]+_tests_[0-9]+\.rs$")
 
 
 def git(*args: str) -> bytes:
