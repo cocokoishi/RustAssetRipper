@@ -1,0 +1,102 @@
+# `float.ToString()` / `double.ToString()` under the invariant culture, captured from the runtime
+#
+# Produced by tools/probes/float-format, which calls the real
+# `value.ToString(CultureInfo.InvariantCulture)` - the exact call `DefaultJsonWalker` reaches when it
+# writes a float or double, because it passes no format string.
+#
+# Columns:
+#   BOUNDARY|<kind>|<power of ten>|<text>          the fixed/scientific switch points
+#   VALUE|<kind>|<IEEE bits as hex>|<text>         values chosen to separate the plausible rules
+#
+# Why this fixture exists: the port wrote these values with Rust's `Display`, and a comment claimed
+# that `Display` "already gives the shortest round-trip form without an exponent for the magnitudes
+# Unity stores". That claim is false, and the two formats disagree in three ways:
+#
+#   1. EXPONENT THRESHOLD. Rust's `Display` never uses exponent notation; .NET switches to it for
+#      exponent < -5 or exponent >= 9 (float) / >= 17 (double). So 1e-5f prints `1E-05`, not
+#      `0.00001`, and 1e9f prints `1E+09` while 1e8f still prints `100000000`.
+#   2. EXPONENT SPELLING. .NET writes `E+09`, `E-05`, `E+38` - uppercase E, an explicit sign for
+#      positive exponents, and at least two exponent digits. Rust's `{}` never produces this form
+#      at all.
+#   3. NON-FINITE VALUES. .NET writes bare `NaN`, `Infinity` and `-Infinity` (which is not valid
+#      JSON, but is what the reference emits), while Rust's `Display` writes `NaN`, `inf` and
+#      `-inf`.
+#
+# Both kinds also print integral values without a trailing `.0` (`1`, not `1.0`) and preserve the
+# sign of negative zero (`-0`).
+# BOUNDARY|f32|1e-6|1E-06
+BOUNDARY|f32|1e-5|1E-05
+BOUNDARY|f32|1e-4|0.0001
+BOUNDARY|f32|1e6|1000000
+BOUNDARY|f32|1e7|10000000
+BOUNDARY|f32|1e8|100000000
+BOUNDARY|f32|1e9|1E+09
+BOUNDARY|f32|1e10|1E+10
+BOUNDARY|f32|1e11|1E+11
+BOUNDARY|f32|1e12|1E+12
+BOUNDARY|f64|1e-8|1E-08
+BOUNDARY|f64|1e-7|1E-07
+BOUNDARY|f64|1e-6|1E-06
+BOUNDARY|f64|1e-5|1E-05
+BOUNDARY|f64|1e-4|0.0001
+BOUNDARY|f64|1e14|100000000000000
+BOUNDARY|f64|1e15|1000000000000000
+BOUNDARY|f64|1e16|10000000000000000
+BOUNDARY|f64|1e17|1E+17
+BOUNDARY|f64|1e18|1E+18
+VALUE|f32|00000000|0
+VALUE|f32|80000000|-0
+VALUE|f32|3F800000|1
+VALUE|f32|BF800000|-1
+VALUE|f32|3F000000|0.5
+VALUE|f32|42C80000|100
+VALUE|f32|38D1B717|0.0001
+VALUE|f32|3727C5AC|1E-05
+VALUE|f32|33D6BF95|1E-07
+VALUE|f32|4B189680|10000000
+VALUE|f32|4CBEBC20|100000000
+VALUE|f32|58635FA9|1E+15
+VALUE|f32|5A0E1BCA|1E+16
+VALUE|f32|60AD78EC|1E+20
+VALUE|f32|7F7FFFFF|3.4028235E+38
+VALUE|f32|00800000|1.1754944E-38
+VALUE|f32|34000000|1.1920929E-07
+VALUE|f32|3DCCCCCD|0.1
+VALUE|f32|3EAAAAAB|0.33333334
+VALUE|f32|47F12065|123456.79
+VALUE|f32|4B800000|16777216
+VALUE|f32|3E99999A|0.3
+VALUE|f32|40200000|2.5
+VALUE|f32|00000001|1E-45
+VALUE|f32|449A5000|1234.5
+VALUE|f32|3900F990|0.000123
+VALUE|f32|4B18967F|9999999
+VALUE|f32|FFC00000|NaN
+VALUE|f32|7F800000|Infinity
+VALUE|f32|FF800000|-Infinity
+VALUE|f64|0000000000000000|0
+VALUE|f64|8000000000000000|-0
+VALUE|f64|3FF0000000000000|1
+VALUE|f64|BFF0000000000000|-1
+VALUE|f64|3FE0000000000000|0.5
+VALUE|f64|4059000000000000|100
+VALUE|f64|3F1A36E2EB1C432D|0.0001
+VALUE|f64|3EE4F8B588E368F1|1E-05
+VALUE|f64|3E7AD7F29ABCAF48|1E-07
+VALUE|f64|416312D000000000|10000000
+VALUE|f64|430C6BF526340000|1000000000000000
+VALUE|f64|4341C37937E08000|10000000000000000
+VALUE|f64|4376345785D8A000|1E+17
+VALUE|f64|4415AF1D78B58C40|1E+20
+VALUE|f64|7FEFFFFFFFFFFFFF|1.7976931348623157E+308
+VALUE|f64|0000000000000001|5E-324
+VALUE|f64|0010000000000000|2.2250738585072014E-308
+VALUE|f64|3FB999999999999A|0.1
+VALUE|f64|3FD5555555555555|0.3333333333333333
+VALUE|f64|40FE240C9FBE76C9|123456.789
+VALUE|f64|3FD3333333333334|0.30000000000000004
+VALUE|f64|4004000000000000|2.5
+VALUE|f64|0000000000000002|1E-323
+VALUE|f64|FFF8000000000000|NaN
+VALUE|f64|7FF0000000000000|Infinity
+VALUE|f64|FFF0000000000000|-Infinity

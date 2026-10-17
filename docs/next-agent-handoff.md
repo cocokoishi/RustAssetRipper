@@ -1,6 +1,49 @@
 # RustAssetRipper hand-off — 2026-10-16
 
-## Latest current checkpoint - 2026-10-16 (JSON walker encoder corrected)
+## Latest current checkpoint - 2026-10-16 (JSON walker float formatting corrected)
+
+- **The JSON walker formatted floats with Rust's `Display`, which is not .NET's `ToString`.**
+  Fixed in `src/export/json_walker.rs`; recorded as `DIFF-JSON-FLOAT-FORMAT-001`. The reference's
+  real behaviour is captured in `src/export/float_format_fixture.txt` (79 rows from
+  `tools/probes/float-format`, which calls the real
+  `value.ToString(CultureInfo.InvariantCulture)`):
+  - **Exponent threshold**: .NET switches to exponent form at exponent `<= -5`, or `>= 9` (float) /
+    `>= 17` (double). `Display` **never** uses exponent form. So `1e-5f` → `1E-05` but `1e-4f` →
+    `0.0001`; `1e9f` → `1E+09` but `1e8f` → `100000000`.
+  - **Exponent spelling**: uppercase `E`, explicit `+` for positives, at least two digits.
+  - **Non-finite**: bare `NaN` / `Infinity` / `-Infinity` (not valid JSON, but that is what the
+    reference writes). `Display` gives `inf` / `-inf`.
+- **The precision trap is the part to remember.** The formatter takes the value widened to `f64`,
+  so the shortest digit string must come from the **originating** type: formatting widened `1e-5f`
+  at `f64` precision yields `0.000009999999747378752`, because widening is exact. Digits and
+  threshold are carried by one `kind` value so they cannot drift apart.
+- **Replaying the captured rows caught two of my own errors** (the widened digits, then the lower
+  bound being `<= -5` rather than `< -5`). Neither was visible from reading the code. This is the
+  third time in this series that a runtime-derived expectation beat a reasoned one — **probe the
+  runtime for encoders and formatters; do not reason from the source.**
+- **Both JSON-walker defects are now closed** (`DIFF-JSON-ESCAPE-ENCODER-001`,
+  `DIFF-JSON-FLOAT-FORMAT-001`). The walker's remaining unverified surface is the traversal order and
+  the empty-container shapes, which are already documented in the module and not yet replayed
+  against a real export.
+- **Next steps, in order:** the primary-content **content extractors** are the only missing layer
+  (`JsonContentExtractor` glue over the now-corrected walker, `BinaryAssetContentExtractor`,
+  audio/texture/script extractors, GLB model/mesh/terrain/navmesh collections) — without them
+  `/Export/PrimaryContent` cannot be implemented even though dispatch, assembly, loop and membership
+  are all ported. Then `RES-TEXTURE-001` (`实现中`) and `PROC-ANIM-*`.
+- **Never format `src/resources/glb_tests_01.rs`** (nor `main_tests_01.rs`/`main_tests_03.rs`).
+- **A GLB is binary: decode the JSON chunk before asserting on text** (12-byte header, then the
+  chunk header).
+- **Run `tools/parity-report.ps1` after every ledger edit**; a literal `||` inside a cell splits the
+  row and raises `MALFORMED`.
+- **Do not reuse `glb::escape_json` for the JSON walker** — the two encoders are genuinely different.
+- **When a feature a gap cell calls unported lands, re-check that cell in the same round** - four
+  cells have been wrong this way (`EXP-GLB-001` twice, `RES-MODEL-001`, `RES-BLENDSHAPE-001`).
+- Parity ledger: 407 rows, 381 verified, 26 non-verified, DUPES=0, MALFORMED=0, gate OPEN.
+- `/Scenes/View` and `/Export/PrimaryContent` both still return 501.
+- Corpus replays are local-only and have not run in these rounds.
+- Verified: **1874** library + 199 bin tests, 0 failed; warnings-denied Clippy exit 0.
+
+## Previous checkpoint - 2026-10-16 (JSON walker encoder corrected)
 
 - **The JSON walker was escaping like JSON, not like `HttpUtility.JavaScriptStringEncode`.**
   Fixed in `src/export/json_walker.rs`; recorded as `DIFF-JSON-ESCAPE-ENCODER-001`. The reference's

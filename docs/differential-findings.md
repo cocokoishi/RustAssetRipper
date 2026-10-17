@@ -1,5 +1,41 @@
 # Source behavior and differential findings
 
+## DIFF-JSON-FLOAT-FORMAT-001 - the JSON walker formatted floats with Rust's `Display`, which is not .NET's `ToString` (fix implemented and verified against captured runtime rows)
+
+`DefaultJsonWalker.VisitPrimitive` writes a `float` or `double` by handing it to the text writer
+with **no format string**, so the value reaches .NET's shortest-round-trip default. The port used
+Rust's `Display` and its comment asserted that `Display` "already gives the shortest round-trip form
+without an exponent for the magnitudes Unity stores". That claim is false in three ways.
+
+**The reference behaviour was captured from the runtime**, in `src/export/float_format_fixture.txt`,
+by `tools/probes/float-format` (79 rows: `value.ToString(CultureInfo.InvariantCulture)` on values
+chosen to separate the plausible rules, plus a boundary hunt around each switch point):
+
+- **Exponent threshold.** `Display` never uses exponent notation. .NET switches to it when the
+  decimal exponent is `<= -5`, or `>= 9` for `float` and `>= 17` for `double`. So `1e-5f` prints
+  `1E-05` while `1e-4f` prints `0.0001`, and `1e9f` prints `1E+09` while `1e8f` prints `100000000`.
+- **Exponent spelling.** .NET writes an uppercase `E`, an explicit `+` for positive exponents, and
+  at least two exponent digits (`E+09`, `E-05`, `E+38`). `Display` produces no exponent form at all.
+- **Non-finite values.** .NET writes bare `NaN`, `Infinity` and `-Infinity` - which is not valid
+  JSON, but is what the reference emits. `Display` writes `inf` and `-inf`, and the port had also
+  wrapped them in quotes.
+
+Both kinds print integral values without a trailing `.0` and preserve the sign of negative zero.
+
+**A precision trap worth recording, because it is invisible from the threshold rule alone.** The
+formatter now takes the value already widened to `f64`, so the shortest digit string must be taken at
+the **originating** type's precision. Formatting the widened `f32` with `f64` precision prints
+`0.000009999999747378752` for `1e-5f`, because widening preserves the binary value exactly and `f64`
+then needs every one of those digits to round-trip; .NET formats the `float` itself and prints
+`1E-05`. The fix formats through `f32` when the value came from a `float`, which is why the
+threshold pair and the format precision are carried by one `kind` value rather than two parameters
+that could drift apart.
+
+**The test caught two of my own mistakes before the fix landed**, both from replaying the fixture
+rather than trusting the implementation: first the widened-precision digit string, then the
+lower threshold, which is `<= -5` (scientific begins at exponent -5, not below it). Neither would have
+been found by reading the code. Status: implemented and verified against 79 reference-runtime rows.
+
 ## DIFF-JSON-ESCAPE-ENCODER-001 - the JSON walker escaped strings like JSON, not like `JavaScriptStringEncode` (fix implemented and verified against captured runtime rows)
 
 `DefaultJsonWalker` writes every string and field name through `HttpUtility.JavaScriptStringEncode`,

@@ -1,5 +1,55 @@
 # Validation log
 
+## 2026-10-16 - A 已验证 row was demoted: its evidence had been asserted from the implementation
+
+- Outcome: `PRODUCT-ASSET-JSON-TAB-001` was **已验证** and its evidence cell claimed the walker used
+  "`JavaScriptStringEncode` for strings and field names". The two defects found this round prove
+  that claim was false - the port used ordinary JSON escaping. The row is now 已实现但未验证, and the
+  evidence and gap cells say why. Ledger: 已验证 381 -> 380, 已实现但未验证 16 -> 17,
+  NONVERIFIED 26 -> 27.
+- **Why this is a correction rather than a regression.** The row had been verified on the strength of
+  unit tests whose expectations were written from `src/export/json_walker.rs` itself. Those tests
+  therefore asserted the implementation's mistakes as correct - `\n` and `\t` in the output, and
+  `Display` for floats - so the byte-fidelity claim was never independently supported. Demoting it
+  restores the ledger's meaning: 已验证 now again requires evidence that does not come from the code
+  under test.
+- **What is now genuinely verified, and by what.** Escaping is replayed against 34 captured runtime
+  rows and float formatting against 79, both from probes that call the real .NET methods. That is
+  stronger evidence than the row ever had - which is exactly why the status is 已实现但未验证 for the
+  remaining claim rather than 未调查: the *formatting* is proven, the *traversal* (that an asset's
+  fields come out in the reference's order with the reference's values) is not, because no document
+  replay has been run against original AssetRipper for it.
+- **The generalisable lesson, now stated three times in this file and worth acting on:** when a
+  ledger row's evidence names a reference function, the test backing it must exercise that function's
+  *observed* behaviour, not the port function's current behaviour. A row whose evidence quotes the
+  reference while its test was written from the port is the signature of exactly this failure.
+- Evidence: parity report TOTAL=407, 已验证 380, NONVERIFIED=27, DUPES=0, MALFORMED=0, GATE=OPEN.
+  `cargo test --locked --workspace` - 1874 library + 199 bin tests, 0 failed, 1 ignored.
+
+## 2026-10-16 - The JSON walker's float formatting was Rust's, not .NET's
+
+- Outcome: replaced the port's `write_invariant_float` with a formatter that reproduces .NET's
+  `ToString(CultureInfo.InvariantCulture)`, verified against 79 captured runtime rows. Recorded as
+  `DIFF-JSON-FLOAT-FORMAT-001`; 1874 library tests.
+- **The old comment was a stated assumption, and it was false.** It claimed `Display` "already gives
+  the shortest round-trip form without an exponent for the magnitudes Unity stores". The runtime
+  disagrees in three ways: .NET switches to exponent form at exponent `<= -5` and `>= 9` (float) /
+  `>= 17` (double) where `Display` never does; .NET spells the exponent `E+09` / `E-05` with an
+  uppercase `E`, an explicit sign and two digits; and .NET writes bare `NaN` / `Infinity` /
+  `-Infinity` where `Display` writes `inf` / `-inf`.
+- **The precision trap is the part worth remembering.** The formatter receives the value widened to
+  `f64`, so the shortest digit string must be taken at the **originating** type's precision:
+  formatting widened `1e-5f` at `f64` precision yields `0.000009999999747378752`, because widening
+  preserves the binary value exactly. .NET formats the `float` itself and prints `1E-05`. The digits
+  and the threshold now both come from one `kind` value so they cannot drift apart.
+- **The fixture caught two of my own errors before the fix landed** - the widened-precision digits,
+  then the lower threshold (`<= -5`, not `< -5`). Neither was visible by reading the code; both
+  showed up the moment the captured rows were replayed. That is the third time this round-series
+  that a runtime-derived expectation beat a reasoned one.
+- Evidence: `cargo test --locked --workspace` - **1874** library (up from 1873) + 199 bin tests,
+  0 failed, 1 ignored. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+  `rustfmt --edition 2021 --check` on the changed file - clean.
+
 ## 2026-10-16 - The JSON walker's encoder was wrong, and its test encoded the same mistake
 
 - Outcome: captured `HttpUtility.JavaScriptStringEncode`'s real behaviour from the reference
