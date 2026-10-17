@@ -1,5 +1,32 @@
 # Validation log
 
+## 2026-10-16 - An escaped pipe inside a code span, and a misdiagnosis of my own making
+
+- Outcome: repaired a rendering defect in the texture row, and corrected my own wrong diagnosis of it.
+  No status changed; the row was structurally valid all along.
+- **The defect is narrow and real.** `RES-TEXTURE-001` expressed a logical OR as `\|\|` inside a
+  backtick code span. The ledger's splitter treats `\|` as an escaped pipe, which is right for table
+  cells - but **markdown does not process backslash escapes inside code spans**, so the reader saw
+  `\|\|` rather than `||`. Replaced with `OR`, and the surrounding backticks repaired so the two
+  conditions are separate code spans.
+- **My diagnosis was wrong, and the checker was right.** I split the row with a naive
+  `Split('|')`, counted 15 cells, and concluded the row was malformed and that `parity-report.ps1`
+  had a blind spot. Reading the checker's `Split-MarkdownTableRow` shows it handles the escape
+  deliberately (it appends `|` and skips the backslash), so the row had 13 cells and MALFORMED=0 was
+  correct. **The lesson is the one this project keeps relearning from the other direction: when a
+  check disagrees with my expectation, the first hypothesis should be that my measurement is wrong.**
+  A naive split is not a markdown parser, and I nearly recorded a false accusation against a working
+  tool.
+- **My first repair then broke a backtick.** Merging the naive-split fragments produced
+  ``(`MipMap_C28 OR ` MipCount_C28 > 1` `` - an unbalanced code span, which renders worse than the
+  text it replaced. Caught by re-reading the rendered region instead of trusting the edit, and fixed
+  by closing the span after the first condition.
+- **Guidance worth keeping:** inside a code span, write `OR` or `AND` rather than an escaped pipe. The
+  escape is correct for prose cells and useless inside backticks, and the two cases look identical in
+  the raw file.
+- Evidence: ledger unchanged at 409 rows, 已验证 380, 实现中 8, 已实现但未验证 19, 受外部条件阻塞 2,
+  MALFORMED=0, DUPES=0.
+
 ## 2026-10-16 - Auditing an 实现中 row against the code: RES-MODEL-001 was both understated and wrong
 
 - Outcome: audited the mesh/model row against the current tree and re-statused it from 实现中 to
