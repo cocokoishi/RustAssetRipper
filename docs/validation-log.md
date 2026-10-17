@@ -1,5 +1,35 @@
 # Validation log
 
+## 2026-10-16 - Systematic audit of all 25 non-verified rows: one stale cell left
+
+- Outcome: after three consecutive stale-claim corrections, I audited **every** non-verified row's
+  gap cell in one pass instead of finding the next one by accident. The audit found exactly **one**
+  remaining stale cell: `EXP-GLB-001`. Corrected; the ledger's row and status counts are unchanged.
+- **`EXP-GLB-001` opened by claiming "`GlbLevelBuilder.Build` ... remains unported", which stopped
+  being true several rounds ago.** The port now has every part of it: the traversal
+  (`build_level_plan`, verified node-for-node against the shipped `Build` through
+  `glb_level_fixture.txt`), the document emission (`build_scene_document`,
+  `SceneDocument::into_glb`), the geometry attachment (`attach_plan_geometry`), the collection
+  adapter (`build_scene_plan`), the export entry (`export_scene_glb`) and the selection
+  (`ResourceExportFamily::HierarchyGlb`). The cell now says what is actually left: **the wiring, not
+  the builder** - `export_scene_glb` has no caller outside its own module and tests, so a project
+  export never reaches it.
+- **Why the audit matters more than the single fix.** I had been correcting these one per round, and
+  each correction was found by chance while starting unrelated work. Auditing all 25 at once took a
+  fraction of that effort and gives a definite answer: **24 of the 25 are accurate**, and the
+  recurring "stale unported claim" problem is now closed rather than merely reduced. The rows that
+  looked most suspicious on re-reading (`PRODUCT-GUI-001`, `PRODUCT-CONFIG-001`) turned out to be
+  precise and internally consistent - `PRODUCT-GUI-001` enumerates each pending page and each
+  deliberate design substitution, and `PRODUCT-CONFIG-001`'s "data-set subsystem" is a real
+  upstream type family (`DataSet`, `JsonDataSet`, `ParsableDataSet`, `StringDataSet`,
+  `ListDataStorage`) that `ConfigurationFilesPage` genuinely uses.
+- **The generalisable rule, now recorded in the hand-off:** a gap cell that names an unported
+  feature must be re-checked whenever the feature lands, and the check is one command - look for
+  the symbol in `src/`. Four cells have now been wrong in this way (`EXP-GLB-001` twice,
+  `RES-MODEL-001`, `RES-BLENDSHAPE-001`).
+- Evidence: `cargo test --locked --workspace` unchanged at 1862 library + 199 bin tests, 0 failed,
+  1 ignored. Parity: TOTAL=406, RECOGNIZED=406, NONVERIFIED=25, DUPES=0, MALFORMED=0, GATE=OPEN.
+
 ## 2026-10-16 - Blend-shape frame decoding is a baseline boundary, not a port gap
 
 - Outcome: `RES-BLENDSHAPE-001` listed "MeshData geometry and frame/delta/weight decoding" among

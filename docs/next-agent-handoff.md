@@ -1,6 +1,37 @@
 # RustAssetRipper hand-off — 2026-10-16
 
-## Latest current checkpoint - 2026-10-16 (blend-shape frames are a baseline boundary)
+## Latest current checkpoint - 2026-10-16 (all 25 rows audited; one stale cell left)
+
+- **I audited every non-verified row's gap cell in one pass**, after three stale cells had been
+  found one round at a time. Result: **24 of 25 are accurate**, and the one remaining stale cell -
+  `EXP-GLB-001` - is corrected. The ledger's counts are unchanged (406 rows, 381 verified, 25
+  non-verified).
+- **`EXP-GLB-001` claimed `GlbLevelBuilder.Build` "remains unported", which stopped being true
+  several rounds ago.** Every part now exists: `build_level_plan` (traversal, reference-verified),
+  `build_scene_document` + `SceneDocument::into_glb` (document), `attach_plan_geometry`,
+  `build_scene_plan` (collection adapter), `export_scene_glb` (entry), and
+  `ResourceExportFamily::HierarchyGlb` (selection). What is genuinely left is **the wiring, not the
+  builder**: `export_scene_glb` has no caller outside its own module and tests.
+- **The two rows that looked most suspicious were fine**, which is why the audit was worth doing
+  properly: `PRODUCT-GUI-001` enumerates each pending page and each deliberate substitution, and
+  `PRODUCT-CONFIG-001`'s "data-set subsystem" is a real upstream type family (`DataSet`,
+  `JsonDataSet`, `ParsableDataSet`, `StringDataSet`, `ListDataStorage`) that `ConfigurationFilesPage`
+  genuinely uses. **Do not "correct" those.**
+- **Rule for future rounds:** when a feature a gap cell names as unported actually lands, re-check
+  that cell in the same round. The check is one command - look for the symbol in `src/`. Four cells
+  have been wrong this way (`EXP-GLB-001` twice, `RES-MODEL-001`, `RES-BLENDSHAPE-001`), and a
+  stale cell sends the next reader to redo work that exists.
+- **Next candidates, in order:** the scene export wiring (`EXP-GLB-SCENE-001` + `EXP-GLB-001` share
+  it: give `export_scene_glb` a caller and resolve per-node geometry), then `RES-TEXTURE-001`
+  (`实现中`) and `PROC-ANIM-*`.
+- **Never format `src/resources/glb_tests_01.rs`** (nor `main_tests_01.rs`/`main_tests_03.rs`).
+- **A GLB is binary: decode the JSON chunk before asserting on text** (12-byte header, then the
+  chunk header).
+- `/Scenes/View` still returns 501 (`load_game` does not run `process_workspace_scenes_and_prefabs`).
+- Corpus replays are local-only and have not run in these rounds.
+- Verified: **1862** library + 199 bin tests, 0 failed; warnings-denied Clippy exit 0.
+
+## Previous checkpoint - 2026-10-16 (blend-shape frames are a baseline boundary)
 
 - `RES-BLENDSHAPE-001` listed "MeshData geometry and frame/delta/weight decoding" as remaining
   work. **The baseline never decodes that data**, so it is a baseline boundary rather than a port
