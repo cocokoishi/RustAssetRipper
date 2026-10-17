@@ -30,6 +30,11 @@ use crate::export_commands::{
     LoadedGame,
 };
 use crate::primary_content_commands::export_loaded_primary_content;
+use assetripper::export::scene_wiring::{
+    process_workspace_scenes_and_prefabs, WorkspaceSceneProcessingLimits,
+};
+use assetripper::processing::scene_collections::WorkspaceSceneDefinitions;
+use assetripper::serialized_file::reference_graph::MultiFileReferenceGraphLimits;
 
 use super::localization::{Messages, FALLBACK_LANGUAGE};
 use super::tree::BundleTree;
@@ -60,6 +65,12 @@ pub struct WebState {
     language: String,
     loaded: Option<LoadedGame>,
     tree: Option<BundleTree>,
+    /// The workspace's scene definitions, computed once on first use.
+    ///
+    /// The definitions come from the scene-definition pass, which scans every collection and object;
+    /// the reference computes it once at load and holds it on the game data. The port computes it on
+    /// first request and caches it here rather than repeating the scan for every `/Scenes/View`.
+    scene_definitions: Option<WorkspaceSceneDefinitions>,
     log: Vec<String>,
     static_content: Vec<(String, Vec<u8>)>,
 }
@@ -143,6 +154,7 @@ impl WebState {
             language,
             loaded: None,
             tree: None,
+            scene_definitions: None,
             log: Vec::new(),
             static_content: Vec::new(),
         })
@@ -910,10 +922,49 @@ impl WebState {
     pub fn reset(&mut self) -> bool {
         let had_data = self.loaded.take().is_some();
         self.tree = None;
+        self.scene_definitions = None;
         if had_data {
             self.log.push("Data was reset.".to_owned());
         }
         had_data
+    }
+
+    /// The workspace's scene definitions, computed on first use and cached.
+    ///
+    /// The definitions come from the scene-definition pass, which scans every collection and object
+    /// once. The reference holds the result on the game data; the port caches it here so a page view
+    /// does not repeat the scan.
+    ///
+    /// `None` means there is no loaded game, or the pass could not run - the caller reports that as an
+    /// unresolvable scene rather than an empty one.
+    pub fn ensure_scene_definitions(&mut self) -> bool {
+        if self.scene_definitions.is_none() {
+            let Some(game) = self.loaded.as_ref() else {
+                return false;
+            };
+            let Ok(references) = game
+                .workspace
+                .reference_graph(MultiFileReferenceGraphLimits::default())
+            else {
+                return false;
+            };
+            let Ok(processing) = process_workspace_scenes_and_prefabs(
+                &game.filesystem,
+                &game.workspace,
+                &game.objects,
+                &references,
+                WorkspaceSceneProcessingLimits::default(),
+            ) else {
+                return false;
+            };
+            self.scene_definitions = Some(processing.definitions);
+        }
+        true
+    }
+
+    /// The cached scene definitions, after [`WebState::ensure_scene_definitions`].
+    pub fn scene_definitions(&self) -> Option<&WorkspaceSceneDefinitions> {
+        self.scene_definitions.as_ref()
     }
 
     /// The export gate for one submitted path, with the browser confirmation result.

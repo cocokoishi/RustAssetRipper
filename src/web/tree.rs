@@ -91,6 +91,11 @@ pub const NAMELESS_BUNDLE_NAME: &str = "Bundle";
 /// One collection in the snapshot: a workspace SerializedFile with its asset rows.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TreeCollection {
+    /// The workspace file this collection was built from.
+    ///
+    /// The scene page links a scene definition to its collections by workspace file index, so the
+    /// index has to survive into the snapshot rather than being inferred from position.
+    pub file_index: usize,
     /// The identifier-fixed file name, mirroring `AssetCollection.Name`.
     pub name: String,
     /// The number of objects in the file, mirroring `AssetCollection.Count`.
@@ -458,6 +463,51 @@ impl BundleTree {
     }
 
     /// The `BundlePath` of the bundle at `index`, or `None` when out of range.
+    /// The workspace file index of a collection addressed by bundle position.
+    pub fn collection_file_index(&self, bundle_index: usize, position: usize) -> Option<usize> {
+        self.bundles
+            .get(bundle_index)?
+            .collections
+            .get(position)
+            .map(|collection| collection.file_index)
+    }
+
+    /// The display name of the collection built from a workspace file index.
+    pub fn collection_name(&self, file_index: usize) -> Option<String> {
+        self.bundles.iter().find_map(|bundle| {
+            bundle
+                .collections
+                .iter()
+                .find(|collection| collection.file_index == file_index)
+                .map(|collection| collection.name.clone())
+        })
+    }
+
+    /// The `CollectionPath` for a workspace file index, when the snapshot holds it.
+    ///
+    /// A scene definition names its collections by workspace file index, so the page needs the
+    /// bundle-relative address the collection routes take. The lookup is by the recorded index, not
+    /// by position, so a snapshot whose order differs from the workspace still resolves.
+    pub fn collection_path_for_file(
+        &self,
+        file_index: usize,
+    ) -> Option<assetripper::web_paths::CollectionPath> {
+        for (bundle_index, bundle) in self.bundles.iter().enumerate() {
+            let Some(position) = bundle
+                .collections
+                .iter()
+                .position(|collection| collection.file_index == file_index)
+            else {
+                continue;
+            };
+            return Some(assetripper::web_paths::CollectionPath {
+                bundle: self.bundle_path(bundle_index)?,
+                index: i32::try_from(position).ok()?,
+            });
+        }
+        None
+    }
+
     pub fn bundle_path(&self, index: usize) -> Option<BundlePath> {
         let mut steps = Vec::new();
         let mut current = index;
@@ -549,6 +599,7 @@ fn collection_from_file(
         .map(|(object_index, info)| asset_row(file_index, object_index, info, objects))
         .collect::<Vec<_>>();
     TreeCollection {
+        file_index,
         name: fix_file_identifier(&file.file_name),
         asset_count: assets.len(),
         assets,

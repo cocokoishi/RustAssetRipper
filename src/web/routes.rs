@@ -81,18 +81,7 @@ fn get(state: &mut WebState, request: &Request) -> Response {
         "/Resources/Data" => resources_data(state, request),
         "/FailedFiles/View" => failed_file_view(state, request),
         "/FailedFiles/StackTrace" => failed_file_stack_trace(state, request),
-        "/Scenes/View" => pending_tree_view::<ScenePath>(
-            state,
-            request,
-            "/Scenes/View",
-            |tree, path| tree.resolve_collection(&path.first).is_some(),
-            |path| {
-                format!(
-                    "Scene could not be resolved: {}",
-                    path.first.to_diagnostic()
-                )
-            },
-        ),
+        "/Scenes/View" => scene_view(state, request),
         "/Search/View" => search_view(state, request),
         "/IO/File/Exists" => probe(request, |path| Path::new(path).is_file()),
         "/IO/Directory/Exists" => probe(request, |path| Path::new(path).is_dir()),
@@ -247,6 +236,57 @@ fn export_primary_content(state: &mut WebState, request: &Request) -> Response {
             Response::redirect("/")
         }
     }
+}
+
+/// `GET /Scenes/View`: the scene definition page.
+///
+/// The gates are the shared ones; after them the baseline resolves the collection, requires it to be
+/// a scene, and renders its definition. The port resolves the same way and adds one thing the
+/// baseline does not need: the definitions come from the scene-definition pass, which is computed on
+/// first use and cached on the state rather than repeated for every view.
+fn scene_view(state: &mut WebState, request: &Request) -> Response {
+    let path = match tree_gates::<ScenePath>(state, request) {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
+    // The pass is heavy, so it runs once; then both the tree and the definitions are read
+    // immutably.
+    if !state.ensure_scene_definitions() {
+        return Response::text("The scene definitions could not be computed.").with_status(404);
+    }
+    let (Some(tree), Some(definitions)) = (loaded_tree(state), state.scene_definitions()) else {
+        return Response::internal_error("A game is loaded but its scene definitions are missing.");
+    };
+    let Some((bundle_index, position)) = tree.resolve_collection(&path.first) else {
+        return Response::text(format!(
+            "Scene could not be resolved: {}",
+            path.first.to_diagnostic()
+        ))
+        .with_status(404);
+    };
+    let Some(file_index) = tree.collection_file_index(bundle_index, position) else {
+        return Response::text(format!(
+            "Scene could not be resolved: {}",
+            path.first.to_diagnostic()
+        ))
+        .with_status(404);
+    };
+    let Some(scene_index) = definitions.scene_index_for_collection(file_index) else {
+        return Response::text(format!(
+            "Collection is not a scene: {}",
+            path.first.to_diagnostic()
+        ))
+        .with_status(404);
+    };
+    let Some(definition) = definitions.definitions().get(scene_index) else {
+        return Response::text(format!(
+            "Scene could not be resolved: {}",
+            path.first.to_diagnostic()
+        ))
+        .with_status(404);
+    };
+    Response::html(pages::scene_page(state, tree, definition))
+        .with_content_type("text/html; charset=utf-8")
 }
 
 /// Run the frozen `TryGet*FromQuery` gates shared by every tree route.
@@ -868,33 +908,6 @@ fn resource_bytes(
 /// One `GET /X/View` page whose asset model is still open: resolve the path, report an
 /// unresolvable one with the baseline's message, and otherwise keep the explicit pending
 /// page instead of inventing content.
-fn pending_tree_view<T: PathDocument>(
-    state: &mut WebState,
-    request: &Request,
-    route: &'static str,
-    exists: impl FnOnce(&super::tree::BundleTree, &T) -> bool,
-    unresolvable: impl FnOnce(&T) -> String,
-) -> Response {
-    let path = match tree_gates::<T>(state, request) {
-        Ok(path) => path,
-        Err(response) => return response,
-    };
-    let resolved = loaded_tree(state)
-        .map(|tree| exists(tree, &path))
-        .unwrap_or(false);
-    if !resolved {
-        return Response::text(unresolvable(&path)).with_status(404);
-    }
-    pending_tree_page(state, route)
-}
-
-/// The explicit pending page for a resolved path whose view model is still open.
-fn pending_tree_page(state: &WebState, route: &str) -> Response {
-    Response::html(pages::pending_page(state, "GET", route))
-        .with_status(501)
-        .with_content_type("text/html; charset=utf-8")
-}
-
 /// A `Path` query probe: `true`/`false` JSON when `Path` is present, otherwise `400`.
 fn probe(request: &Request, test: impl FnOnce(&str) -> bool) -> Response {
     match request.query_value("Path") {

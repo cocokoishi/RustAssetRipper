@@ -1,5 +1,39 @@
 # Validation log
 
+## 2026-10-16 - `/Scenes/View` is wired, and no tree view is pending any more
+
+- Outcome: implemented `/Scenes/View` (the last route that answered 501), deleted the two helpers that
+  existed only for it, and added the scene-definitions cache the page needs. 1927 library + 204 CLI
+  tests, 0 failed.
+- **The route is a real baseline route.** Before porting it I checked
+  `WebApplicationLauncher.cs`: `app.MapGet(SceneAPI.Urls.View, SceneAPI.GetView)` is there, and
+  `SceneAPI.Urls.View` is `"/Scenes" + "/View"`. The port's 501 was legitimate rather than an
+  invention, which is worth confirming given how many times this project has found the opposite.
+- **The page's three rows and its collection list come from the scene-definition pass.** The
+  definitions are produced by the same scan the project export runs, so they are computed **once on
+  first request and cached on the state** (`ensure_scene_definitions`) rather than repeated per view.
+  The reference holds them on the game data; the port reaches the same place lazily.
+- **The GUID row is a plan, not always a GUID, and says so.** The reference assigns a GUID when the
+  definition is built and generates one when the input has none; the port deliberately defers
+  generation to export so a re-export does not silently change identifiers. A scene whose input GUID is
+  absent therefore has no GUID to show, and the row carries the plan's own description instead of an
+  invented value.
+- **`TreeCollection` now records its workspace file index.** The scene page links a definition to its
+  collections by file index, and inferring that from position would have been a silent assumption
+  about the snapshot's order; the index is recorded and the lookups are by index.
+- **Deleting the pending helpers is the interesting part.** `/Scenes/View` was the only user of
+  `pending_tree_view`/`pending_tree_page`, so wiring it left both dead - which means **the port no
+  longer has a single pending tree view**. The `fallback` 501 remains as the safety net for a known
+  route no handler claims, and whether anything still reaches it needs an audit before
+  `PRODUCT-GUI-001` can be closed; I am not claiming it from this change alone.
+- **What is not verified, stated plainly.** The gate sequence is covered by the existing test (missing
+  path, malformed path, unloaded game all 404). The **render path is not covered**: the committed web
+  fixtures contain no scene collection, so `scene_view`'s success branch has never run in a test. It
+  compiles, it is wired, and it is unverified - the fixture work is the next step, and I would rather
+  record that than imply the page is proven.
+- Evidence: `cargo test --locked --workspace` - **1927** library + 204 CLI tests, 0 failed, 1 ignored.
+  `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+
 ## 2026-10-16 - The scene GLB path cannot produce geometry, and now says so
 
 - Outcome: found that the scene GLB path resolves no mesh for any Transform, so a real scene's GLB

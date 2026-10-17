@@ -684,6 +684,83 @@ pub fn collection_page(
     Some(layout(state, &collection.name, inner.as_str()))
 }
 
+/// `SceneAPI.GetView`: the scene definition's name, path, GUID and collection links.
+///
+/// The baseline's `ViewPage` shows three rows - `Localization.Name`, `Localization.Path` and
+/// `Localization.Guid` - then a `Localization.Collections` list whose entries link to each collection.
+///
+/// **The GUID row is a plan, not always a GUID.** The reference assigns a GUID when the definition is
+/// built, generating one when the input has none; the port deliberately defers generation to export so
+/// a re-export does not silently change identifiers. A scene whose input GUID is absent therefore has
+/// no GUID to show, and the row says so rather than inventing one - the same honesty the export
+/// pipeline keeps.
+pub fn scene_page(
+    state: &WebState,
+    tree: &super::tree::BundleTree,
+    definition: &assetripper::processing::scene_collections::WorkspaceSceneDefinition,
+) -> String {
+    use assetripper::processing::scene_collections::SceneDefinitionGuidPlan;
+
+    let plan = &definition.plan;
+    let mut inner = Html::new();
+    inner.element("h1", &[], &plan.name);
+    inner.open("table", &[("class", "table")]);
+    inner.open("tbody", &[]);
+    for (label, value) in [
+        (t(state, "name"), plan.name.clone()),
+        (t(state, "path"), plan.path.clone()),
+        (
+            t(state, "guid"),
+            match &plan.guid {
+                SceneDefinitionGuidPlan::Preserve(words) => {
+                    assetripper::export::script_hashing::UnityGuid {
+                        data0: words.data[0],
+                        data1: words.data[1],
+                        data2: words.data[2],
+                        data3: words.data[3],
+                    }
+                    .to_unity_string()
+                }
+                SceneDefinitionGuidPlan::GenerateAtExport(_) => plan.guid.to_string(),
+            },
+        ),
+    ] {
+        inner.open("tr", &[]);
+        inner.element("th", &[], &label);
+        inner.element("td", &[], &value);
+        inner.close("tr");
+    }
+    inner.close("tbody");
+    inner.close("table");
+
+    inner.element("h2", &[], &t(state, "collections"));
+    inner.open("ul", &[]);
+    for file_index in definition.collection_file_indices() {
+        inner.open("li", &[]);
+        match tree.collection_path_for_file(*file_index) {
+            Some(path) => {
+                let name = tree
+                    .collection_name(*file_index)
+                    .unwrap_or_else(|| file_index.to_string());
+                tree_link(
+                    &mut inner,
+                    &assetripper::web_paths::collection_view_url(&path),
+                    &name,
+                );
+            }
+            // A definition can name a collection the snapshot does not hold; naming it is better than
+            // dropping the entry, which would make the scene look like it has fewer collections.
+            None => {
+                inner.text(&format!("{file_index}"));
+            }
+        }
+        inner.close("li");
+    }
+    inner.close("ul");
+
+    layout(state, &plan.name, inner.as_str())
+}
+
 /// The asset page's information section: the display name with the collection link and
 /// the path, class-number and class-name rows.
 ///
