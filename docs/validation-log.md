@@ -1,5 +1,36 @@
 # Validation log
 
+## 2026-10-16 - The JSON walker's encoder was wrong, and its test encoded the same mistake
+
+- Outcome: captured `HttpUtility.JavaScriptStringEncode`'s real behaviour from the reference
+  runtime and corrected `write_json_string` in `src/export/json_walker.rs`. Recorded as
+  `DIFF-JSON-ESCAPE-ENCODER-001`; 1873 library tests.
+- **The port was escaping like JSON, not like the reference.** `DefaultJsonWalker` routes every
+  string and field name through `JavaScriptStringEncode`, whose output differs from naive JSON
+  escaping in four ways, all now captured in `src/export/json_escape_fixture.txt`:
+  - control characters use `\uXXXX` with **uppercase** hex - **there is no `\n`, `\r`, `\t`, `\b` or
+    `\f` shorthand in the output at all**;
+  - `<`, `>`, `&` and `'` are escaped as `\u003c`, `\u003e`, `\u0026`, `\u0027`;
+  - `U+2028` and `U+2029` are escaped;
+  - non-ASCII is **not** escaped, so `é` and `中` pass through.
+  `"` and `\` keep short forms and `/` is never escaped.
+- **The evidence came from the runtime, not from reasoning.** A new probe
+  (`tools/probes/json-escape`) calls the real encoder on both overloads. That mattered: the two
+  overloads differ only in whether they add the quotes, which is why one Rust function can serve
+  both call sites - a detail I could easily have got backwards from reading the C# alone.
+- **The existing test had been written from the implementation and asserted the same bug.**
+  `strings_escape_and_bytes_become_base64` expected `\n` and `\t`, matching the wrong code exactly
+  and the reference not at all. This is the second occurrence of the failure mode recorded for the
+  glTF quaternion sign error - *a test derived from the code it tests proves nothing*. The
+  assertion now uses the captured values, and a new fixture-replay test checks all 34 rows so the
+  expectation no longer depends on this file.
+- **A near miss worth noting:** the GLB module already has an `escape_json` helper, and reusing it
+  here would have looked like sensible de-duplication while silently reproducing the same defect in
+  a second place. The two encoders are genuinely different and now stay separate.
+- Evidence: `cargo test --locked --workspace` - **1873** library (up from 1872) + 199 bin tests,
+  0 failed, 1 ignored. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+  `rustfmt --edition 2021 --check` on the changed file - clean.
+
 ## 2026-10-16 - `isScene` is dead in the frozen baseline; the scene GLB is a documentation fix, not a wiring gap
 
 - Outcome: traced the whole `GlbModelExporter` chain and found that **`isScene: true` is never

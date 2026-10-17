@@ -1,0 +1,59 @@
+# `HttpUtility.JavaScriptStringEncode` escaping, captured from the reference runtime
+#
+# Produced by tools/probes/json-escape, which calls the real
+# `HttpUtility.JavaScriptStringEncode` on both overloads:
+#   NOQUOTE = JavaScriptStringEncode(value)        used by DefaultJsonWalker.VisitPrimitive, which
+#                                                  writes the surrounding quotes itself
+#   QUOTED  = JavaScriptStringEncode(value, true)  used by DefaultJsonWalker.EnterField, which is
+#                                                  the overload that adds the quotes
+# Columns: <overload>|<encoded output>|<the input, with non-printable characters as \uXXXX>
+#
+# Why the fixture exists: the port's json_walker originally escaped strings with the usual JSON
+# rules (\n, \r, \t, \b, \f and lowercase \u00xx), which is NOT what the reference does. These rows
+# are the reference's actual behaviour and are replayed by
+# `json_escape_matches_the_reference_runtime_rows` in src/export/json_walker.rs.
+#
+# The behaviours that differ from naive JSON escaping:
+#   * every control character becomes \uXXXX with UPPERCASE hex - there is no \n, \r, \t, \b or \f
+#     shorthand anywhere in the output;
+#   * < > & ' are escaped as \u003c \u003e \u0026 \u0027 even though JSON does not require it;
+#   * the JavaScript line separators U+2028 and U+2029 are escaped;
+#   * non-ASCII text (é, 中) is left as-is, NOT escaped;
+#   * " and \ keep their short forms, and / is never escaped.
+#
+# Both overloads escape identically; the only difference is that QUOTED adds the surrounding
+# quotes. So one Rust function can serve both call sites if it takes a "wrap in quotes" flag.
+NOQUOTE|plain|plain
+NOQUOTE|a\"b|a"b
+NOQUOTE|a\\b|a\b
+NOQUOTE|a/b|a/b
+NOQUOTE|a\u0009b|a\u0009b
+NOQUOTE|a\u000Ab|a\u000ab
+NOQUOTE|a\u000Db|a\u000db
+NOQUOTE|a\u0008b|a\u0008b
+NOQUOTE|a\u000Cb|a\u000cb
+NOQUOTE|a\u0001b|a\u0001b
+NOQUOTE|a\u001Fb|a\u001fb
+NOQUOTE|a\u003cb\u003ec|a<b>c
+NOQUOTE|a\u0026b|a&b
+NOQUOTE|a\u0027b|a'b
+NOQUOTE|a\u2028b|a\u2028b
+NOQUOTE|a\u2029b|a\u2029b
+NOQUOTE|é中|\u00e9\u4e2d
+QUOTED|"plain"|plain
+QUOTED|"a\"b"|a"b
+QUOTED|"a\\b"|a\b
+QUOTED|"a/b"|a/b
+QUOTED|"a\u0009b"|a\u0009b
+QUOTED|"a\u000Ab"|a\u000ab
+QUOTED|"a\u000Db"|a\u000db
+QUOTED|"a\u0008b"|a\u0008b
+QUOTED|"a\u000Cb"|a\u000cb
+QUOTED|"a\u0001b"|a\u0001b
+QUOTED|"a\u001Fb"|a\u001fb
+QUOTED|"a\u003cb\u003ec"|a<b>c
+QUOTED|"a\u0026b"|a&b
+QUOTED|"a\u0027b"|a'b
+QUOTED|"a\u2028b"|a\u2028b
+QUOTED|"a\u2029b"|a\u2029b
+QUOTED|"é中"|\u00e9\u4e2d

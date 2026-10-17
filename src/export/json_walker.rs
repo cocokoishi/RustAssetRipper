@@ -368,21 +368,35 @@ fn write_invariant_float(output: &mut String, value: f64) {
 
 /// JavaScript-string-encode `text` and wrap it in quotes (`HttpUtility.JavaScriptStringEncode`).
 ///
-/// The reference leaves non-ASCII characters as-is and escapes only the characters JSON
-/// requires plus the HTML-sensitive ones it guards.
+/// **This is not ordinary JSON escaping, and using the usual rules produces byte-different
+/// output.** The reference's behaviour was captured from the runtime into
+/// `json_escape_fixture.txt`; it differs from naive JSON escaping in four ways:
+///
+/// - every control character is written as `\uXXXX` with **uppercase** hex, so there is no `\n`,
+///   `\r`, `\t`, `\b` or `\f` shorthand anywhere in the output;
+/// - `<`, `>`, `&` and `'` are escaped as `\u003c`, `\u003e`, `\u0026` and `\u0027` even though
+///   JSON does not require it;
+/// - the JavaScript line separators `U+2028` and `U+2029` are escaped;
+/// - non-ASCII text is left as-is rather than escaped.
+///
+/// `"` and `\` keep their short forms and `/` is never escaped. The fixture's `QUOTED` rows show
+/// that the quoting overload escapes identically apart from adding the quotes, which is why both
+/// call sites share this function.
 fn write_json_string(output: &mut String, text: &str) {
     output.push('"');
     for character in text.chars() {
         match character {
             '"' => output.push_str("\\\""),
             '\\' => output.push_str("\\\\"),
-            '\n' => output.push_str("\\n"),
-            '\r' => output.push_str("\\r"),
-            '\t' => output.push_str("\\t"),
-            '\u{08}' => output.push_str("\\b"),
-            '\u{0C}' => output.push_str("\\f"),
+            // HTML-sensitive characters the encoder guards, then the JavaScript line separators.
+            '<' => output.push_str("\\u003c"),
+            '>' => output.push_str("\\u003e"),
+            '&' => output.push_str("\\u0026"),
+            '\'' => output.push_str("\\u0027"),
+            '\u{2028}' => output.push_str("\\u2028"),
+            '\u{2029}' => output.push_str("\\u2029"),
             character if (character as u32) < 0x20 => {
-                let _ = write!(output, "\\u{:04x}", character as u32);
+                let _ = write!(output, "\\u{:04X}", character as u32);
             }
             character => output.push(character),
         }
@@ -464,7 +478,9 @@ mod tests {
             &mut output,
             &SerializedValue::StringBytes(b"a\"b\\c\nd\te".to_vec()),
         );
-        assert_eq!(output, "\"a\\\"b\\\\c\\nd\\te\"");
+        // The reference's encoder uses `\uXXXX` for control characters - there is no `\n` or
+        // `\t` shorthand in its output. See the fixture for the full captured behaviour.
+        assert_eq!(output, "\"a\\\"b\\\\c\\u000Ad\\u0009e\"");
 
         // Non-ASCII is left as-is, like `JavaScriptStringEncode`.
         output.clear();
@@ -482,6 +498,67 @@ mod tests {
         output.clear();
         write_json_value(&mut output, &SerializedValue::Char(0x4E2D));
         assert_eq!(output, "\"中\"");
+    }
+
+    /// Replay the escaping the reference runtime actually performs.
+    ///
+    /// The previous version of this test asserted `\n` and `\t` because it had been written from
+    /// this file's implementation rather than from the reference - the assertion and the code
+    /// shared one mistake. These rows come from `tools/probes/json-escape`, which calls the real
+    /// `HttpUtility.JavaScriptStringEncode`, so the expectation is independent of the port.
+    #[test]
+    fn json_escape_matches_the_reference_runtime_rows() {
+        let fixture = include_str!("json_escape_fixture.txt");
+        let mut checked = 0usize;
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            // `|` can appear inside the encoded output (it is never escaped), so split on the
+            // first and last separators only.
+            let first = line.find('|').expect("overload separator");
+            let last = line.rfind('|').expect("description separator");
+            let (tag, encoded, described) =
+                (&line[..first], &line[first + 1..last], &line[last + 1..]);
+            let input = unescape_description(described);
+            match tag {
+                // The walker always wraps in quotes, so it matches the QUOTED rows directly.
+                "QUOTED" => {
+                    let mut output = String::new();
+                    write_json_string(&mut output, &input);
+                    assert_eq!(output, encoded, "input {described}");
+                }
+                // The NOQUOTE rows are the same escaping without the surrounding quotes.
+                "NOQUOTE" => {
+                    let mut output = String::new();
+                    write_json_string(&mut output, &input);
+                    let inner = output
+                        .strip_prefix('"')
+                        .and_then(|rest| rest.strip_suffix('"'))
+                        .expect("the walker always quotes");
+                    assert_eq!(inner, encoded, "input {described}");
+                }
+                other => panic!("unexpected row tag {other}"),
+            }
+            checked += 1;
+        }
+        assert_eq!(checked, 34, "every recorded row is replayed");
+    }
+
+    /// Expand the fixture's `\uXXXX` prose form back into the character it describes.
+    fn unescape_description(text: &str) -> String {
+        let mut result = String::new();
+        let mut rest = text;
+        while let Some(index) = rest.find("\\u") {
+            result.push_str(&rest[..index]);
+            let hex = &rest[index + 2..index + 6];
+            let code = u32::from_str_radix(hex, 16).expect("fixture hex");
+            result.push(char::from_u32(code).expect("fixture code point"));
+            rest = &rest[index + 6..];
+        }
+        result.push_str(rest);
+        result
     }
 
     #[test]

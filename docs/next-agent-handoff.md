@@ -1,6 +1,40 @@
 # RustAssetRipper hand-off — 2026-10-16
 
-## Latest current checkpoint - 2026-10-16 (`isScene` is dead in the baseline)
+## Latest current checkpoint - 2026-10-16 (JSON walker encoder corrected)
+
+- **The JSON walker was escaping like JSON, not like `HttpUtility.JavaScriptStringEncode`.**
+  Fixed in `src/export/json_walker.rs`; recorded as `DIFF-JSON-ESCAPE-ENCODER-001`. The reference's
+  real behaviour is captured in `src/export/json_escape_fixture.txt` (34 rows from
+  `tools/probes/json-escape`, which calls the actual encoder):
+  - **control characters are `\uXXXX` with uppercase hex** - there is no `\n`/`\r`/`\t`/`\b`/`\f`
+    shorthand anywhere;
+  - `< > & '` become `\u003c \u003e \u0026 \u0027`;
+  - `U+2028`/`U+2029` are escaped;
+  - **non-ASCII is left as-is** (`é`, `中` pass through).
+- **The old test asserted the same bug the code had** (it expected `\n` and `\t`). Second occurrence
+  of the "test written from the implementation" failure mode - after the glTF quaternion sign
+  error. **When adding an encoder/decoder test, derive the expectation from a runtime probe, never
+  from the function under test.** The new fixture-replay test makes the expectation independent.
+- **Do not reuse `glb::escape_json` here.** It implements ordinary JSON escaping; the two encoders
+  are genuinely different, and de-duplicating them would silently re-introduce this defect.
+- **Next steps, in order:** the primary-content **content extractors** are now the only major
+  missing layer (`JsonContentExtractor` glue over the corrected walker, `BinaryAssetContentExtractor`,
+  audio/texture/script extractors, and the GLB model/mesh/terrain/navmesh collections) - without
+  them `/Export/PrimaryContent` cannot be implemented even though dispatch, assembly, loop and
+  membership are all ported. Then `RES-TEXTURE-001` (`实现中`) and `PROC-ANIM-*`.
+- **Never format `src/resources/glb_tests_01.rs`** (nor `main_tests_01.rs`/`main_tests_03.rs`).
+- **A GLB is binary: decode the JSON chunk before asserting on text** (12-byte header, then the
+  chunk header).
+- **Run `tools/parity-report.ps1` after every ledger edit** and check `MALFORMED` is empty; a
+  literal `||` inside a cell splits the row.
+- **When a feature a gap cell calls unported lands, re-check that cell in the same round** - four
+  cells have been wrong this way (`EXP-GLB-001` twice, `RES-MODEL-001`, `RES-BLENDSHAPE-001`).
+- Parity ledger: 407 rows, 381 verified, 26 non-verified, DUPES=0, MALFORMED=0, gate OPEN.
+- `/Scenes/View` and `/Export/PrimaryContent` both still return 501.
+- Corpus replays are local-only and have not run in these rounds.
+- Verified: **1873** library + 199 bin tests, 0 failed; warnings-denied Clippy exit 0.
+
+## Previous checkpoint - 2026-10-16 (`isScene` is dead in the baseline)
 
 - **`GlbLevelBuilder.Build`'s `isScene` flag is never true in the frozen source.** Recorded as
   `DIFF-GLB-ISSCENE-DEAD-001`. The proof is exhaustive: `Build` has one caller

@@ -1,5 +1,42 @@
 # Source behavior and differential findings
 
+## DIFF-JSON-ESCAPE-ENCODER-001 - the JSON walker escaped strings like JSON, not like `JavaScriptStringEncode` (fix implemented and verified against captured runtime rows)
+
+`DefaultJsonWalker` writes every string and field name through `HttpUtility.JavaScriptStringEncode`,
+not through a JSON escaper. The port's `write_json_string` implemented the usual JSON rules, so its
+output was byte-different from the reference for any asset whose text contains a control character
+or one of a few HTML-sensitive characters.
+
+**The reference behaviour was captured from the runtime rather than inferred.** A new probe,
+`tools/probes/json-escape`, calls the real `HttpUtility.JavaScriptStringEncode` on both overloads -
+`JavaScriptStringEncode(value)`, which `VisitPrimitive` uses and which does **not** add quotes
+because the walker writes them itself, and `JavaScriptStringEncode(value, true)`, which
+`EnterField` uses and which **does** add them. The seventeen sampled inputs and their exact outputs
+are committed as `src/export/json_escape_fixture.txt`. Four behaviours differ from naive JSON
+escaping:
+
+- **Every control character is `\uXXXX` with uppercase hex.** There is no `\n`, `\r`, `\t`, `\b` or
+  `\f` shorthand anywhere in the encoder's output - `\n` becomes `\u000A`, not `\n`.
+- **`<`, `>`, `&` and `'` are escaped** as `\u003c`, `\u003e`, `\u0026` and `\u0027`, although JSON
+  does not require it.
+- **`U+2028` and `U+2029`** (the JavaScript line separators) are escaped.
+- **Non-ASCII is left as-is**, so `é` and `中` pass through unchanged.
+
+`"` and `\` keep their short forms and `/` is never escaped. Because both overloads escape
+identically and differ only in the surrounding quotes, one Rust function serves both call sites.
+
+**The existing test had been written from the implementation, and asserted the same mistake the
+code made.** `strings_escape_and_bytes_become_base64` expected `\n` and `\t` in the output, which
+matches the buggy function exactly and the reference not at all. This is the same failure mode
+recorded earlier for the glTF quaternion conversion: *a test derived from the code it tests proves
+nothing*. The test now expects the captured values, and a new
+`json_escape_matches_the_reference_runtime_rows` replays all 34 fixture rows, so the expectation is
+independent of this file.
+
+Status: implemented and verified against reference-runtime rows. Reusing the GLB module's
+`escape_json` here would have replicated the same defect, which is why the walker keeps its own
+function.
+
 ## DIFF-GLB-ISSCENE-DEAD-001 - `isScene` is never true in the frozen baseline (documentation, no code change)
 
 `GlbLevelBuilder.Build(assets, isScene)` takes a flag whose only effect is whether a **root** node
