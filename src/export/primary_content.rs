@@ -243,6 +243,101 @@ pub fn format_export_progress(one_based_current: usize, total: usize, name: &str
     format!("({one_based_current}/{total}) Exporting '{name}'")
 }
 
+/// One asset as `CreateCollections` sees it.
+///
+/// The caller resolves the two questions the source answers by type tests: which extractor claims
+/// the asset, and which assets that extractor's collection would also claim. Keeping both as
+/// caller facts lets the assembly loop be exercised without building a whole game.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PrimaryContentAsset<'a> {
+    /// A stable identity for the `queued` set, which the source keys by asset reference.
+    pub identity: u64,
+    /// The extractor the handler stack selects, or `None` when no handler claims the asset.
+    ///
+    /// `RegisterHandler<IUnityObjectBase>(JsonContentExtractor)` is registered first and the
+    /// deleted-asset handler last, so in practice a fetched asset always resolves; `None` models
+    /// the caller passing an asset the stack declined.
+    pub extractor: Option<&'static str>,
+    /// True when the selected extractor produced an **empty** export collection.
+    ///
+    /// `EmptyExportCollection` results are dropped *without* queuing their remaining members,
+    /// which is the documented difference from the Unity-project pipeline.
+    pub is_empty_collection: bool,
+    /// Every asset the selected collection would claim, including this one.
+    ///
+    /// `MultipleExportCollection` reports the primary asset first and then its secondaries; the
+    /// caller supplies the same list the extractor's collection would expose.
+    pub collection_assets: &'a [u64],
+}
+
+/// One collection `CreateCollections` produced.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PrimaryContentCollection {
+    /// The extractor that owns the collection.
+    pub extractor: &'static str,
+    /// The primary asset's identity: the one the loop visited when the collection was created.
+    pub primary: u64,
+    /// Every asset the collection claims, primary first, in the order the extractor reported.
+    pub assets: Vec<u64>,
+}
+
+/// `PrimaryContentExporter.CreateCollections` over caller-resolved assets.
+///
+/// The loop, in source order:
+///
+/// ```text
+/// for asset in FetchAssets():
+///     if !queued.Add(asset):  continue          # already claimed, including by an earlier collection
+///     collection = CreateCollection(asset)
+///     if collection is EmptyExportCollection:  continue   # note: members are NOT queued
+///     foreach element in collection.Assets: queued.Add(element)
+///     collections.Add(collection)
+/// ```
+///
+/// Two details are load-bearing and easy to get backwards. The asset is added to `queued`
+/// **before** the empty check, so an asset whose collection turned out empty is still marked and
+/// will not be reconsidered. And a non-empty collection queues **all** its members, so an asset
+/// claimed by an earlier collection is never exported twice even if a later handler would also
+/// accept it.
+pub fn create_primary_content_collections(
+    assets: &[PrimaryContentAsset],
+) -> Vec<PrimaryContentCollection> {
+    let mut queued: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let mut collections = Vec::new();
+    for asset in assets {
+        // `queued.Add` runs first: a duplicate is skipped even when the earlier visit produced an
+        // empty collection.
+        if !queued.insert(asset.identity) {
+            continue;
+        }
+        let Some(extractor) = asset.extractor else {
+            continue;
+        };
+        if asset.is_empty_collection {
+            // The empty check comes after the queue insert and skips the member queueing.
+            continue;
+        }
+        let members: Vec<u64> = asset.collection_assets.to_vec();
+        for member in &members {
+            queued.insert(*member);
+        }
+        collections.push(PrimaryContentCollection {
+            extractor,
+            primary: asset.identity,
+            assets: members,
+        });
+    }
+    collections
+}
+
+/// The number of collections the export loop reports progress against.
+///
+/// `format_export_progress` is called with the one-based index over **all** collections, not only
+/// the exportable ones, which is the second documented difference from the project pipeline.
+pub fn primary_content_progress_total(collections: &[PrimaryContentCollection]) -> usize {
+    collections.len()
+}
+
 /// Destinations selected by `SingleExportCollection.Export`, which writes no `.meta` sidecar.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlannedSingleAssetPaths {
@@ -301,12 +396,110 @@ pub fn plan_single_export_paths(
 #[cfg(test)]
 mod tests {
     use super::{
-        format_export_progress, handlers_for_target, plan_single_export_paths, PRIMARY_HANDLERS,
+        create_primary_content_collections, format_export_progress, handlers_for_target,
+        plan_single_export_paths, primary_content_progress_total, PrimaryContentAsset,
+        PRIMARY_HANDLERS,
     };
     use crate::export::asset_path::{
         join_path, ExportAssetPathIdentity, ExportFileSystem, HostPathPlatform, UniqueNameState,
         MAX_FILE_NAME_LENGTH,
     };
+
+    /// A collection that claims only `identity`, which is what the single-asset extractors do.
+    ///
+    /// The member slice is `static` so the helper needs no allocation: the assembly loop only
+    /// reads these lists.
+    fn solo(identity: u64, extractor: &'static str) -> PrimaryContentAsset<'static> {
+        const ONE_7: [u64; 1] = [7];
+        const ONE_2: [u64; 1] = [2];
+        const ONE_3: [u64; 1] = [3];
+        const ONE_4: [u64; 1] = [4];
+        let members: &'static [u64] = match identity {
+            7 => &ONE_7,
+            2 => &ONE_2,
+            3 => &ONE_3,
+            4 => &ONE_4,
+            _ => &[],
+        };
+        PrimaryContentAsset {
+            identity,
+            extractor: Some(extractor),
+            is_empty_collection: false,
+            collection_assets: members,
+        }
+    }
+
+    /// The assembly loop's two ordering rules, which are easy to get backwards.
+    #[test]
+    fn primary_content_assembly_queues_before_the_empty_check_and_queues_members() {
+        // 1. A duplicate asset is skipped even though the earlier visit produced an empty
+        //    collection, because `queued.Add` runs *before* the empty check.
+        let empty_then_retry = [
+            PrimaryContentAsset {
+                identity: 7,
+                extractor: Some("GlbModelExporter"),
+                is_empty_collection: true,
+                collection_assets: &[7],
+            },
+            solo(7, "JsonContentExtractor"),
+        ];
+        assert!(
+            create_primary_content_collections(&empty_then_retry).is_empty(),
+            "an asset queued by an empty collection is not reconsidered"
+        );
+
+        // 2. A non-empty collection queues ALL its members, so a later asset already claimed is
+        //    not exported a second time.
+        let members = [1_u64, 2, 3];
+        let claiming = [
+            PrimaryContentAsset {
+                identity: 1,
+                extractor: Some("GlbModelExporter"),
+                is_empty_collection: false,
+                collection_assets: &members,
+            },
+            solo(2, "JsonContentExtractor"),
+            solo(3, "JsonContentExtractor"),
+            solo(4, "JsonContentExtractor"),
+        ];
+        let collections = create_primary_content_collections(&claiming);
+        let primaries: Vec<u64> = collections
+            .iter()
+            .map(|collection| collection.primary)
+            .collect();
+        assert_eq!(primaries, [1, 4], "members 2 and 3 were already claimed");
+        assert_eq!(collections[0].assets, members.to_vec());
+        assert_eq!(collections[0].extractor, "GlbModelExporter");
+        // The progress total counts all collections, which is the primary-content delta.
+        assert_eq!(primary_content_progress_total(&collections), 2);
+    }
+
+    /// An asset the handler stack declined is skipped without becoming a collection.
+    #[test]
+    fn primary_content_assembly_skips_an_unclaimed_asset() {
+        let assets = [PrimaryContentAsset {
+            identity: 9,
+            extractor: None,
+            is_empty_collection: false,
+            collection_assets: &[9],
+        }];
+        assert!(create_primary_content_collections(&assets).is_empty());
+    }
+
+    /// A primary asset is claimed by its own collection even when the member list omits it.
+    #[test]
+    fn primary_content_assembly_keeps_the_primary_asset() {
+        let assets = [PrimaryContentAsset {
+            identity: 5,
+            extractor: Some("AudioContentExtractor"),
+            is_empty_collection: false,
+            collection_assets: &[5, 6],
+        }];
+        let collections = create_primary_content_collections(&assets);
+        assert_eq!(collections.len(), 1);
+        assert_eq!(collections[0].primary, 5);
+        assert_eq!(collections[0].assets, [5, 6]);
+    }
     use std::collections::BTreeSet;
 
     #[derive(Default)]

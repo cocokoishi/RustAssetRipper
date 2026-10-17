@@ -1,6 +1,39 @@
 # RustAssetRipper hand-off — 2026-10-16
 
-## Latest current checkpoint - 2026-10-16 (all 25 rows audited; one stale cell left)
+## Latest current checkpoint - 2026-10-16 (primary-content assembly ported; scene GLB's home corrected)
+
+- **Ported `PrimaryContentExporter.CreateCollections`** into
+  `create_primary_content_collections` (`src/export/primary_content.rs`). The port already had the
+  handler table and the single-asset path planner; the algorithm *between* them was missing. New
+  ledger row `PRODUCT-PRIMARY-CONTENT-001` (406 -> 407 rows).
+- **Two ordering rules are pinned by tests because both are easy to reverse** (the module used to
+  document them without implementing them):
+  - `queued.Add(asset)` runs **before** the empty-collection check, so an asset whose collection
+    turned out empty is still marked and never reconsidered.
+  - A non-empty collection queues **all** its members, so an asset claimed earlier is never
+    exported twice.
+- **I corrected a wrong note from the previous round.** I had written "give `export_scene_glb` a
+  caller in the project export pipeline". Wrong pipeline: `GlbModelExporter` is registered in the
+  **primary-content** handler stack, and `PrimaryContentExporter` has exactly one caller in the
+  frozen source - `GameFileLoader.cs:96`, the GUI's *Export Primary Content* action, i.e. the
+  port's `/Export/PrimaryContent` (still 501). **The scene GLB belongs to the primary-content path,
+  not the Unity project export.** No code was built on the wrong assumption.
+- **Next concrete step for the scene GLB:** give `export_scene_glb` a caller reachable from the
+  primary-content path, and resolve per-node geometry (the reference reaches a mesh through
+  `BuildParameters.TryGetOrMakeMeshData`, so the caller resolves each GameObject's
+  `MeshFilter`/`Renderer` and passes per-node `MeshData`). `EXP-GLB-001` and `EXP-GLB-SCENE-001`
+  share this work.
+- **Never format `src/resources/glb_tests_01.rs`** (nor `main_tests_01.rs`/`main_tests_03.rs`).
+- **A GLB is binary: decode the JSON chunk before asserting on text** (12-byte header, then the
+  chunk header).
+- **When a feature a gap cell calls unported lands, re-check that cell in the same round** - four
+  cells have been wrong this way (`EXP-GLB-001` twice, `RES-MODEL-001`, `RES-BLENDSHAPE-001`).
+- Parity ledger: 407 rows, 381 verified, 26 non-verified, DUPES=0, MALFORMED=0, gate OPEN.
+- `/Scenes/View` and `/Export/PrimaryContent` both still return 501.
+- Corpus replays are local-only and have not run in these rounds.
+- Verified: **1865** library + 199 bin tests, 0 failed; warnings-denied Clippy exit 0.
+
+## Previous checkpoint - 2026-10-16 (all 25 rows audited; one stale cell left)
 
 - **I audited every non-verified row's gap cell in one pass**, after three stale cells had been
   found one round at a time. Result: **24 of 25 are accurate**, and the one remaining stale cell -

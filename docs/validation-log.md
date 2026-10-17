@@ -1,5 +1,33 @@
 # Validation log
 
+## 2026-10-16 - The primary-content collection assembly lands, and the scene GLB's real home is found
+
+- Outcome: ported `PrimaryContentExporter.CreateCollections`, the loop that decides which fetched
+  asset becomes which export collection. Three new tests pin it, and a new ledger row
+  (`PRODUCT-PRIMARY-CONTENT-001`) records it.
+- **Tracing where the scene GLB belongs corrected my own previous hand-off note.** I had recorded
+  "give `export_scene_glb` a caller in the project export pipeline". That is the wrong pipeline.
+  `GlbModelExporter` is registered in the **primary-content** handler stack, and
+  `PrimaryContentExporter` has exactly one caller in the whole frozen source: `GameFileLoader.cs`
+  line 96, the browser GUI's *Export Primary Content* action - the port's `/Export/PrimaryContent`,
+  which still returns 501. So the scene GLB's home is the primary-content path, not the Unity
+  project export. Nothing was built on the wrong assumption; the note was corrected before it
+  misled anyone.
+- **The assembly loop has two ordering rules that are easy to reverse, so both are pinned:**
+  - `queued.Add(asset)` runs **before** the empty-collection check. An asset whose collection
+    turned out empty is still marked, so it is never reconsidered - which is exactly what the
+    module always *documented* but did not previously *implement*.
+  - A non-empty collection queues **all** its members, so an asset already claimed is never
+    exported twice even when a later handler would also accept it.
+  Both are asserted directly: a duplicate after an empty collection yields no collections, and a
+  four-asset input whose first asset claims members 1-3 yields primaries `[1, 4]`.
+- The port already had the handler table and the path planner; what was missing was the algorithm
+  between them. `PRODUCT-PRIMARY-CONTENT-001` is 已实现但未验证: no real export has run, and the
+  extractor internals and file writes stay caller-side.
+- Evidence: `cargo test --locked --workspace` - **1865** library (up from 1862) + 199 bin tests,
+  0 failed, 1 ignored. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+  Parity: TOTAL=407, NONVERIFIED=26, DUPES=0, MALFORMED=0, GATE=OPEN.
+
 ## 2026-10-16 - Systematic audit of all 25 non-verified rows: one stale cell left
 
 - Outcome: after three consecutive stale-claim corrections, I audited **every** non-verified row's
