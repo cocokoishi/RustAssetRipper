@@ -3330,3 +3330,29 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Fix location | `src/resources/glb.rs` (`to_gltf_quaternion`); the stale expectation in `src/resources/glb_tests_01.rs` |
 | Regression evidence | `src/resources/glb_coordinate_fixture.txt` records the five reference-runtime rows verbatim, and `coordinate_conversions_match_the_reference_runtime_rows` checks both conversions against them and asserts the two stay distinct on all three axes. A second test pins the same values with hand-derived expectations so the fixture is not the only witness. |
 | Remaining comparison | The reference's own tangent conversion uses a different, four-component scale `(-1, 1, 1, -1)`; the port already matches it and the fixture records it. No C# runtime differential has been run for a full scene build, because the scene-level builder is still unported. |
+
+## SCOPE-GLB-SCENE-ANCHORING-001 - the scene GLB plan is reference-anchored, the geometry attachment is not
+
+The level plan is checked against the reference runtime: `glb_level_fixture.txt` is captured from the
+`res-glb` probe's `level` mode, which drives the shipped `GlbLevelBuilder.Build` over four generated
+GameObjects and dumps every node, and `level_plan_matches_the_reference_runtime_rows` replays it. So
+node names, parentage, child order, the local transforms after coordinate conversion and the per-node
+mesh *flag* are all anchored.
+
+**What that fixture cannot anchor.** The probe's level case constructs **no MeshFilter, no Renderer and
+no Mesh**, so the reference run records `mesh=False` on every node. Everything the geometry work added
+- resolving the MeshFilter's `m_Mesh`, the `IsSet` gate, `MeshData` construction, the Renderer gate,
+the dynamic/static batching choice, the per-mesh cache, the primitive emission - has **no reference
+row behind it**. It is verified against the frozen source's logic and against the port's own tests,
+which is weaker than a runtime capture and must not be described as the same thing.
+
+**How to close it.** The probe's `level` mode needs a mesh case: create a class-43 `Mesh` with real
+sub-mesh and vertex data, a class-33 `MeshFilter` and a class-25 `Renderer` (with materials, an
+explicit `m_SubsetIndices` and a `m_StaticBatchInfo` arm), link them through the generated API, and
+dump the primitives the way the terrain and navmesh modes already do. The probe currently has **no
+vertex-data code at all**, so that is the work: not a re-run, but a new case.
+
+**Why this is written down rather than left implicit.** Six rounds of work went into this path and
+every one of them reported tests passing, which reads like verification. Passing tests against
+self-chosen inputs are not a reference comparison, and the difference is exactly the kind that stays
+invisible until a real sample disagrees.
