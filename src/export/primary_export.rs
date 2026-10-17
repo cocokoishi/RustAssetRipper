@@ -33,9 +33,11 @@ use super::primary_content::{
 };
 use super::primary_content::{PrimaryContentClaim, PrimaryHandlerRegistration};
 use super::primary_extractors::{
-    binary_asset_claims, deleted_assets_claim, glb_asset_claim, BinaryAssetFacts, GlbAssetFacts,
-    GlbModelMainAsset, ScriptClaim, ScriptExtractorState,
+    binary_asset_claims, deleted_assets_claim, glb_asset_claim,
+    image_texture_check_asset_integrity, BinaryAssetFacts, GlbAssetFacts, GlbModelMainAsset,
+    ScriptClaim, ScriptExtractorState,
 };
+use crate::resources::vertex_data_blob::{EndianType, UnityVersion};
 use crate::serialized_file::object::SerializedValue;
 
 /// The payload each primary-content extractor produces, taken from its collection class.
@@ -333,11 +335,217 @@ pub fn claim_for_extractor(
     }
 }
 
+/// The context the facts derivation needs beyond the payload itself.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PrimaryContentObjectContext {
+    /// The owning SerializedFile's Unity version, which the mesh reader branches on.
+    pub version: UnityVersion,
+    /// The file endianness.
+    pub endian: EndianType,
+}
+
+/// The claim-dispatch facts for one object, or the reason they cannot be determined.
+pub enum PrimaryContentObjectFactsOutcome<'a> {
+    /// The facts are determined, so [`claim_for_extractor`] can run.
+    Known(PrimaryContentObjectFacts<'a>),
+    /// The object's extractor depends on a relation this path does not compute.
+    ///
+    /// This is deliberately not a decline. Declining sends the object to the JSON fallback, and
+    /// claiming sends it to a producer that cannot run - both export it as something the reference
+    /// never would. An undecidable object is **reported** instead, so the gap is visible in the run's
+    /// diagnostics rather than buried in a file.
+    Undecidable {
+        /// Why the facts could not be determined.
+        reason: &'static str,
+    },
+}
+
+/// Class-1 `GameObject`, class-2 `Component`, class-4 `Transform`.
+///
+/// These are the objects `GlbModelExporter` is registered for, and it decides on `asset.MainAsset`,
+/// which is a scene- or prefab-hierarchy relation.
+const MODEL_EXTRACTOR_CLASS_IDS: [i32; 3] = [1, 2, 4];
+/// Class-49 `TextAsset`.
+const TEXT_ASSET_CLASS_ID: i32 = 49;
+/// Class-115 `MonoScript`.
+const MONO_SCRIPT_CLASS_ID: i32 = 115;
+/// Class-128 `Font`.
+const FONT_CLASS_ID: i32 = 128;
+/// Class-152 `MovieTexture`.
+const MOVIE_TEXTURE_CLASS_ID: i32 = 152;
+/// Class-329 `VideoClip`.
+const VIDEO_CLIP_CLASS_ID: i32 = 329;
+
+/// The reason an object's facts are undecidable on this path.
+const HIERARCHY_REASON: &str =
+    "GlbModelExporter decides on the scene or prefab hierarchy relation, which this path does not \
+     compute";
+/// The reason a non-`Texture2D` image class is undecidable here.
+const IMAGE_CLASS_REASON: &str =
+    "this image class's integrity rule is not read on this path; only class-28 Texture2D is";
+
+/// Derive the claim-dispatch facts for one object from its class and decoded payload.
+///
+/// The class-to-family decision is [`crate::export::res_wiring::resource_export_family`]'s, so the
+/// classes the primary-content pipeline owns are decided in one place. What this adds is the
+/// per-family *fact*: whether a mesh is set, whether navmesh data has a height-mesh list, whether an
+/// image texture's bytes are reachable, which of the binary extractor's four arms applies.
+///
+/// `stream_check` answers `m_StreamData`'s collection check for an image texture - `None` when the
+/// texture has no `m_StreamData`, otherwise whether the streamed file resolved. It is a closure
+/// because the file lookup is the caller's, and it is passed straight to the already-ported
+/// [`image_texture_check_asset_integrity`] rather than restating that rule.
+pub fn object_facts_from_payload<'a>(
+    class_id: i32,
+    root: &'a SerializedValue,
+    context: PrimaryContentObjectContext,
+    stream_check: impl FnOnce() -> Option<bool>,
+) -> PrimaryContentObjectFactsOutcome<'a> {
+    use crate::export::res_wiring::{resource_export_family, ResourceExportFamily};
+    use crate::resources::mesh::MeshView;
+    use crate::resources::video_clip::VideoClipView;
+
+    let mut facts = PrimaryContentObjectFacts {
+        model_main_asset: GlbModelMainAsset::Other,
+        main_asset_is_deleted_information: false,
+        mesh_is_set: false,
+        height_meshes_present: false,
+        is_terrain_data: false,
+        image_texture_intact: false,
+        is_audio_clip: false,
+        is_mono_script: false,
+        binary: None,
+    };
+
+    if MODEL_EXTRACTOR_CLASS_IDS.contains(&class_id) {
+        return PrimaryContentObjectFactsOutcome::Undecidable {
+            reason: HIERARCHY_REASON,
+        };
+    }
+
+    match resource_export_family(class_id) {
+        Some(ResourceExportFamily::Mesh) => {
+            // The reference gates the mesh extractor on `MeshExtensions.IsSet()`, so the view has to
+            // be read here: a mesh with no geometry must decline and let the stack continue. The
+            // composite is `resources::mesh::is_set`, which composes the compressed and vertex-data
+            // halves rather than restating them - this is its first production caller.
+            facts.mesh_is_set = MeshView::from_value(root, context.version, context.endian)
+                .map(|view| {
+                    crate::resources::mesh::is_set(
+                        view.compressed_mesh
+                            .as_ref()
+                            .is_some_and(|mesh| mesh.is_set()),
+                        view.vertex_data
+                            .as_ref()
+                            .map_or(0, |data| data.vertex_count),
+                        view.vertex_data.as_ref().map_or(0, |data| data.data.len()),
+                        view.stream_data.as_ref().map(|info| info.is_set()),
+                    )
+                })
+                .unwrap_or(false);
+        }
+        Some(ResourceExportFamily::Terrain) => facts.is_terrain_data = true,
+        Some(ResourceExportFamily::NavMesh) => {
+            // The source tests `HeightMeshes` for null, so a present-but-empty list is admitted.
+            facts.height_meshes_present = field(root, "m_HeightMeshes").is_some();
+        }
+        Some(ResourceExportFamily::Audio) => facts.is_audio_clip = true,
+        Some(ResourceExportFamily::Texture) => {
+            // Only class-28 `Texture2D` is read here. The reference's
+            // `ImageTextureExtensions.CheckAssetIntegrity` reads exactly two fields - the inline
+            // `ImageData` length and whether `m_StreamData` is present - so those are read directly
+            // rather than through a full `Texture2DView`, which demands more of the payload than the
+            // integrity rule does. The other image classes have their own integrity implementations
+            // with their own field names, and are reported rather than guessed.
+            if class_id != crate::export::res_wiring::TEXTURE2D_CLASS_ID {
+                return PrimaryContentObjectFactsOutcome::Undecidable {
+                    reason: IMAGE_CLASS_REASON,
+                };
+            }
+            let image_data_len = bytes_field(root, "m_ImageData").map_or(0, <[u8]>::len);
+            let has_stream = field(root, "m_StreamData").is_some();
+            facts.image_texture_intact =
+                image_texture_check_asset_integrity(image_data_len, || {
+                    if has_stream {
+                        stream_check()
+                    } else {
+                        None
+                    }
+                });
+        }
+        // The shader and material families are not primary-content extractors: a shader reaches the
+        // JSON fallback and a material belongs to the Unity-project YAML route.
+        Some(ResourceExportFamily::ShaderText | ResourceExportFamily::MaterialText) => {}
+        // The hierarchy family is not a per-object export at all; `plan_resource_export` returns
+        // `None` for it and `scene_glb` owns it.
+        Some(ResourceExportFamily::HierarchyGlb) => {
+            return PrimaryContentObjectFactsOutcome::Undecidable {
+                reason: HIERARCHY_REASON,
+            }
+        }
+        None => match class_id {
+            TEXT_ASSET_CLASS_ID => {
+                facts.binary = Some(BinaryAssetFacts::TextAsset {
+                    script_data: bytes_field(root, "m_Script").unwrap_or(&[]),
+                });
+            }
+            FONT_CLASS_ID => {
+                facts.binary = Some(BinaryAssetFacts::Font {
+                    font_data: bytes_field(root, "m_FontData").unwrap_or(&[]),
+                });
+            }
+            MOVIE_TEXTURE_CLASS_ID => {
+                // `Has_MovieData` and non-emptiness are separate conditions in the source.
+                facts.binary = Some(BinaryAssetFacts::MovieTexture {
+                    movie_data: bytes_field(root, "m_MovieData"),
+                });
+            }
+            VIDEO_CLIP_CLASS_ID => {
+                facts.binary = Some(BinaryAssetFacts::VideoClip {
+                    intact: VideoClipView::from_value(root)
+                        .map(|view| view.check_integrity())
+                        .unwrap_or(false),
+                    original_path: string_field(root, "m_OriginalPath").unwrap_or(""),
+                });
+            }
+            MONO_SCRIPT_CLASS_ID => facts.is_mono_script = true,
+            _ => {}
+        },
+    }
+
+    PrimaryContentObjectFactsOutcome::Known(facts)
+}
+
+/// A uniquely named field, following the `Base` chain that carries inherited asset fields.
+fn field<'a>(root: &'a SerializedValue, name: &'static str) -> Option<&'a SerializedValue> {
+    root.unique_field_in_base_chain(name).ok().flatten()
+}
+
+/// A field's raw bytes, for the binary extractor's data arms.
+fn bytes_field<'a>(root: &'a SerializedValue, name: &'static str) -> Option<&'a [u8]> {
+    match field(root, name) {
+        Some(SerializedValue::Bytes(bytes)) | Some(SerializedValue::StringBytes(bytes)) => {
+            Some(bytes)
+        }
+        _ => None,
+    }
+}
+
+/// A field's UTF-8 text, for the video clip's original path.
+fn string_field<'a>(root: &'a SerializedValue, name: &'static str) -> Option<&'a str> {
+    let bytes = match field(root, name) {
+        Some(SerializedValue::StringBytes(bytes)) | Some(SerializedValue::Bytes(bytes)) => bytes,
+        _ => return None,
+    };
+    std::str::from_utf8(bytes).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        claim_for_extractor, export_primary_content, json_content_document, payload_kind,
-        PrimaryContentFailure, PrimaryContentObjectFacts, PrimaryContentPayload,
+        claim_for_extractor, export_primary_content, json_content_document,
+        object_facts_from_payload, payload_kind, PrimaryContentFailure,
+        PrimaryContentObjectContext, PrimaryContentObjectFacts, PrimaryContentPayload,
         PrimaryContentPayloadKind, PrimaryContentProduced,
     };
     use crate::export::asset_path::{ExportAssetPathIdentity, ExportFileSystem, HostPathPlatform};
@@ -345,6 +553,7 @@ mod tests {
     use crate::export::primary_content::PrimaryHandlerRegistration;
     use crate::export::primary_content::{PrimaryContentCollection, PrimaryContentExportStep};
     use crate::export::primary_extractors::{GlbModelMainAsset, ScriptExtractorState};
+    use crate::serialized_file::object::SerializedValue;
 
     /// The unique-name search only probes, so the probe answers "nothing exists".
     struct EmptyFileSystem;
@@ -970,5 +1179,188 @@ mod tests {
         })
         .unwrap();
         assert_eq!(collections[0].extractor, "JsonContentExtractor");
+    }
+
+    /// A struct payload with named fields.
+    fn payload(fields: Vec<(&str, SerializedValue)>) -> SerializedValue {
+        use crate::serialized_file::object::SerializedFieldValue;
+        SerializedValue::Struct(
+            fields
+                .into_iter()
+                .map(|(name, value)| SerializedFieldValue {
+                    name: name.to_owned(),
+                    value,
+                })
+                .collect(),
+        )
+    }
+
+    fn context() -> PrimaryContentObjectContext {
+        use crate::resources::vertex_data_blob::{EndianType, UnityVersion};
+        PrimaryContentObjectContext {
+            version: UnityVersion {
+                major: 2019,
+                minor: 4,
+                patch: 40,
+            },
+            endian: EndianType::Little,
+        }
+    }
+
+    /// The families whose facts come from the payload, one class each.
+    #[test]
+    fn the_payload_derives_each_family_fact() {
+        use crate::export::primary_export::PrimaryContentObjectFactsOutcome;
+        use crate::serialized_file::object::SerializedValue;
+
+        // A macro rather than a closure: the facts borrow the payload, and a closure cannot be
+        // generic over the lifetime it returns.
+        macro_rules! known {
+            ($class_id:expr, $root:expr) => {
+                match object_facts_from_payload($class_id, $root, context(), || None) {
+                    PrimaryContentObjectFactsOutcome::Known(facts) => facts,
+                    PrimaryContentObjectFactsOutcome::Undecidable { reason } => {
+                        panic!("class {} should be decidable: {reason}", $class_id)
+                    }
+                }
+            };
+        }
+
+        // Class 156 TerrainData has no condition at all.
+        assert!(known!(156, &payload(vec![])).is_terrain_data);
+        // Class 83 AudioClip is claimed so its producer can report unimplemented.
+        assert!(known!(83, &payload(vec![])).is_audio_clip);
+        // Class 115 MonoScript drives the one-shot script flag.
+        assert!(known!(115, &payload(vec![])).is_mono_script);
+        // Class 238 NavMeshData needs its height-mesh list present.
+        assert!(!known!(238, &payload(vec![])).height_meshes_present);
+        assert!(
+            known!(
+                238,
+                &payload(vec![("m_HeightMeshes", SerializedValue::Array(vec![]))])
+            )
+            .height_meshes_present,
+            "a present-but-empty list is admitted"
+        );
+        // A shader and a material are not primary-content extractors, so nothing is set.
+        let empty = payload(vec![]);
+        let shader = known!(48, &empty);
+        assert!(!shader.is_terrain_data && !shader.is_audio_clip && shader.binary.is_none());
+        let material = known!(21, &empty);
+        assert!(material.binary.is_none() && !material.is_terrain_data);
+    }
+
+    /// The binary extractor's four arms, each from its own field.
+    #[test]
+    fn the_payload_derives_the_binary_arms() {
+        use crate::export::primary_export::PrimaryContentObjectFactsOutcome;
+        use crate::export::primary_extractors::BinaryAssetFacts;
+        use crate::serialized_file::object::SerializedValue;
+
+        macro_rules! binary {
+            ($class_id:expr, $root:expr) => {
+                match object_facts_from_payload($class_id, $root, context(), || None) {
+                    PrimaryContentObjectFactsOutcome::Known(facts) => facts.binary,
+                    PrimaryContentObjectFactsOutcome::Undecidable { reason } => {
+                        panic!("class {} should be decidable: {reason}", $class_id)
+                    }
+                }
+            };
+        }
+
+        assert_eq!(
+            binary!(
+                49,
+                &payload(vec![("m_Script", SerializedValue::Bytes(vec![1, 2]))])
+            ),
+            Some(BinaryAssetFacts::TextAsset {
+                script_data: &[1, 2]
+            })
+        );
+        // A TextAsset with no script field is still a TextAsset arm, with empty data, so the gate
+        // declines it rather than the class falling through.
+        assert_eq!(
+            binary!(49, &payload(vec![])),
+            Some(BinaryAssetFacts::TextAsset { script_data: &[] })
+        );
+        assert_eq!(
+            binary!(
+                128,
+                &payload(vec![("m_FontData", SerializedValue::Bytes(vec![b'O']))])
+            ),
+            Some(BinaryAssetFacts::Font { font_data: b"O" })
+        );
+        // `Has_MovieData` and non-emptiness stay separate: absent is `None`, empty is `Some(&[])`.
+        assert_eq!(
+            binary!(152, &payload(vec![])),
+            Some(BinaryAssetFacts::MovieTexture { movie_data: None })
+        );
+        assert_eq!(
+            binary!(
+                152,
+                &payload(vec![("m_MovieData", SerializedValue::Bytes(vec![]))])
+            ),
+            Some(BinaryAssetFacts::MovieTexture {
+                movie_data: Some(&[])
+            })
+        );
+        // A video clip carries its original path, which the producer turns into the extension.
+        assert_eq!(
+            binary!(
+                329,
+                &payload(vec![(
+                    "m_OriginalPath",
+                    SerializedValue::StringBytes(b"clip.mp4".to_vec())
+                )])
+            ),
+            Some(BinaryAssetFacts::VideoClip {
+                intact: false,
+                original_path: "clip.mp4"
+            })
+        );
+    }
+
+    /// The model and non-`Texture2D` image classes are reported rather than guessed.
+    #[test]
+    fn the_undecidable_classes_are_reported_with_a_reason() {
+        use crate::export::primary_export::PrimaryContentObjectFactsOutcome;
+
+        for class_id in [1, 2, 4] {
+            match object_facts_from_payload(class_id, &payload(vec![]), context(), || None) {
+                PrimaryContentObjectFactsOutcome::Undecidable { reason } => {
+                    assert!(reason.contains("hierarchy"), "{reason}");
+                }
+                PrimaryContentObjectFactsOutcome::Known(_) => {
+                    panic!("class {class_id} needs the hierarchy relation")
+                }
+            }
+        }
+    }
+
+    /// An image texture's integrity is the ported rule, fed by the caller's stream check.
+    #[test]
+    fn the_image_texture_integrity_uses_the_ported_rule() {
+        use crate::export::primary_export::PrimaryContentObjectFactsOutcome;
+        use crate::serialized_file::object::SerializedValue;
+
+        let intact = |root: &SerializedValue, stream: Option<bool>| match object_facts_from_payload(
+            28,
+            root,
+            context(),
+            || stream,
+        ) {
+            PrimaryContentObjectFactsOutcome::Known(facts) => facts.image_texture_intact,
+            PrimaryContentObjectFactsOutcome::Undecidable { reason } => {
+                panic!("class 28 should be decidable: {reason}")
+            }
+        };
+
+        // Inline data wins and the stream check is never consulted.
+        let inline = payload(vec![("m_ImageData", SerializedValue::Bytes(vec![1, 2, 3]))]);
+        assert!(intact(&inline, None));
+        // No data and no stream declines.
+        let empty = payload(vec![]);
+        assert!(!intact(&empty, None));
+        assert!(!intact(&empty, Some(false)));
     }
 }

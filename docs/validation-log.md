@@ -1,5 +1,39 @@
 # Validation log
 
+## 2026-10-16 - The facts adapter, and the classes that must be reported rather than guessed
+
+- Outcome: added `object_facts_from_payload`, which derives the claim-dispatch facts from an object's
+  class and decoded payload. 1921 library tests (up from 1917).
+- **The class-to-family decision is not new.** It delegates to the existing
+  `res_wiring::resource_export_family`, so the classes the primary-content pipeline owns stay decided
+  in one place; the adapter adds only the per-family *fact*.
+- **Each family's fact comes from the field the reference actually reads.**
+  - A mesh reads `MeshView` and composes `resources::mesh::is_set`, which was added two rounds ago for
+    exactly this gate and now has its first production caller - a mesh with a vertex count but no
+    backing bytes declines rather than exporting geometry-less GLB.
+  - Terrain has no condition at all; navmesh tests `m_HeightMeshes` for **presence**, so a
+    present-but-empty list is admitted, as the source does.
+  - Class-28 `Texture2D` feeds the ported `image_texture_check_asset_integrity` from the **two fields
+    the reference reads** - the inline `ImageData` length and whether `m_StreamData` is present -
+    rather than through a full `Texture2DView`. My first version used the view and a minimal payload
+    failed it, which is how I learned the view demands more of the payload than the integrity rule
+    does; using the view would have made valid textures undecidable.
+  - The binary extractor's four arms read their own fields, keeping `Has_MovieData` and non-emptiness
+    separate so an absent payload and an empty one stay distinguishable.
+- **Two class groups are reported as undecidable rather than guessed, and that is the point.**
+  `GameObject`, `Component` and `Transform` need the scene-or-prefab hierarchy relation that
+  `GlbModelExporter` decides on, and the non-`Texture2D` image classes have their own integrity field
+  names. `Undecidable` is deliberately **neither** a claim nor a decline: declining sends the object to
+  the JSON fallback and claiming sends it to a producer that cannot run, so both would export it as
+  something the reference never would. Reporting it makes the gap visible in the run instead of
+  burying it in a file - which is what the acceptance rule about unexplained differences requires.
+- **A test-shape lesson.** My first two helpers were closures returning facts that borrow the payload,
+  which cannot be generic over the lifetime they return; the compiler rejected them and they became
+  macros. Worth remembering for any future helper over `SerializedValue`.
+- Evidence: `cargo test --locked --workspace` - **1921** library + 199 CLI tests, 0 failed, 1 ignored.
+  `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0. Ledger 409 rows,
+  MALFORMED=0, DUPES=0.
+
 ## 2026-10-16 - The payload producers already exist; the route needs an adapter, not a new layer
 
 - Outcome: investigated what the route's payload production actually needs and found that
