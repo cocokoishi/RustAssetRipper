@@ -1,6 +1,34 @@
-# RustAssetRipper hand-off — 2026-10-16
+# RustAssetRipper hand-off — 2026-10-17
 
-## Latest current checkpoint - 2026-10-16 (the JSON extractor's pointer override)
+## Latest current checkpoint - 2026-10-17 (the scene GLB geometry is reference-anchored)
+
+- **The probe's `mesh` mode closes `SCOPE-GLB-SCENE-ANCHORING-001`.** `tools/probes/res-glb`
+  gained a `mesh` case that builds a class-43 `Mesh` with one Float32 dimension-3 vertex channel
+  (stride 12, `VertexCount` 3, `CurrentChannels_UInt32` 14) and a 16-bit index buffer, a class-33
+  `MeshFilter` pointing at it, and a class-23 `MeshRenderer` whose `StaticBatchInfo` is left at its
+  initialized default (`SubMeshCount == 0`), so the reference's `ReferencesDynamicMesh` takes the
+  dynamic arm. `dotnet run --project tools/probes/res-glb/ResGlbProbe.csproj -c Release -- mesh`
+  emits `LNODE|mesh|Meshed|mesh=True`, `GMESH|mesh|0||0`, `GPOS|mesh|0|-0|1|0`,
+  `GPOS|mesh|1|-1|0|0`, `GPOS|mesh|2|-0|0|0`, `GIDX|mesh|0,1,2`.
+- **The capture is committed and replayed.** `src/resources/glb_level_mesh_fixture.txt` records the
+  reference rows; `scene_geometry_matches_the_reference_runtime_rows` in
+  `src/export/scene_glb/tests.rs` builds the same mesh facts and `MeshData`, replays them through
+  `export_plan_as_glb` (the encoder `export_scene_glb` itself calls), decodes the GLB and compares
+  the node name, the mesh reference, the POSITION **bits** (so the negative zero the `(-x, y, z)`
+  conversion produces is checked, not only the value) and the index buffer. The triangle is emitted
+  with its vertices in the order 2, 1, 0 - `GlbSubMeshBuilder`'s `AddTriangle(i + 2, i + 1, i)`
+  winding flip - and the emitted indices are the sequential 0, 1, 2.
+- **The `vdiag` scratch mode was removed**; the probe now carries only the capture modes. The temp
+  `ReferenceRoot` DLLs (`AssetRipper.Primitives`, `AssetRipper.IO.Endian`,
+  `AssetRipper.SourceGenerated`, `SharpGLTF.{Core,Toolkit,Runtime}`) had been reclaimed by the OS;
+  restore them from `tools/probes/res-glb/bin/Release/net10.0` if the probe build reports MSB3245
+  for those six assemblies.
+- Verified: **1936** library tests, 0 failed, 1 ignored; `rustfmt --edition 2021 --check` clean on
+  the edited `src/export/scene_glb/tests.rs`.
+- **Next:** keep working the wrap-up plan - the primary-content extractor layer's script producer
+  (blocked on the decompiler decision), the remaining `实现中` rows with `RES-TEXTURE-001` /
+  `EXPORT-UNITY-001` first, `PRODUCT-GUI-001`'s remaining pages and `PRODUCT-CONFIG-001`'s data-set
+  subsystem, then the 22-sample local replay and `docs/acceptance-corpus.md` refresh.
 
 ## Previous checkpoint - 2026-10-16 (primary-content extractor decisions ported)
 
@@ -53,7 +81,7 @@
 - **The pending set is now PINNED by a test** (`only_the_pinned_configuration_files_routes_are_still_pending`): it dispatches every route in `WEB_ROUTES` and fails when the 501 set changes. **Six routes are still pending** - `GET /ConfigurationFiles` + 5 `POST /ConfigurationFiles/...`. **The feature is bounded and its design is established:** `AssetRipper.Configuration` (~300 lines, 15 files) is a keyed map of singleton texts + a keyed map of string lists; `Clear` resets values **without** removing keys; the page has two tabs; `GetOrAdd` adds a `StringDataInstance`/`StringDataSet` when the key is absent; **the storages are NOT persisted** (in-memory only), so no settings-file change is needed. Next unit: the model + `WebState` fields + two-tab page + 5 handlers, then shrink `PINNED_PENDING`.
 - **`/Scenes/View` is wired (2026-10-16) and NO tree view is pending any more** - `pending_tree_view`/`pending_tree_page` were deleted as dead. The page needs the scene-definition pass, cached via `WebState::ensure_scene_definitions`. **Open:** (a) audit whether anything still reaches `fallback`'s 501 before closing `PRODUCT-GUI-001`; (b) the render path is **untested** - no scene collection in the committed web fixtures, so add one.
 - **CI`'`s fmt check includes EVERY `*_tests_NN.rs` fragment**, and it only tolerates them where an edit does not touch a line rustfmt would change - so **an edit to `glb_tests_01.rs` must be rustfmt-canonical inside the wrapper**, while the file must NOT be reformatted wholesale (rustfmt without the wrapper dedents all of it). **Python is not available locally**, so reproduce the check in PowerShell: wrap the fragment in `mod __format_context { ... }`, `rustfmt --edition 2021 --emit stdout <tmp>`, drop the first 3 lines (header, blank, `mod ...`) and the last `}`, and `git diff --no-index` the result against the file. Zero deltas means the job will pass.
-- **THE SCENE GLB GEOMETRY IS NOT REFERENCE-ANCHORED (2026-10-16)** - the plan is (`glb_level_fixture.txt`), but the probe`s level case builds no MeshFilter/Renderer/Mesh, so the geometry work has no runtime row behind it. See `SCOPE-GLB-SCENE-ANCHORING-001`; closing it means **adding a mesh case to the probe** (it has no vertex-data code today), not re-running it. **Do not describe passing tests as a reference comparison.**
+- **THE SCENE GLB GEOMETRY IS REFERENCE-ANCHORED (2026-10-17).** The probe`s new `mesh` mode builds a MeshFilter/Renderer/Mesh over a real triangle; `src/resources/glb_level_mesh_fixture.txt` records the emitted primitive and `scene_geometry_matches_the_reference_runtime_rows` replays it through `export_plan_as_glb`. `SCOPE-GLB-SCENE-ANCHORING-001` is closed. **Do not describe passing tests as a reference comparison** unless the expected values are a runtime capture.
 - **`attached_mesh_facts` positive path IS verified (2026-10-16)** against `make_production_mesh_file` in `src/main_tests_03.rs` (a real production class-43 payload with one triangle) - the fixture existed all along; **search the CLI test fragments before concluding a fixture is missing**. **When reproducing the fmt check, compare RANGES, not the delta count**: numbered fragments carry pre-existing deviations, so only a delta **overlapping the changed line range** fails CI.
 - **Prefab hierarchy members are derived (2026-10-16)** by reusing `WorkspaceSceneHierarchies::fetch_game_object_hierarchy` (the walk `PrefabHierarchyObject.Create` mirrors) - so prefab objects classify as `Prefab` and reach the model exporter. A member`s recorded file is the **root`s** (the GLB walks one collection), so a prefab spanning files exports only the root`s file. **Still open:** no test covers the driver`s hierarchy path.
 - **`GlbModelExporter` HAS A PRODUCER (2026-10-16):** the driver calls `export_scene_glb` with `is_scene: false`, geometry resolved once per file via `resolve_scene_meshes`, and the scene state grouped in `SceneState`. **Still open:** (1) **prefab** hierarchies - their member lists are not derived, so those objects stay `Unknown`; (2) no test covers the driver`s hierarchy path (needs a scene fixture) or `attached_mesh_facts` positive path (needs a vertex blob).

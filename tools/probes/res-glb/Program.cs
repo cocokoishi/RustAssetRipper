@@ -332,6 +332,142 @@ public static class Program
         }
     }
 
+    /// A GameObject carrying a MeshFilter and a MeshRenderer over a real triangle.
+    ///
+    /// The level case records `mesh=False` on every node because it builds no components, so the
+    /// geometry half of `GlbLevelBuilder` has no reference row behind it. This case supplies one:
+    /// a class-43 `Mesh` with an explicit `m_VertexData` (one Float32 dimension-3 channel, stride 12)
+    /// and a 16-bit index buffer, a class-33 `MeshFilter` pointing at it, and a class-23
+    /// `MeshRenderer` whose batching fields stay at their initialized defaults - an empty
+    /// `StaticBatchInfo` - so `ReferencesDynamicMesh` takes the dynamic arm and emits every sub-mesh
+    /// in order. The primitives are dumped the same way the terrain and navmesh modes dump theirs.
+    private static void MeshCase(string tag, string version)
+    {
+        try
+        {
+            GameBundle bundle = new();
+            ProcessedAssetCollection collection = new(bundle);
+            Type goFactory = typeof(AssetRipper.SourceGenerated.Classes.ClassID_1.GameObject);
+            Type trFactory = typeof(AssetRipper.SourceGenerated.Classes.ClassID_4.Transform);
+            Type filterFactory = typeof(AssetRipper.SourceGenerated.Classes.ClassID_33.MeshFilter);
+            Type rendererFactory = typeof(AssetRipper.SourceGenerated.Classes.ClassID_23.MeshRenderer);
+            Type meshFactory = typeof(AssetRipper.SourceGenerated.Classes.ClassID_43.Mesh);
+
+            object go = CreateAsset(goFactory, collection, 2000, 1, version);
+            object tr = CreateAsset(trFactory, collection, 2001, 4, version);
+            object filter = CreateAsset(filterFactory, collection, 2002, 33, version);
+            object renderer = CreateAsset(rendererFactory, collection, 2003, 23, version);
+            object mesh = CreateAsset(meshFactory, collection, 2004, 43, version);
+            RegisterAssets(collection, new[] { go, tr, filter, renderer, mesh });
+
+            // The generated `Create` factories do not run `InitializeDefault`, so a component's
+            // typed lists (`Renderer.m_SubsetIndices`, `MeshFilter.m_Mesh`) start null. Calling it
+            // here is what the reference's own loader does once an asset has been constructed, and
+            // the renderer's own `ReferencesDynamicMesh` dereferences the subset list.
+            foreach (object component in new[] { filter, renderer, mesh })
+            {
+                component.GetType().GetMethod("InitializeDefault", Type.EmptyTypes)?.Invoke(component, null);
+            }
+
+            SetName(go, "Meshed");
+            SetLocal(tr, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f);
+            LinkPair(go, tr);
+            Console.WriteLine($"LSTEP|{tag}|linked-transform");
+            LinkComponent(go, filter, 33);
+            LinkComponent(go, renderer, 23);
+            Console.WriteLine($"LSTEP|{tag}|linked-components");
+
+            // One triangle of real geometry: three Float32 positions at stride 12.
+            float[] positions = { 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f };
+            byte[] vertexBytes = new byte[positions.Length * 4];
+            System.Buffer.BlockCopy(positions, 0, vertexBytes, 0, vertexBytes.Length);
+            object vertexData = GetProp(mesh, "VertexData");
+            // A freshly created subclass leaves its lists null; `InitializeDefault` is what the
+            // generated factories use to fill them, and `LinkPair` relies on the same call.
+            vertexData.GetType().GetMethod("InitializeDefault", Type.EmptyTypes)?.Invoke(vertexData, null);
+            SetAny(vertexData, "VertexCount", 3u);
+            // The generated member is `Data` (`m_Data`); `m_DataSize` is the TypeTree name. The live
+            // channel count is `CurrentChannels_UInt32` and decides how many entries are read.
+            SetAny(vertexData, "Data", vertexBytes);
+            // The live channel count decides how many entries the reader walks, and the list has to
+            // hold at least that many, so it is filled before the first channel is written.
+            SetAny(vertexData, "CurrentChannels_UInt32", 14u);
+            object channels = GetProp(vertexData, "Channels");
+            int channelCount = (int)GetProp(channels, "Count");
+            while (channelCount < 14)
+            {
+                AddNewElement(channels);
+                channelCount++;
+            }
+            Console.WriteLine($"LCH|{tag}|channels={channelCount}");
+            object channel = channels.GetType().GetProperty("Item")!.GetValue(channels, new object[] { 0 })!;
+            SetAny(channel, "Stream", (byte)0);
+            SetAny(channel, "Offset", (byte)0);
+            SetAny(channel, "Format", (byte)0);
+            SetAny(channel, "Dimension", (byte)3);
+            Console.WriteLine($"LSTEP|{tag}|channel-set");
+            // `m_Streams` is left unset on purpose: the generated `VertexData_2019` leaves it null,
+            // and the reference derives the stream layout from the channels when it is absent, which
+            // is the same path the port's `VertexDataBlob::from_parts` takes with `None`.
+
+            byte[] indexBytes = new byte[6];
+            System.Buffer.BlockCopy(new ushort[] { 0, 1, 2 }, 0, indexBytes, 0, 6);
+            SetAny(mesh, "IndexBuffer", indexBytes);
+            SetAny(mesh, "IndexFormat", 0);
+
+            object subMeshes = GetProp(mesh, "SubMeshes");
+            object subMesh = AddNewElement(subMeshes);
+            SetAny(subMesh, "FirstByte", 0u);
+            SetAny(subMesh, "IndexCount", 3u);
+            SetAny(subMesh, "Topology", 0);
+            SetAny(subMesh, "BaseVertex", 0u);
+            SetAny(subMesh, "FirstVertex", 0u);
+            SetAny(subMesh, "VertexCount", 3u);
+            Console.WriteLine($"LSTEP|{tag}|submesh-set");
+
+            // The typed pointer is `MeshP`; `Mesh` is the read-only `IPPtr_Mesh` view.
+            SetAny(filter, "MeshP", mesh);
+            Console.WriteLine($"LSTEP|{tag}|filter-mesh");
+
+            // `InitializeDefault` zeroed `StaticBatchInfo.SubMeshCount`, so `ReferencesDynamicMesh`
+            // takes the dynamic arm; the diagnostic records whether this version also exposes a
+            // `SubsetIndices` list, which it does not for 2019.4.
+            object? subsets = GetProp(renderer, "SubsetIndices_C25");
+            Console.WriteLine($"LSUBSET|{tag}|null={subsets is null}");
+
+            Console.WriteLine($"LSTEP|{tag}|renderer-batching");
+            Console.WriteLine($"LIN|{tag}|{version}|scene=False");
+
+            Type builder = typeof(AssetRipper.Export.Modules.Models.GlbLevelBuilder);
+            IEnumerable<AssetRipper.Assets.IUnityObjectBase> assets = new AssetRipper.Assets.IUnityObjectBase[]
+            {
+                (AssetRipper.Assets.IUnityObjectBase)go,
+            };
+            object sceneBuilder = builder.GetMethod("Build")!.Invoke(null, new object[] { assets, false })!;
+            ModelRoot model = (ModelRoot)sceneBuilder.GetType().GetMethod("ToGltf2", Type.EmptyTypes)!.Invoke(sceneBuilder, null)!;
+            foreach (Node node in model.LogicalNodes)
+            {
+                Console.WriteLine($"LNODE|{tag}|{node.Name}|mesh={node.Mesh is not null}");
+            }
+            DumpModel(tag, model);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"LERR|{tag}|{ex.GetType().Name}|{ex.Message.Split('\n')[0]}");
+            if (ex.InnerException is not null) { Console.WriteLine($"LERR|{tag}|inner|{ex.InnerException.Message.Split('\n')[0]}"); }
+        }
+    }
+
+    /// Attach a component asset to a GameObject the way the generated `AddComponent` extension does.
+    private static void LinkComponent(object gameObject, object component, int classId)
+    {
+        MethodInfo add = typeof(AssetRipper.SourceGenerated.Extensions.GameObjectExtensions)
+            .GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .First(m => m.Name == "AddComponent" && m.GetParameters().Length == 3);
+        object id = Enum.ToObject(add.GetParameters()[1].ParameterType, classId);
+        add.Invoke(null, new[] { gameObject, id, component });
+    }
+
     private static void SetName(object target, string name)
     {
         PropertyInfo? prop = target.GetType().GetProperty("Name_R");
@@ -532,6 +668,12 @@ public static class Program
         {
             LevelCase("scene", "2019.4.0f1", true);
             LevelCase("asset", "2019.4.0f1", false);
+            return 0;
+        }
+
+        if (args.Length > 0 && args[0] == "mesh")
+        {
+            MeshCase("mesh", "2019.4.0f1");
             return 0;
         }
 

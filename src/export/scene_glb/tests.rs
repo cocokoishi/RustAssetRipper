@@ -574,3 +574,352 @@ fn a_plan_without_geometry_still_encodes() {
     assert_eq!(&mesh_export.bytes[0..4], b"glTF");
     assert!(mesh_export.emitted_source_indices.is_empty());
 }
+
+/// The scene GLB geometry is anchored to a primitive the reference runtime emitted.
+///
+/// `glb_level_mesh_fixture.txt` holds the primitive output the isolated baseline build produced
+/// through the probe's `mesh` mode, which drives the shipped `GlbLevelBuilder.Build` over a
+/// GameObject carrying a MeshFilter, a MeshRenderer and one triangle. This test builds the same
+/// hierarchy and `MeshData`, replays them through [`export_plan_as_glb`] - the encoder
+/// `export_scene_glb` itself calls - and compares the decoded node, mesh, positions and indices
+/// against the fixture. Without it the geometry half of the scene export rested on a reading of the
+/// reference source rather than on a runtime row.
+#[test]
+fn scene_geometry_matches_the_reference_runtime_rows() {
+    use crate::resources::compressed_mesh::{DecompressedMesh, Vec3 as CompressedVec3};
+    use crate::resources::glb_level::{build_level_plan, GlbLevelMesh, GlbLevelTransform};
+    use crate::resources::mesh_data::{MeshData, MeshParts};
+    use crate::resources::sub_mesh_data::{Bounds, MeshTopology, SubMeshData};
+
+    // The fixture's mesh: three Float32 positions and three 16-bit indices forming one triangle.
+    let mesh_data = MeshData::try_make_from_parts(MeshParts {
+        blob: None,
+        compressed: DecompressedMesh {
+            vertices: Some(vec![
+                CompressedVec3::new(0.0, 0.0, 0.0),
+                CompressedVec3::new(1.0, 0.0, 0.0),
+                CompressedVec3::new(0.0, 1.0, 0.0),
+            ]),
+            processed_index_buffer: Some(vec![0, 1, 2]),
+            ..DecompressedMesh::default()
+        },
+        sub_meshes: vec![SubMeshData {
+            base_vertex: 0,
+            first_index: 0,
+            first_vertex: 0,
+            index_count: 3,
+            triangle_count: 1,
+            vertex_count: 3,
+            topology: MeshTopology::TRIANGLES,
+            local_bounds: Bounds::default(),
+        }],
+        mesh_bind_pose: None,
+        mesh_index_buffer: Vec::new(),
+        mesh_skin: None,
+    })
+    .expect("the triangle mesh builds");
+
+    // The probe's renderer has an empty `StaticBatchInfo` (`SubMeshCount == 0`), so the reference's
+    // `ReferencesDynamicMesh` takes the dynamic arm and emits every sub-mesh in order.
+    let source = GlbSourceMesh {
+        file_id: 0,
+        path_id: 2004,
+    };
+    let root = GlbLevelTransform {
+        game_object_name: "Meshed".to_owned(),
+        local_position: [1.0, 0.0, 0.0],
+        local_rotation: [0.0, 0.0, 0.0, 1.0],
+        local_scale: [1.0, 1.0, 1.0],
+        children: Vec::new(),
+        mesh: Some(GlbLevelMesh {
+            sub_mesh_count: 1,
+            is_16_bit_indices: true,
+            mesh_type: Some(crate::resources::glb::get_mesh_type(&mesh_data)),
+            has_renderer: true,
+            has_static_batch_info: true,
+            static_batch_sub_mesh_count: 0,
+            static_batch_info: Some((0, 0)),
+            source: Some(source),
+            ..GlbLevelMesh::default()
+        }),
+    };
+    let plan = build_level_plan(&[root], false).expect("the plan builds");
+    let meshes = vec![(source, mesh_data)];
+    let export =
+        export_plan_as_glb(&plan, &meshes, GlbBuildLimits::default()).expect("the plan encodes");
+    assert_eq!(export.node_count, 1);
+    assert_eq!(export.mesh_count, 1);
+    assert!(export.warnings.is_empty(), "{:?}", export.warnings);
+
+    let json = json_chunk(&export.bytes);
+    let bin = bin_chunk(&export.bytes);
+
+    // Parse the fixture into the expected rows before comparing, so a malformed fixture is a
+    // failure rather than a silently empty expectation.
+    let fixture = include_str!("../../resources/glb_level_mesh_fixture.txt");
+    let mut expected_positions: Vec<[f32; 3]> = Vec::new();
+    let mut expected_indices: Option<Vec<u32>> = None;
+    let mut rows = 0usize;
+    for line in fixture.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields: Vec<&str> = line.split('|').collect();
+        match fields[0] {
+            "LIN" => {
+                assert_eq!(fields[1], "mesh");
+                assert_eq!(fields[2], "2019.4.0f1");
+                assert_eq!(fields[3], "scene=False");
+            }
+            "LNODE" => {
+                assert_eq!(fields[2], "Meshed");
+                assert_eq!(fields[3], "mesh=True");
+            }
+            "GMESH" => {
+                assert_eq!(fields[2], "0", "the fixture's mesh index");
+                assert_eq!(fields[3], "", "the reference mesh carries no name");
+                assert_eq!(fields[4], "0", "the fixture's primitive index");
+            }
+            "GPOS" => {
+                assert_eq!(fields[2], expected_positions.len().to_string());
+                expected_positions.push([
+                    fields[3].parse().expect("a float component"),
+                    fields[4].parse().expect("a float component"),
+                    fields[5].parse().expect("a float component"),
+                ]);
+            }
+            "GIDX" => {
+                expected_indices = Some(
+                    fields[2]
+                        .split(',')
+                        .map(|value| value.parse().expect("an index"))
+                        .collect(),
+                );
+            }
+            other => panic!("unknown fixture row {other}"),
+        }
+        rows += 1;
+    }
+    assert_eq!(rows, 7, "every fixture row is checked");
+    let expected_indices = expected_indices.expect("the fixture carries an index row");
+
+    // The document: one node named Meshed that references the single mesh.
+    assert!(json.contains("\"name\":\"Meshed\""), "{json}");
+    assert!(json.contains("\"mesh\":0"), "{json}");
+
+    // The primitive's decoded geometry.
+    let primitive = single_primitive(&json);
+    let position_accessor =
+        attribute_accessor(&primitive, "POSITION").expect("POSITION is emitted");
+    let index_accessor = json_number(&primitive, "indices").expect("indices are emitted") as usize;
+    let positions = accessor_floats(&json, &bin, position_accessor);
+    let indices = accessor_indices(&json, &bin, index_accessor);
+
+    // Compare position bits, not values: the conversion of a zero component produces a negative
+    // zero, and `-0.0 == 0.0` would hide a missing conversion.
+    let decoded: Vec<[f32; 3]> = positions
+        .chunks_exact(3)
+        .map(|c| [c[0], c[1], c[2]])
+        .collect();
+    assert_eq!(decoded.len(), expected_positions.len(), "{json}");
+    for (got, want) in decoded.iter().zip(&expected_positions) {
+        for axis in 0..3 {
+            assert_eq!(
+                got[axis].to_bits(),
+                want[axis].to_bits(),
+                "position {got:?} != {want:?}"
+            );
+        }
+    }
+    assert_eq!(indices, expected_indices);
+}
+
+/// The binary chunk of a GLB, which is the buffer the accessors index into.
+fn bin_chunk(bytes: &[u8]) -> Vec<u8> {
+    let json_length = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]) as usize;
+    let offset = 20 + json_length;
+    assert_eq!(&bytes[offset + 4..offset + 8], b"BIN\0");
+    let length = u32::from_le_bytes([
+        bytes[offset],
+        bytes[offset + 1],
+        bytes[offset + 2],
+        bytes[offset + 3],
+    ]) as usize;
+    bytes[offset + 8..offset + 8 + length].to_vec()
+}
+
+/// The raw text of a top-level JSON array value.
+fn json_array<'a>(json: &'a str, key: &str) -> Option<&'a str> {
+    let bytes = json.as_bytes();
+    let needle = format!("\"{key}\"");
+    let mut object_depth = 0usize;
+    let mut array_depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut index = 0usize;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            index += 1;
+            continue;
+        }
+
+        match byte {
+            b'"' => {
+                if object_depth == 1 && array_depth == 0 && json[index..].starts_with(&needle) {
+                    let mut cursor = index + needle.len();
+                    while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+                        cursor += 1;
+                    }
+                    if bytes.get(cursor) == Some(&b':') {
+                        cursor += 1;
+                        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+                            cursor += 1;
+                        }
+                        if bytes.get(cursor) == Some(&b'[') {
+                            let start = cursor + 1;
+                            let mut depth = 1usize;
+                            let mut array_string = false;
+                            let mut array_escape = false;
+                            for end in start..bytes.len() {
+                                let array_byte = bytes[end];
+                                if array_string {
+                                    if array_escape {
+                                        array_escape = false;
+                                    } else if array_byte == b'\\' {
+                                        array_escape = true;
+                                    } else if array_byte == b'"' {
+                                        array_string = false;
+                                    }
+                                } else {
+                                    match array_byte {
+                                        b'"' => array_string = true,
+                                        b'[' => depth += 1,
+                                        b']' => {
+                                            depth -= 1;
+                                            if depth == 0 {
+                                                return Some(&json[start..end]);
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            return None;
+                        }
+                    }
+                }
+                in_string = true;
+            }
+            b'{' => object_depth += 1,
+            b'}' => object_depth = object_depth.saturating_sub(1),
+            b'[' => array_depth += 1,
+            b']' => array_depth = array_depth.saturating_sub(1),
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+/// Splits a flat array of JSON objects into its object bodies.
+fn json_objects(array: &str) -> Vec<String> {
+    array
+        .split("},{")
+        .map(|part| part.trim_matches(|character| character == '{' || character == '}'))
+        .filter(|part| !part.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The integer value of a flat object field.
+fn json_number(object: &str, key: &str) -> Option<i64> {
+    let needle = format!("\"{key}\":");
+    let start = object.find(&needle)? + needle.len();
+    let rest = &object[start..];
+    let end = rest
+        .find(|character: char| !(character.is_ascii_digit() || character == '-'))
+        .unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
+/// The string value of a flat object field.
+fn json_string(object: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\":\"");
+    let start = object.find(&needle)? + needle.len();
+    let end = object[start..].find('"')? + start;
+    Some(object[start..end].to_owned())
+}
+
+/// The single primitive body of the single-mesh JSON layout.
+fn single_primitive(json: &str) -> String {
+    let anchor = json
+        .find("\"primitives\":[")
+        .expect("a primitive is emitted");
+    let start = anchor + "\"primitives\":[".len();
+    let end = json[start..].find(']').expect("the primitive closes") + start;
+    json[start..end]
+        .trim()
+        .trim_matches(|character| character == '{' || character == '}')
+        .to_owned()
+}
+
+/// The accessor number of a named primitive attribute.
+fn attribute_accessor(primitive: &str, name: &str) -> Option<usize> {
+    let anchor = primitive.find("\"attributes\":{")? + "\"attributes\":{".len();
+    let end = primitive[anchor..].find('}')? + anchor;
+    json_number(&primitive[anchor..end], name).map(|value| value as usize)
+}
+
+/// The decoded floats of one accessor, in accessor order.
+fn accessor_floats(json: &str, bin: &[u8], accessor: usize) -> Vec<f32> {
+    let accessors = json_objects(json_array(json, "accessors").expect("accessors"));
+    let views = json_objects(json_array(json, "bufferViews").expect("bufferViews"));
+    let object = &accessors[accessor];
+    let view = &views[json_number(object, "bufferView").expect("a bufferView") as usize];
+    let count = json_number(object, "count").expect("a count") as usize;
+    let components = match json_string(object, "type").expect("a type").as_str() {
+        "VEC2" => 2,
+        "VEC3" => 3,
+        _ => 4,
+    };
+    let offset = json_number(view, "byteOffset").expect("a byteOffset") as usize;
+    (0..count * components)
+        .map(|index| {
+            let start = offset + index * 4;
+            f32::from_le_bytes(bin[start..start + 4].try_into().unwrap())
+        })
+        .collect()
+}
+
+/// The decoded indices of one accessor.
+fn accessor_indices(json: &str, bin: &[u8], accessor: usize) -> Vec<u32> {
+    let accessors = json_objects(json_array(json, "accessors").expect("accessors"));
+    let views = json_objects(json_array(json, "bufferViews").expect("bufferViews"));
+    let object = &accessors[accessor];
+    let view = &views[json_number(object, "bufferView").expect("a bufferView") as usize];
+    let count = json_number(object, "count").expect("a count") as usize;
+    let component_type = json_number(object, "componentType").expect("a componentType");
+    let offset = json_number(view, "byteOffset").expect("a byteOffset") as usize;
+    (0..count)
+        .map(|index| match component_type {
+            5123 => {
+                let start = offset + index * 2;
+                u16::from_le_bytes(bin[start..start + 2].try_into().unwrap()) as u32
+            }
+            _ => {
+                let start = offset + index * 4;
+                u32::from_le_bytes(bin[start..start + 4].try_into().unwrap())
+            }
+        })
+        .collect()
+}

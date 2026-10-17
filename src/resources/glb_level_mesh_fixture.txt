@@ -1,0 +1,45 @@
+# GlbLevelBuilder geometry: reference-runtime primitive output for a GameObject that carries a
+# MeshFilter and a MeshRenderer over a real triangle.
+#
+# The level fixture (`glb_level_fixture.txt`) records `mesh=false` on every node because its case
+# builds no components, so the geometry half of `GlbLevelBuilder` had no reference row behind it.
+# This case supplies one. It is captured from the isolated baseline build of the frozen reference by
+# the probe mode
+#   dotnet run --project tools/probes/res-glb/ResGlbProbe.csproj -c Release -- mesh
+# which builds a class-43 `Mesh` with one Float32 dimension-3 vertex channel (stride 12) and a
+# 16-bit index buffer, a class-33 `MeshFilter` pointing at it, and a class-23 `MeshRenderer` whose
+# batching fields are empty - an initialized `StaticBatchInfo` with `SubMeshCount == 0` - so
+# `ReferencesDynamicMesh` takes the dynamic arm and emits every sub-mesh in order - links them
+# through the generated API, and dumps every primitive of the `ToGltf2()` result of the shipped
+# `GlbLevelBuilder.Build`.
+#
+# Columns:
+#   LIN|<tag>|<unity version>|scene=<bool>
+#   LNODE|<tag>|<name>|mesh=<bool>
+#   GMESH|<tag>|<mesh index>|<name>|<primitive index>
+#   GPOS|<tag>|<primitive index>|<x>|<y>|<z>
+#   GIDX|<tag>|<comma-separated indices>
+LIN|mesh|2019.4.0f1|scene=False
+LNODE|mesh|Meshed|mesh=True
+GMESH|mesh|0||0
+GPOS|mesh|0|-0|1|0
+GPOS|mesh|1|-1|0|0
+GPOS|mesh|2|-0|0|0
+GIDX|mesh|0,1,2
+#
+# Inputs, so the fixture is reproducible:
+#   GameObject "Meshed" with local position (1, 0, 0), identity rotation, unit scale.
+#   Mesh vertex data: three Float32 positions - (0,0,0), (1,0,0), (0,1,0) - at stride 12, one
+#     channel (stream 0, offset 0, format Float32, dimension 3), VertexCount 3.
+#   Index buffer: three 16-bit indices 0, 1, 2; IndexFormat UInt16.
+#   Sub-mesh: firstByte 0, indexCount 3, vertexCount 3, topology TRIANGLES.
+#   Renderer: MeshRenderer with no batching range - an initialized StaticBatchInfo whose
+#     SubMeshCount is 0.
+#
+# Two observations worth keeping:
+#   * Position is `(-x, y, z)`: (1,0,0) -> (-1,0,0), (0,1,0) -> (-0,1,0), (0,0,0) -> (-0,0,0).
+#     That is `GlbCoordinateConversion.ToGltfVector3Convert`, already pinned by
+#     `glb_coordinate_fixture.txt`, here reconfirmed through a whole scene build.
+#   * Triangle winding is reversed: the triangle (0,1,2) is emitted with its vertices in the order
+#     2, 1, 0, which is `GlbSubMeshBuilder`'s `AddTriangle(i + 2, i + 1, i)`. The emitted index
+#     buffer is then the sequential 0, 1, 2 over that reordered vertex list.
