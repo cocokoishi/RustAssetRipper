@@ -56,6 +56,7 @@ use assetripper::export::scene_wiring::{
 };
 use assetripper::processing::prefab_processing::WorkspaceProcessedCollectionKind;
 use assetripper::processing::prefab_processing::WorkspaceProcessedPrefabAssetKind;
+use assetripper::processing::scene_hierarchy::WorkspaceGameObjectHierarchyWalkLimits;
 use assetripper::resources::glb::{GlbBuildLimits, GlbLevelLimits};
 use assetripper::resources::packed_bit_vector::PackedBitVectorLimits;
 use assetripper::serialized_file::reference_graph::MultiFileReferenceGraphLimits;
@@ -704,18 +705,35 @@ fn main_asset_classification(
         }
     }
 
-    // Files that hold a prefab hierarchy: their unclassified objects stay unknown.
+    // A prefab hierarchy's members are `PrefabHierarchyObject.Create`'s walk of `root.FetchHierarchy`,
+    // which the workspace already implements; reusing it means the member order and the component
+    // edges are the same ones the prefab processing itself uses.
     let mut prefab_files: HashSet<usize> = HashSet::new();
     for collection in processing.processed_assets.collections() {
         if collection.kind != WorkspaceProcessedCollectionKind::PrefabHierarchies {
             continue;
         }
         for asset in &collection.assets {
-            if let WorkspaceProcessedPrefabAssetKind::PrefabHierarchy {
+            let WorkspaceProcessedPrefabAssetKind::PrefabHierarchy {
                 root_game_object, ..
             } = &asset.kind
-            {
-                prefab_files.insert(root_game_object.file_index);
+            else {
+                continue;
+            };
+            prefab_files.insert(root_game_object.file_index);
+            let Ok(walk) = processing.hierarchies.fetch_game_object_hierarchy(
+                *root_game_object,
+                WorkspaceGameObjectHierarchyWalkLimits::default(),
+            ) else {
+                // The walk failed: this file's objects stay unknown rather than being guessed.
+                continue;
+            };
+            for entry in walk.entries() {
+                let identity =
+                    object_identity(entry.identity.file_index, entry.identity.object_index);
+                classification.insert(identity, MainAssetFacts::Prefab);
+                // The hierarchy GLB walks one collection; a prefab's is its root's file.
+                hierarchy_file.insert(identity, root_game_object.file_index);
             }
         }
     }

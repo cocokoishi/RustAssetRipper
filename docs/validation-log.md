@@ -1,5 +1,31 @@
 # Validation log
 
+## 2026-10-16 - Prefab hierarchy members, derived by the walk that already existed
+
+- Outcome: the main-asset relation now resolves prefab hierarchy members, so those objects classify as
+  `Prefab` and reach the model exporter instead of being reported undecidable. 1935 library tests.
+- **The walk was already there.** `PrefabHierarchyObject.Create` fills its member lists from
+  `root.FetchHierarchy()`, and the workspace already implements that exact walk as
+  `WorkspaceSceneHierarchies::fetch_game_object_hierarchy`, which the prefab processing itself uses.
+  Reusing it means the member order and the component edges are the same ones - a second
+  implementation would have been a second answer to the same question.
+- **The relation is what the extractor needed.** `GlbModelExporter`'s gate is `asset.MainAsset is
+  SceneHierarchyObject or PrefabHierarchyObject`, and every component's main asset is its hierarchy, so
+  no object can decide its own extractor. This was the conservative half of that function; it is now
+  derived rather than deferred.
+- **The file recorded per member is the root's, not the member's.** The hierarchy GLB walks one
+  collection, and a prefab's collection is its root's file, so that is the one the producer can walk.
+  A prefab whose members span files therefore exports the root's file's members - the same
+  collection-scoped limit the scene GLB module already documents.
+- **The conservative fallback is kept, narrowed.** A failed walk still leaves that file's objects
+  `Unknown` and reported, rather than being called not-a-hierarchy and handed to the JSON fallback.
+- **What is still not verified.** The driver's hierarchy path has no test: it needs a loaded game with
+  a scene or prefab collection, and the committed fixtures have none. The pieces are tested
+  individually; the composition is not, and the ledger says so.
+- Evidence: `cargo test --locked --workspace` - **1935** library + 206 CLI tests, 0 failed, 1 ignored.
+  `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0, and `rustfmt --check` on
+  the edited file is clean, checked locally before pushing.
+
 ## 2026-10-16 - The hierarchy GLB finally has a producer
 
 - Outcome: the primary-content driver now produces `GlbModelExporter`'s collection through
