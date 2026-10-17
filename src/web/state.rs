@@ -30,6 +30,7 @@ use crate::export_commands::{
     LoadedGame,
 };
 use crate::primary_content_commands::export_loaded_primary_content;
+use assetripper::configuration::{ListData, SingletonData};
 use assetripper::export::scene_wiring::{
     process_workspace_scenes_and_prefabs, WorkspaceSceneProcessingLimits,
 };
@@ -71,6 +72,13 @@ pub struct WebState {
     /// the reference computes it once at load and holds it on the game data. The port computes it on
     /// first request and caches it here rather than repeating the scan for every `/Scenes/View`.
     scene_definitions: Option<WorkspaceSceneDefinitions>,
+    /// `CoreConfiguration.SingletonData`: the named configuration texts the settings page edits.
+    ///
+    /// In-memory for the session: the baseline clears them on reset and does not carry them in the
+    /// settings file, so neither does the port.
+    singleton_data: SingletonData,
+    /// `CoreConfiguration.ListData`: the named configuration lists the settings page edits.
+    list_data: ListData,
     log: Vec<String>,
     static_content: Vec<(String, Vec<u8>)>,
 }
@@ -155,6 +163,8 @@ impl WebState {
             loaded: None,
             tree: None,
             scene_definitions: None,
+            singleton_data: SingletonData::new(),
+            list_data: ListData::new(),
             log: Vec::new(),
             static_content: Vec::new(),
         })
@@ -923,6 +933,8 @@ impl WebState {
         let had_data = self.loaded.take().is_some();
         self.tree = None;
         self.scene_definitions = None;
+        self.singleton_data = SingletonData::new();
+        self.list_data = ListData::new();
         if had_data {
             self.log.push("Data was reset.".to_owned());
         }
@@ -965,6 +977,26 @@ impl WebState {
     /// The cached scene definitions, after [`WebState::ensure_scene_definitions`].
     pub fn scene_definitions(&self) -> Option<&WorkspaceSceneDefinitions> {
         self.scene_definitions.as_ref()
+    }
+
+    /// The named configuration texts, for the configuration-files handlers.
+    pub fn singleton_data(&mut self) -> &mut SingletonData {
+        &mut self.singleton_data
+    }
+
+    /// The named configuration lists, for the configuration-files handlers.
+    pub fn list_data(&mut self) -> &mut ListData {
+        &mut self.list_data
+    }
+
+    /// The named configuration texts, for reading.
+    pub fn singletons(&self) -> &SingletonData {
+        &self.singleton_data
+    }
+
+    /// The named configuration lists, for reading.
+    pub fn lists(&self) -> &ListData {
+        &self.list_data
     }
 
     /// The export gate for one submitted path, with the browser confirmation result.

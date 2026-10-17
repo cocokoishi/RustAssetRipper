@@ -190,6 +190,19 @@ impl Request {
             .map(|(_, value)| value)
     }
 
+    /// Every form value named `name`, in body order.
+    ///
+    /// The baseline reads repeated fields through `TryGetStringArray` - the configuration page's
+    /// list add posts one `Content` field per file - so the port needs the same view of the body
+    /// rather than only the first value.
+    pub fn form_values(&self, name: &str) -> Vec<String> {
+        parse_form(&self.body)
+            .into_iter()
+            .filter(|(key, _)| key == name)
+            .map(|(_, value)| value)
+            .collect()
+    }
+
     /// The boolean value of a form field, mirroring the baseline's `CreateSubfolder` rule:
     /// only the exact text `true` is true.
     pub fn form_flag(&self, name: &str) -> bool {

@@ -761,6 +761,142 @@ pub fn scene_page(
     layout(state, &plan.name, inner.as_str())
 }
 
+/// `ConfigurationFilesPage`: the named configuration texts and lists, with their actions.
+///
+/// The baseline renders two tabs - singletons and lists - and this page renders the same two groups
+/// as sections. The interface technique differs; every action the baseline offers is here: load or
+/// replace a singleton, remove a singleton, append to a list, replace a list element, remove a list
+/// element.
+///
+/// **The file-dialog fallback is not offered.** The baseline opens a native file dialog when a form
+/// carries no `Content`; the port has no dialog host, so a form submitted without content changes
+/// nothing, which is what the baseline does when the dialog is cancelled or unavailable. The page
+/// therefore shows the actions without pretending a picker exists.
+pub fn configuration_files_page(state: &WebState) -> String {
+    let mut inner = Html::new();
+    inner.element("h1", &[], &t(state, "configuration_files"));
+
+    inner.element("h2", &[], &t(state, "configuration_files_singletons"));
+    if state.singletons().is_empty() {
+        inner.element("p", &[], &t(state, "no_data_has_been_loaded_for_this_key"));
+    }
+    for key in state.singletons().keys() {
+        let text = state.singletons().get(key).cloned().unwrap_or_default();
+        inner.element("h3", &[], key);
+        if text.is_empty() {
+            inner.element("p", &[], &t(state, "no_data_has_been_loaded_for_this_key"));
+        } else {
+            inner.element("pre", &[("class", "bg-dark-subtle rounded-3 p-2")], &text);
+        }
+        // Add and Replace post to the same route, which sets the text either way.
+        inner.open(
+            "form",
+            &[
+                ("action", "/ConfigurationFiles/Singleton/Add"),
+                ("method", "post"),
+            ],
+        );
+        inner.void(
+            "input",
+            &[("type", "hidden"), ("name", "Key"), ("value", key)],
+        );
+        inner.void(
+            "input",
+            &[
+                ("type", "submit"),
+                ("class", "btn btn-primary mx-1"),
+                (
+                    "value",
+                    &if text.is_empty() {
+                        t(state, "load").into_owned()
+                    } else {
+                        t(state, "replace").into_owned()
+                    },
+                ),
+            ],
+        );
+        inner.close("form");
+        inner.open(
+            "form",
+            &[
+                ("action", "/ConfigurationFiles/Singleton/Remove"),
+                ("method", "post"),
+            ],
+        );
+        inner.void(
+            "input",
+            &[("type", "hidden"), ("name", "Key"), ("value", key)],
+        );
+        inner.void(
+            "input",
+            &[
+                ("type", "submit"),
+                ("class", "btn btn-danger mx-1"),
+                ("value", &t(state, "remove")),
+            ],
+        );
+        inner.close("form");
+    }
+
+    inner.element("h2", &[], &t(state, "configuration_files_lists"));
+    for key in state.lists().keys() {
+        let values = state.lists().get(key).cloned().unwrap_or_default();
+        inner.element("h3", &[], key);
+        if values.is_empty() {
+            inner.element("p", &[], &t(state, "no_data_has_been_loaded_for_this_key"));
+        }
+        for (index, value) in values.iter().enumerate() {
+            inner.element("pre", &[("class", "bg-dark-subtle rounded-3 p-2")], value);
+            for (action, label) in [
+                ("/ConfigurationFiles/List/Replace", t(state, "replace")),
+                ("/ConfigurationFiles/List/Remove", t(state, "remove")),
+            ] {
+                inner.open("form", &[("action", action), ("method", "post")]);
+                inner.void(
+                    "input",
+                    &[("type", "hidden"), ("name", "Key"), ("value", key)],
+                );
+                inner.void(
+                    "input",
+                    &[
+                        ("type", "hidden"),
+                        ("name", "Index"),
+                        ("value", &index.to_string()),
+                    ],
+                );
+                inner.void(
+                    "input",
+                    &[("type", "submit"), ("class", "btn mx-1"), ("value", &label)],
+                );
+                inner.close("form");
+            }
+        }
+        // The list's add form appends, which is why the baseline labels it with a plus.
+        inner.open(
+            "form",
+            &[
+                ("action", "/ConfigurationFiles/List/Add"),
+                ("method", "post"),
+            ],
+        );
+        inner.void(
+            "input",
+            &[("type", "hidden"), ("name", "Key"), ("value", key)],
+        );
+        inner.void(
+            "input",
+            &[
+                ("type", "submit"),
+                ("class", "btn btn-secondary"),
+                ("value", "+"),
+            ],
+        );
+        inner.close("form");
+    }
+
+    layout(state, &t(state, "configuration_files"), inner.as_str())
+}
+
 /// The asset page's information section: the display name with the collection link and
 /// the path, class-number and class-name rows.
 ///

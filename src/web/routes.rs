@@ -53,6 +53,7 @@ fn get(state: &mut WebState, request: &Request) -> Response {
         "/" => Response::html(pages::index(state)),
         "/Commands" => Response::html(pages::commands(state)),
         "/Privacy" => Response::html(pages::privacy(state)),
+        "/ConfigurationFiles" => configuration_files(state),
         "/Licenses" => Response::html(pages::licenses(state)),
         "/PremiumFeatures" => Response::html(pages::premium_features(state)),
         "/Settings/Edit" => Response::html(pages::settings_edit(state)),
@@ -99,6 +100,11 @@ fn post(state: &mut WebState, request: &Request) -> Response {
             state.reset();
             Response::redirect("/")
         }
+        "/ConfigurationFiles/Singleton/Add" => singleton_add(state, request),
+        "/ConfigurationFiles/Singleton/Remove" => singleton_remove(state, request),
+        "/ConfigurationFiles/List/Add" => list_add(state, request),
+        "/ConfigurationFiles/List/Remove" => list_remove(state, request),
+        "/ConfigurationFiles/List/Replace" => list_replace(state, request),
         "/Export/UnityProject" => export(state, request),
         "/Export/PrimaryContent" => export_primary_content(state, request),
         _ => fallback(state, "POST", request.path()),
@@ -287,6 +293,94 @@ fn scene_view(state: &mut WebState, request: &Request) -> Response {
     };
     Response::html(pages::scene_page(state, tree, definition))
         .with_content_type("text/html; charset=utf-8")
+}
+
+/// `GET /ConfigurationFiles`: the named configuration texts and lists.
+fn configuration_files(state: &mut WebState) -> Response {
+    Response::html(pages::configuration_files_page(state))
+        .with_content_type("text/html; charset=utf-8")
+}
+
+/// The configuration-files redirect, which every form post answers with.
+fn configuration_files_redirect() -> Response {
+    Response::redirect("/ConfigurationFiles")
+}
+
+/// `POST /ConfigurationFiles/Singleton/Add`: set one named text.
+///
+/// A form without `Content` opens a file dialog in the baseline; the port has no dialog host, so it
+/// changes nothing and redirects, which is the baseline's behaviour when the dialog yields no file.
+fn singleton_add(state: &mut WebState, request: &Request) -> Response {
+    let Some(key) = request.form_value("Key") else {
+        return Response::bad_request("");
+    };
+    if let Some(content) = request.form_value("Content") {
+        *state.singleton_data().get_or_add(&key) = content;
+    }
+    configuration_files_redirect()
+}
+
+/// `POST /ConfigurationFiles/Singleton/Remove`: reset one named text, keeping the key.
+fn singleton_remove(state: &mut WebState, request: &Request) -> Response {
+    let Some(key) = request.form_value("Key") else {
+        return Response::bad_request("");
+    };
+    // `DataInstance.Clear` resets the value; the key stays listed.
+    state.singleton_data().clear(&key);
+    configuration_files_redirect()
+}
+
+/// `POST /ConfigurationFiles/List/Add`: append to one named list.
+fn list_add(state: &mut WebState, request: &Request) -> Response {
+    let Some(key) = request.form_value("Key") else {
+        return Response::bad_request("");
+    };
+    // The baseline appends every repeated `Content` field; an absent one is the dialog path.
+    let content = request.form_values("Content");
+    if !content.is_empty() {
+        state.list_data().add_range(&key, content);
+    }
+    configuration_files_redirect()
+}
+
+/// `POST /ConfigurationFiles/List/Remove`: remove one element of a named list.
+fn list_remove(state: &mut WebState, request: &Request) -> Response {
+    let Some(key) = request.form_value("Key") else {
+        return Response::bad_request("");
+    };
+    let Some(index) = request
+        .form_value("Index")
+        .and_then(|index| index.parse::<i64>().ok())
+    else {
+        return Response::bad_request("");
+    };
+    // A key that does not exist, or an index out of range, is a bad request rather than a silent
+    // no-op - the baseline checks both before mutating.
+    if !state.list_data().contains_index(&key, index) {
+        return Response::bad_request("");
+    }
+    state.list_data().remove_at(&key, index);
+    configuration_files_redirect()
+}
+
+/// `POST /ConfigurationFiles/List/Replace`: replace one element of a named list.
+fn list_replace(state: &mut WebState, request: &Request) -> Response {
+    let Some(key) = request.form_value("Key") else {
+        return Response::bad_request("");
+    };
+    let Some(index) = request
+        .form_value("Index")
+        .and_then(|index| index.parse::<i64>().ok())
+    else {
+        return Response::bad_request("");
+    };
+    if !state.list_data().contains_index(&key, index) {
+        return Response::bad_request("");
+    }
+    if let Some(content) = request.form_value("Content") {
+        state.list_data().replace_at(&key, index, content);
+    }
+    configuration_files_redirect()
 }
 
 /// Run the frozen `TryGet*FromQuery` gates shared by every tree route.
@@ -2039,29 +2133,19 @@ mod tests {
     }
 
     /// Every declared route is answered by a handler, except the pinned configuration-files gap.
+    /// No declared route falls through to the pending page.
     ///
-    /// **This is the audit `PRODUCT-GUI-001` needs, and it corrected me.** After `/Scenes/View` was
-    /// wired I wrote that the port "no longer has a pending tree view" and let that stand as if no
-    /// route were pending; the first run of this test listed **six** still-pending routes, all in the
-    /// configuration-files group. The distinction is real - no *tree view* is pending - but the
-    /// broader claim was not checked and was wrong.
+    /// **This is the audit `PRODUCT-GUI-001` needed, and it took two rounds to be able to assert
+    /// it.** First written after the scene view was wired, it listed **six** still-pending
+    /// configuration-files routes, so it pinned them rather than asserting an empty set - which
+    /// corrected a claim I had made. The six are wired now, and the assertion is the strong one: a
+    /// route added to the table without a handler, or a handler removed, fails here.
     ///
-    /// The expected set is pinned rather than asserted empty: a route added to the table without a
-    /// handler, or one of these six wired without updating this list, fails the test. That is what
-    /// keeps the ledger's pending list from drifting away from the code.
+    /// A route that needs a `Path` answers 404 and an unloaded POST route redirects; both are
+    /// handlers' answers. Only the pending page answers 501.
     #[test]
-    fn only_the_pinned_configuration_files_routes_are_still_pending() {
+    fn no_declared_route_falls_through_to_the_pending_page() {
         use assetripper::product::{RouteMethod, WEB_ROUTES};
-
-        // The configuration-files pages and their five form posts. `PRODUCT-CONFIG-001` owns them.
-        const PINNED_PENDING: [&str; 6] = [
-            "GET /ConfigurationFiles",
-            "POST /ConfigurationFiles/Singleton/Add",
-            "POST /ConfigurationFiles/Singleton/Remove",
-            "POST /ConfigurationFiles/List/Add",
-            "POST /ConfigurationFiles/List/Remove",
-            "POST /ConfigurationFiles/List/Replace",
-        ];
 
         let mut pending = Vec::new();
         for route in WEB_ROUTES {
@@ -2074,13 +2158,103 @@ mod tests {
                 pending.push(format!("{method} {}", route.path));
             }
         }
-        pending.sort();
-        let mut expected = PINNED_PENDING.to_vec();
-        expected.sort();
-        assert_eq!(
-            pending, expected,
-            "the pending set changed: wire the route and update PINNED_PENDING, or add the handler"
+        assert!(
+            pending.is_empty(),
+            "these declared routes are still pending: {pending:?}"
         );
+    }
+
+    /// The configuration-files handlers edit the named data the page renders.
+    ///
+    /// Every branch the baseline has is exercised: a set, a form with no content (the dialog path,
+    /// which changes nothing), a remove that keeps the key, a multi-value list add, a replace, a
+    /// remove, and the bad requests for a missing key and an out-of-range index.
+    #[test]
+    fn the_configuration_files_handlers_edit_the_named_data() {
+        let mut state = state();
+        let page = dispatch(&mut state, &request("GET", "/ConfigurationFiles"));
+        assert_eq!(page.status(), 200);
+
+        // A singleton set, then a form with no content, which is the dialog path and changes nothing.
+        assert_eq!(
+            dispatch(
+                &mut state,
+                &request_with_body(
+                    "/ConfigurationFiles/Singleton/Add",
+                    "Key=README&Content=hello"
+                )
+            )
+            .status(),
+            302
+        );
+        assert_eq!(state.singletons().get("README"), Some(&"hello".to_owned()));
+        dispatch(
+            &mut state,
+            &request_with_body("/ConfigurationFiles/Singleton/Add", "Key=README"),
+        );
+        assert_eq!(state.singletons().get("README"), Some(&"hello".to_owned()));
+
+        // Remove resets the value and keeps the key listed.
+        dispatch(
+            &mut state,
+            &request_with_body("/ConfigurationFiles/Singleton/Remove", "Key=README"),
+        );
+        assert_eq!(state.singletons().get("README"), Some(&String::new()));
+        // A missing key is a bad request.
+        assert_eq!(
+            dispatch(
+                &mut state,
+                &request_with_body("/ConfigurationFiles/Singleton/Remove", "Index=0")
+            )
+            .status(),
+            400
+        );
+
+        // A list add takes every repeated `Content` field in one post.
+        dispatch(
+            &mut state,
+            &request_with_body(
+                "/ConfigurationFiles/List/Add",
+                "Key=Fib&Content=1&Content=2",
+            ),
+        );
+        assert_eq!(
+            state.lists().get("Fib"),
+            Some(&vec!["1".to_owned(), "2".to_owned()])
+        );
+        dispatch(
+            &mut state,
+            &request_with_body(
+                "/ConfigurationFiles/List/Replace",
+                "Key=Fib&Index=0&Content=9",
+            ),
+        );
+        assert_eq!(
+            state.lists().get("Fib"),
+            Some(&vec!["9".to_owned(), "2".to_owned()])
+        );
+        dispatch(
+            &mut state,
+            &request_with_body("/ConfigurationFiles/List/Remove", "Key=Fib&Index=1"),
+        );
+        assert_eq!(state.lists().get("Fib"), Some(&vec!["9".to_owned()]));
+        // An out-of-range index is a bad request and changes nothing.
+        assert_eq!(
+            dispatch(
+                &mut state,
+                &request_with_body("/ConfigurationFiles/List/Remove", "Key=Fib&Index=5")
+            )
+            .status(),
+            400
+        );
+        assert_eq!(state.lists().get("Fib"), Some(&vec!["9".to_owned()]));
+
+        // The page shows both entries.
+        let page = dispatch(&mut state, &request("GET", "/ConfigurationFiles"));
+        let body = String::from_utf8_lossy(page.body()).into_owned();
+        assert!(body.contains("README"), "{body}");
+        assert!(body.contains("Fib"), "{body}");
+        assert!(body.contains('9'), "{body}");
     }
 
     fn request_with_body(target: &str, body: &str) -> Request {

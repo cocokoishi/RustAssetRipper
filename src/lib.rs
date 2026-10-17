@@ -6,6 +6,7 @@
 //! is audited and implemented; the presence of this crate does not imply product parity.
 
 pub mod compression;
+pub mod configuration;
 pub mod container;
 pub mod export;
 pub mod io;

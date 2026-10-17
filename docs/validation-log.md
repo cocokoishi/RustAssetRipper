@@ -1,5 +1,35 @@
 # Validation log
 
+## 2026-10-16 - The configuration-files feature, and the end of the pending routes
+
+- Outcome: ported the data-set subsystem, added the configuration-files page and its five form
+  handlers, and **the audit now asserts that no declared route falls through to the pending page**.
+  1932 library + 206 CLI tests.
+- **The audit test paid for itself.** It was written last round to pin the six pending
+  configuration-files routes; this round, after wiring them, it failed with `left: []` and told me
+  exactly what to update. It is now the strong assertion - a route added to the table without a
+  handler, or a handler removed, fails here - which is the claim I could not make two rounds ago.
+- **The model is small and its one subtle rule is `Clear`.** `SingletonData` and `ListData` are keyed
+  stores, and `DataInstance.Clear` **resets a value while keeping the key**, so the page's Remove
+  button leaves the key listed with no data. Removing the entry instead would change what the page
+  shows, and that is the kind of detail that looks like a cleanup opportunity later.
+- **Ordering is deliberately not the baseline's.** The baseline iterates `Dictionary.Keys`, whose
+  order is a runtime implementation detail and not reproducible; the port uses an ordered map so a
+  page renders the same way twice. The set of keys is what the baseline's behaviour determines, and
+  that is what is preserved - recorded rather than silently "fixed".
+- **One capability is deliberately absent, and the page does not pretend otherwise.** The baseline
+  opens a native file dialog when a form carries no `Content`; the port has no dialog host, so such a
+  form changes nothing - which is exactly what the baseline does when the dialog is cancelled or
+  unavailable. The page therefore shows the actions without a picker.
+- **Every branch is exercised through the real route dispatch**, not by calling the model directly: a
+  set, a no-content form, a remove that keeps the key, a multi-value list add, a replace, a remove,
+  the bad requests for a missing key and an out-of-range index, and the page body afterwards.
+- **What is not verified, stated plainly.** There is no reference-runtime comparison of this page's
+  markup or of the handlers' HTTP status codes, so the row stays `已实现但未验证` rather than being
+  promoted on the strength of its own tests.
+- Evidence: `cargo test --locked --workspace` - **1932** library + **206** CLI tests, 0 failed, 1
+  ignored. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+
 ## 2026-10-16 - Auditing the pending routes, which corrected a claim I had made
 
 - Outcome: added a test that dispatches **every** route in `WEB_ROUTES` and pins the set that still
