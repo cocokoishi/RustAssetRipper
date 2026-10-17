@@ -1,5 +1,31 @@
 # Validation log
 
+## 2026-10-16 - The hierarchy GLB finally has a producer
+
+- Outcome: the primary-content driver now produces `GlbModelExporter`'s collection through
+  `export_scene_glb`, with the geometry resolved once per file. 1935 library + 206 CLI tests.
+- **This closes the chain the last four rounds built**: the walk attaches geometry from
+  caller-supplied facts, the facts come from the MeshFilter and Renderer payloads, the geometry is
+  cached per mesh, and now something calls all of it. The route's report will show hierarchy
+  collections as written or failed instead of unimplemented.
+- **`is_scene: false` is passed deliberately.** The frozen baseline hard-codes it on both the scene
+  and the prefab path, and the parameter exists only to keep the reference-verified `Build` semantics
+  testable on both arms. The call site says so.
+- **The geometry is resolved once per file, not per collection.** `resolve_scene_meshes` reads
+  payloads and builds `MeshData`, so doing it inside the producer would repeat the work for every
+  collection in a scene; it is precomputed into a map and looked up.
+- **The producer's arguments were grouped rather than suppressed.** Clippy flagged eight arguments;
+  the three scene-related ones became a `SceneState` struct, which also names what the hierarchy path
+  needs.
+- **What is still not done, stated plainly.** Prefab hierarchies have no producer because their member
+  lists are not derived - those objects stay `Unknown` and are reported, which is why the relation's
+  prefab half was written conservatively. And the driver's hierarchy path is **not covered by a
+  test**: it needs a loaded game with a scene collection, and the committed fixtures have none. The
+  pieces it composes are tested; the composition is not.
+- Evidence: `cargo test --locked --workspace` - **1935** library + 206 CLI tests, 0 failed, 1 ignored.
+  `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0, and `rustfmt --check` on
+  the three edited files is clean, checked locally before pushing.
+
 ## 2026-10-16 - The decoded geometry is cached per mesh, not per node
 
 - Outcome: `attach_plan_geometry` and `export_plan_as_glb` now take the caller's decoded geometry keyed

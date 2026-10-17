@@ -311,15 +311,34 @@ pub struct SceneMeshResolution<'a> {
 /// **A mesh referenced from another file is not resolved and yields no facts.** The reference reaches
 /// such a mesh through the bundle; this path does not, and returning `None` keeps the node without
 /// geometry instead of inventing one. That is a caller-visible gap rather than a silent one.
-pub fn resolve_attached_meshes(
+pub fn resolve_scene_meshes(
     collection: &MaterializedSceneCollection,
     context: &SceneMeshResolution<'_>,
-) -> Vec<Option<GlbLevelMesh>> {
-    collection
-        .transforms
-        .iter()
-        .map(|transform| resolve_one(collection, transform, context))
-        .collect()
+) -> ResolvedSceneMeshes {
+    let mut attached = Vec::with_capacity(collection.transforms.len());
+    let mut meshes: Vec<(GlbSourceMesh, crate::resources::mesh_data::MeshData)> = Vec::new();
+    for transform in &collection.transforms {
+        let resolved = resolve_one(collection, transform, context);
+        // The reference caches one `MeshData` per `IMesh`, so two nodes sharing a mesh share the
+        // entry rather than each carrying a copy.
+        if let Some((facts, mesh_data)) = &resolved {
+            if let Some(source) = facts.source {
+                if !meshes.iter().any(|(candidate, _)| *candidate == source) {
+                    meshes.push((source, mesh_data.clone()));
+                }
+            }
+        }
+        attached.push(resolved.map(|(facts, _)| facts));
+    }
+    ResolvedSceneMeshes { attached, meshes }
+}
+
+/// The per-Transform facts and the per-mesh geometry one collection resolves to.
+pub struct ResolvedSceneMeshes {
+    /// The facts the walk needs, indexed by Transform position.
+    pub attached: Vec<Option<GlbLevelMesh>>,
+    /// The decoded geometry, one entry per distinct source mesh.
+    pub meshes: Vec<(GlbSourceMesh, crate::resources::mesh_data::MeshData)>,
 }
 
 /// One Transform's facts, or `None` when the source's gates do not attach geometry.
@@ -327,7 +346,7 @@ fn resolve_one(
     collection: &MaterializedSceneCollection,
     transform: &crate::export::scene_wiring::MaterializedTransform,
     context: &SceneMeshResolution<'_>,
-) -> Option<GlbLevelMesh> {
+) -> Option<(GlbLevelMesh, crate::resources::mesh_data::MeshData)> {
     let game_object_index = local_object_index(transform.game_object.as_ref()?)?;
     let game_object = collection
         .game_objects
@@ -391,7 +410,7 @@ pub fn attached_mesh_facts(
     endian: EndianType,
     limits: PackedBitVectorLimits,
     source: GlbSourceMesh,
-) -> Option<GlbLevelMesh> {
+) -> Option<(GlbLevelMesh, crate::resources::mesh_data::MeshData)> {
     let view = MeshView::from_value(mesh_root, version, endian).ok()?;
     if !crate::resources::mesh::is_set(
         view.compressed_mesh
@@ -435,7 +454,7 @@ pub fn attached_mesh_facts(
         _ => None,
     });
 
-    Some(GlbLevelMesh {
+    let facts = GlbLevelMesh {
         sub_mesh_count: mesh_data.sub_meshes.len(),
         is_16_bit_indices: mesh_data.index_format() == IndexFormat::UInt16,
         mesh_type: Some(crate::resources::glb::get_mesh_type(&mesh_data)),
@@ -447,7 +466,8 @@ pub fn attached_mesh_facts(
         subset_indices,
         static_batch_info,
         source: Some(source),
-    })
+    };
+    Some((facts, mesh_data))
 }
 
 /// The local object index a Transform's GameObject relationship resolves to.

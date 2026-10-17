@@ -47,11 +47,17 @@ use assetripper::export::settings_file::SerializedSettingsFile;
 use assetripper::resources::vertex_data_blob::{EndianType, UnityVersion};
 use assetripper::serialized_file::object::SerializedValue;
 
+use assetripper::export::scene_glb::{
+    export_scene_glb, resolve_scene_meshes, ResolvedSceneMeshes, SceneGlbExportInput,
+    SceneMeshResolution,
+};
 use assetripper::export::scene_wiring::{
-    process_workspace_scenes_and_prefabs, WorkspaceSceneProcessingLimits,
+    process_workspace_scenes_and_prefabs, WorkspaceSceneProcessing, WorkspaceSceneProcessingLimits,
 };
 use assetripper::processing::prefab_processing::WorkspaceProcessedCollectionKind;
 use assetripper::processing::prefab_processing::WorkspaceProcessedPrefabAssetKind;
+use assetripper::resources::glb::{GlbBuildLimits, GlbLevelLimits};
+use assetripper::resources::packed_bit_vector::PackedBitVectorLimits;
 use assetripper::serialized_file::reference_graph::MultiFileReferenceGraphLimits;
 
 use super::export_commands::LoadedGame;
@@ -96,10 +102,36 @@ pub(super) fn export_loaded_primary_content<W: io::Write>(
     let files = game.workspace.files();
 
     // `GlbModelExporter` decides on `asset.MainAsset`, which is a scene- or prefab-hierarchy
-    // relation, so the relation has to be computed before any object's facts can be decided.
-    let (main_asset_of, scene_note) = main_asset_classification(game);
+    // relation, so the relation has to be computed before any object's facts can be decided. The
+    // processing result is kept: the hierarchy GLB producer needs the scene graph it holds.
+    let scene_processing = process_scenes(game);
+    let (main_asset_of, hierarchy_file, scene_note) =
+        main_asset_classification(game, scene_processing.as_ref());
     if let Some(note) = &scene_note {
         writeln!(status_output, "{note}")?;
+    }
+
+    // The per-mesh geometry each hierarchy needs, resolved once per file. `resolve_scene_meshes`
+    // reads payloads and builds `MeshData`, so it is not repeated per collection.
+    let mut resolved_by_file: HashMap<usize, ResolvedSceneMeshes> = HashMap::new();
+    if let Some(processing) = &scene_processing {
+        for file_index in hierarchy_file.values() {
+            if resolved_by_file.contains_key(file_index) {
+                continue;
+            }
+            let Some(scene_collection) = processing.graph.collection(*file_index) else {
+                continue;
+            };
+            let context = SceneMeshResolution {
+                objects: &game.objects,
+                files: game.workspace.files(),
+                limits: PackedBitVectorLimits::default(),
+            };
+            resolved_by_file.insert(
+                *file_index,
+                resolve_scene_meshes(scene_collection, &context),
+            );
+        }
     }
 
     // The adapter's parallel pieces. `names` and `members` must outlive the objects that borrow
@@ -262,7 +294,20 @@ pub(super) fn export_loaded_primary_content<W: io::Write>(
         &project_directory,
         HostPathPlatform::host(),
         &file_system,
-        |collection| produce(collection, &entries, &payloads, export_settings, limits),
+        |collection| {
+            produce(
+                collection,
+                &entries,
+                &payloads,
+                export_settings,
+                limits,
+                &SceneState {
+                    processing: scene_processing.as_ref(),
+                    hierarchy_file: &hierarchy_file,
+                    resolved_by_file: &resolved_by_file,
+                },
+            )
+        },
         |relative_path, bytes| {
             let path = file_system.resolve(relative_path);
             if let Some(parent) = path.parent() {
@@ -296,12 +341,20 @@ pub(super) fn export_loaded_primary_content<W: io::Write>(
 /// per-asset planner, the binary arms through the binary planner, and everything else explicitly
 /// unimplemented. A planner answering `None` means "not this producer's business" - the hierarchy
 /// GLB and the material text asset - which is reported as unimplemented rather than as failure.
+/// The scene state the hierarchy GLB producer needs, grouped so the producer keeps a readable arity.
+struct SceneState<'a> {
+    processing: Option<&'a WorkspaceSceneProcessing>,
+    hierarchy_file: &'a HashMap<u64, usize>,
+    resolved_by_file: &'a HashMap<usize, ResolvedSceneMeshes>,
+}
+
 fn produce(
     collection: &PrimaryContentCollection,
     entries: &HashMap<u64, ObjectEntry>,
     payloads: &HashMap<u64, &SerializedValue>,
     settings: &assetripper::export::settings_file::ExportSettingsFile,
     limits: ResourceExportLimits,
+    scene: &SceneState<'_>,
 ) -> PrimaryContentPayload {
     let Some(entry) = entries.get(&collection.primary) else {
         return PrimaryContentPayload::Failed;
@@ -324,6 +377,35 @@ fn produce(
                 // A declined binary arm is a gate the reference also declines; the collection would
                 // not have been created for it, so this is a planner/caller disagreement.
                 Ok(None) => PrimaryContentPayload::Unimplemented,
+                Err(_) => PrimaryContentPayload::Failed,
+            }
+        }
+        // The hierarchy GLB is not a per-asset export: it needs the scene graph and the decoded
+        // geometry, so it goes through `scene_glb` rather than through the per-asset planner. This
+        // is the only extractor that reaches it - the mesh, navmesh and terrain GLB extractors are
+        // per-asset and go through the planner below.
+        PrimaryContentPayloadKind::Glb if collection.extractor == "GlbModelExporter" => {
+            let Some(file_index) = scene.hierarchy_file.get(&collection.primary) else {
+                return PrimaryContentPayload::Failed;
+            };
+            let (Some(processing), Some(resolved)) =
+                (scene.processing, scene.resolved_by_file.get(file_index))
+            else {
+                return PrimaryContentPayload::Unimplemented;
+            };
+            let Some(scene_collection) = processing.graph.collection(*file_index) else {
+                return PrimaryContentPayload::Failed;
+            };
+            match export_scene_glb(SceneGlbExportInput {
+                collection: scene_collection,
+                // The frozen baseline hard-codes `false` on both the scene and the prefab path.
+                is_scene: false,
+                attached_meshes: &resolved.attached,
+                meshes: &resolved.meshes,
+                level_limits: GlbLevelLimits::default(),
+                glb_limits: GlbBuildLimits::default(),
+            }) {
+                Ok(export) => produced(collection, entry, "glb", export.bytes),
                 Err(_) => PrimaryContentPayload::Failed,
             }
         }
@@ -566,39 +648,44 @@ impl ExportFileSystem for RunFileSystem {
 /// in a file that holds one is left `Unknown` rather than called `NotAHierarchy`: the latter would
 /// hand prefab objects to the JSON fallback, which the reference never does for them.
 ///
-/// The second return value is a note for the run's log, present only when the relation could not be
-/// computed at all.
-fn main_asset_classification(game: &LoadedGame) -> (HashMap<u64, MainAssetFacts>, Option<String>) {
-    let Ok(references) = game
+/// Run the scene and prefab processing, which the main-asset relation and the hierarchy GLB both
+/// need. `None` means it could not run; the caller reports that.
+fn process_scenes(game: &LoadedGame) -> Option<WorkspaceSceneProcessing> {
+    let references = game
         .workspace
         .reference_graph(MultiFileReferenceGraphLimits::default())
-    else {
-        return (
-            HashMap::new(),
-            Some(
-                "The reference graph could not be built, so no object's main asset is known and \
-                 every hierarchy object will be reported as undecidable."
-                    .to_owned(),
-            ),
-        );
-    };
-    let processing = match process_workspace_scenes_and_prefabs(
+        .ok()?;
+    process_workspace_scenes_and_prefabs(
         &game.filesystem,
         &game.workspace,
         &game.objects,
         &references,
         WorkspaceSceneProcessingLimits::default(),
-    ) {
-        Ok(processing) => processing,
-        Err(error) => {
-            return (
-                HashMap::new(),
-                Some(format!(
-                    "Scene and prefab processing failed ({error}), so no object's main asset is \
-                     known and every hierarchy object will be reported as undecidable."
-                )),
-            );
-        }
+    )
+    .ok()
+}
+
+/// The third return value is a note for the run's log, present only when the relation could not be
+/// computed at all.
+fn main_asset_classification(
+    game: &LoadedGame,
+    processing: Option<&WorkspaceSceneProcessing>,
+) -> (
+    HashMap<u64, MainAssetFacts>,
+    HashMap<u64, usize>,
+    Option<String>,
+) {
+    let mut hierarchy_file: HashMap<u64, usize> = HashMap::new();
+    let Some(processing) = processing else {
+        return (
+            HashMap::new(),
+            hierarchy_file,
+            Some(
+                "Scene and prefab processing did not run, so no object's main asset is known and \
+                 every hierarchy object will be reported as undecidable."
+                    .to_owned(),
+            ),
+        );
     };
 
     let mut classification: HashMap<u64, MainAssetFacts> = HashMap::new();
@@ -610,10 +697,10 @@ fn main_asset_classification(game: &LoadedGame) -> (HashMap<u64, MainAssetFacts>
             .chain(&hierarchy.managers)
             .chain(&hierarchy.prefab_instances)
         {
-            classification.insert(
-                object_identity(member.file_index, member.object_index),
-                MainAssetFacts::Scene,
-            );
+            let identity = object_identity(member.file_index, member.object_index);
+            classification.insert(identity, MainAssetFacts::Scene);
+            // The hierarchy GLB walks one collection, and a scene's members live in its own file.
+            hierarchy_file.insert(identity, member.file_index);
         }
     }
 
@@ -645,13 +732,15 @@ fn main_asset_classification(game: &LoadedGame) -> (HashMap<u64, MainAssetFacts>
         }
     }
 
+    // A prefab hierarchy's members are not derived yet, so its file's objects are left unknown
+    // rather than called not-a-hierarchy; the GLB producer cannot walk one either.
     let note = (unknown_in_prefab_files > 0).then(|| {
         format!(
             "{unknown_in_prefab_files} objects live in a file that holds a prefab hierarchy whose \
              members are not derived on this path yet, so they are reported rather than guessed."
         )
     });
-    (classification, note)
+    (classification, hierarchy_file, note)
 }
 
 #[cfg(test)]
