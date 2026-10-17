@@ -248,6 +248,95 @@ impl ObjectClassFacts {
     }
 }
 
+/// The `ObjectClassFacts` for one workspace object, from its factory classification.
+///
+/// This rule was inline in the project walk's object loop. It is shared here because the
+/// primary-content pipeline needs the same facts to build an object's handler stack, and writing a
+/// second copy would have been the fourth duplicate in this area.
+///
+/// The `Texture3D` case is the one that is easy to get wrong: it has a source-generated collection
+/// even when its fields were decoded through the owning TypeTree rather than a generated class body,
+/// so it must **not** be classified as a dynamic `TypeTreeObject` - which would make it satisfy only
+/// `IUnityObjectBase` and lose its class-specific handlers.
+pub fn object_class_facts(
+    kind: &crate::processing::asset_factory::FactoryAssetKind,
+    class_id: i32,
+    has_payload: bool,
+) -> ObjectClassFacts {
+    use crate::processing::asset_factory::FactoryAssetKind;
+    match kind {
+        FactoryAssetKind::TypeTreeObject
+            if class_id == crate::resources::texture_array::TEXTURE3D_CLASS_ID =>
+        {
+            ObjectClassFacts::new(class_id, !has_payload)
+        }
+        FactoryAssetKind::TypeTreeObject => ObjectClassFacts::type_tree_object(class_id),
+        FactoryAssetKind::Unknown => ObjectClassFacts::with_known(class_id, false, false),
+        FactoryAssetKind::Unreadable => ObjectClassFacts::new(class_id, true),
+        FactoryAssetKind::Generated(_) => ObjectClassFacts::new(class_id, !has_payload),
+    }
+}
+
+#[cfg(test)]
+mod object_class_facts_tests {
+    use super::{class_satisfies_target, object_class_facts, ObjectClassFacts};
+    use crate::processing::asset_factory::FactoryAssetKind;
+    use crate::resources::texture_array::TEXTURE3D_CLASS_ID;
+
+    /// Every factory branch maps to the facts the rest of the exporter already assumed.
+    #[test]
+    fn the_factory_branches_map_to_the_expected_facts() {
+        // A generated class is known, and unreadable exactly when the payload failed.
+        assert_eq!(
+            object_class_facts(&FactoryAssetKind::Generated("Mesh".to_owned()), 43, true),
+            ObjectClassFacts::new(43, false)
+        );
+        assert_eq!(
+            object_class_facts(&FactoryAssetKind::Generated("Mesh".to_owned()), 43, false),
+            ObjectClassFacts::new(43, true)
+        );
+        // The TPK fallback is the dynamic object, which satisfies only `IUnityObjectBase`.
+        let dynamic = object_class_facts(&FactoryAssetKind::TypeTreeObject, 194, true);
+        assert_eq!(dynamic, ObjectClassFacts::type_tree_object(194));
+        assert!(!class_satisfies_target(dynamic, "IMesh"));
+        assert!(class_satisfies_target(dynamic, "IUnityObjectBase"));
+        // No generated class and no TPK entry.
+        assert_eq!(
+            object_class_facts(&FactoryAssetKind::Unknown, 999_999, true),
+            ObjectClassFacts::with_known(999_999, false, false)
+        );
+        // Unreadable is unreadable whatever the payload says.
+        assert_eq!(
+            object_class_facts(&FactoryAssetKind::Unreadable, 43, true),
+            ObjectClassFacts::new(43, true)
+        );
+    }
+
+    /// The `Texture3D` exception: a dynamic TypeTree object that keeps its generated interfaces.
+    #[test]
+    fn texture3d_decoded_through_a_type_tree_keeps_its_generated_interfaces() {
+        let facts = object_class_facts(&FactoryAssetKind::TypeTreeObject, TEXTURE3D_CLASS_ID, true);
+        assert_eq!(facts, ObjectClassFacts::new(TEXTURE3D_CLASS_ID, false));
+        assert!(
+            !facts.type_tree_object,
+            "a Texture3D must not be treated as a dynamic object"
+        );
+        // The point of the exception: its class-specific targets still match.
+        assert!(class_satisfies_target(facts, "ITexture3D"));
+
+        // A different class through the same branch stays dynamic.
+        let other = object_class_facts(&FactoryAssetKind::TypeTreeObject, 43, true);
+        assert!(other.type_tree_object);
+        assert!(!class_satisfies_target(other, "IMesh"));
+
+        // And a Texture3D with no payload is unreadable rather than dynamic.
+        assert_eq!(
+            object_class_facts(&FactoryAssetKind::TypeTreeObject, TEXTURE3D_CLASS_ID, false),
+            ObjectClassFacts::new(TEXTURE3D_CLASS_ID, true)
+        );
+    }
+}
+
 /// `ObjectHandlerStack.CalculateAssetHandlerStack` type matching for one registration target.
 pub fn class_satisfies_target(facts: ObjectClassFacts, target: &str) -> bool {
     if facts.type_tree_object {

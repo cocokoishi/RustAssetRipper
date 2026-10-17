@@ -1,5 +1,31 @@
 # Validation log
 
+## 2026-10-16 - Extracting the factory-to-facts rule before the primary-content adapter needed it
+
+- Outcome: lifted the `FactoryAssetKind` to `ObjectClassFacts` mapping out of the project walk's
+  object loop into `project_exporter::object_class_facts`, and pinned it with two tests. 1910 library
+  tests (up from 1908).
+- **Why now, and why it is not a refactor for its own sake.** The primary-content route needs exactly
+  these facts to build each object's handler stack, and the rule was inline in a 2,900-line function.
+  Reaching for it there would have meant either copying it or calling into the middle of the project
+  walk; either way the `Texture3D` special case would have been the thing that got lost. This is the
+  fourth time in this area that looking for the existing rule changed the shape of the change, and
+  the first time the answer was "it exists, so extract it".
+- **The rule, and the case that is easy to get wrong.** A generated class is known and unreadable
+  exactly when its payload failed; the TPK fallback is the dynamic `TypeTreeObject`, which satisfies
+  only `IUnityObjectBase`; `Unknown` is a class id with no generated type; `Unreadable` is unreadable
+  whatever the payload says. The exception is **`Texture3D`**: it has a source-generated collection
+  even when its fields were decoded through the owning TypeTree rather than a generated class body, so
+  it must not be classified as dynamic - treating it that way would make it satisfy only
+  `IUnityObjectBase` and silently lose its class-specific handlers. The test asserts
+  `ITexture3D` still matches while a Mesh through the same branch stays dynamic, and that a
+  `Texture3D` with no payload is unreadable rather than dynamic.
+- **The extraction is behaviour-preserving and the call site says so.** The project walk's inline
+  match became one call, with the comment pointing at the single definition. The full workspace suite
+  passed unchanged, which is the evidence that the move did not alter routing.
+- Evidence: `cargo test --locked --workspace` - **1910** library + 199 CLI tests, 0 failed, 1 ignored.
+  `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+
 ## 2026-10-16 - The primary-content export driver, and two probe contracts found by testing it
 
 - Outcome: added `src/export/primary_export.rs`, the step that connects the ported loop, destination

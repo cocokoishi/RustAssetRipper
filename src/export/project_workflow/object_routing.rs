@@ -1118,21 +1118,8 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
             if payload.is_some() && !opaque_objects.contains(&(file_index, object_index)) {
                 validate_decoded_object(object, object_info.path_id, reference_graph)?;
             }
-            let facts = match &object.factory.kind {
-                FactoryAssetKind::TypeTreeObject
-                    if class_id == crate::resources::texture_array::TEXTURE3D_CLASS_ID =>
-                {
-                    // Texture3D has a source-generated collection even when its fields were
-                    // decoded through the owning TypeTree instead of a generated class body.
-                    ObjectClassFacts::new(class_id, payload.is_none())
-                }
-                FactoryAssetKind::TypeTreeObject => ObjectClassFacts::type_tree_object(class_id),
-                FactoryAssetKind::Unknown => ObjectClassFacts::with_known(class_id, false, false),
-                FactoryAssetKind::Unreadable => ObjectClassFacts::new(class_id, true),
-                FactoryAssetKind::Generated(_) => {
-                    ObjectClassFacts::new(class_id, payload.is_none())
-                }
-            };
+            // The mapping, including the Texture3D special case, lives in one place.
+            let facts = object_class_facts(&object.factory.kind, class_id, payload.is_some());
             let shader_view = if source_engine_guid.is_none() && class_id == SHADER_CLASS_ID {
                 payload
                     .map(|payload| ShaderView::from_value(&payload.root))

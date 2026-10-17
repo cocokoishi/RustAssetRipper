@@ -91,8 +91,8 @@ use super::prefab_collection::{
 use super::project_exporter::{
     claim_facts_for_shader_text, execute_project_export_with_streams, export_extension_for,
     lighting_data_native_format_importer_for_version, mesh_native_format_importer_for_version,
-    native_format_importer_for_version, object_class_name, package_manifest_json,
-    project_version_file, select_collection_with_claim_facts,
+    native_format_importer_for_version, object_class_facts, object_class_name,
+    package_manifest_json, project_version_file, select_collection_with_claim_facts,
     shader_importer_for_version_with_non_modifiable_textures, ObjectClassFacts, PlannedProjectFile,
     PlannedProjectMeta, PlannedProjectPostExportFile, PlannedProjectStreamFile,
     PlannedProjectSupportFile, ProjectExportError, ProjectExportNotice, ProjectExportPlan,
