@@ -200,8 +200,9 @@
         // The cache is keyed by the mesh each node came from; the second node has a selection but
         // no decoded data, so it is skipped with a warning.
         let meshes = vec![(source_mesh(), triangle_mesh())];
-        let warnings = attach_plan_geometry(&mut document, &plan, &meshes, GlbBuildLimits::default())
-            .expect("geometry attaches");
+        let warnings =
+            attach_plan_geometry(&mut document, &plan, &meshes, GlbBuildLimits::default())
+                .expect("geometry attaches");
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(
             warnings[0].contains("WithoutData"),
@@ -274,9 +275,13 @@
         )
         .expect("the plan builds");
         let mut document = build_scene_document(&plan);
-        let warnings =
-            attach_plan_geometry(&mut document, &plan, &[(source_mesh(), triangle_mesh())], GlbBuildLimits::default())
-                .expect("geometry attaches");
+        let warnings = attach_plan_geometry(
+            &mut document,
+            &plan,
+            &[(source_mesh(), triangle_mesh())],
+            GlbBuildLimits::default(),
+        )
+        .expect("geometry attaches");
         assert!(warnings.is_empty(), "{warnings:?}");
 
         let json = {
@@ -327,9 +332,13 @@
         )
         .expect("the plan builds");
         let mut document = build_scene_document(&plan);
-        let warnings =
-            attach_plan_geometry(&mut document, &plan, &[(source_mesh(), triangle_mesh())], GlbBuildLimits::default())
-                .expect("an out-of-range selection is not fatal");
+        let warnings = attach_plan_geometry(
+            &mut document,
+            &plan,
+            &[(source_mesh(), triangle_mesh())],
+            GlbBuildLimits::default(),
+        )
+        .expect("an out-of-range selection is not fatal");
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains("sub-mesh 7"), "{warnings:?}");
         // Nothing was emitted, so the node keeps no mesh reference.
