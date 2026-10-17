@@ -1,6 +1,38 @@
 # RustAssetRipper hand-off — 2026-10-16
 
-## Latest current checkpoint - 2026-10-16 (primary-content export loop ported)
+## Latest current checkpoint - 2026-10-16 (primary-content pipeline complete)
+
+- **Ported `PrimaryContentExporter.CreateCollection`.** The primary-content pipeline is now complete
+  end to end: handler table -> `create_primary_content_collection` (dispatch) ->
+  `create_primary_content_collections` (assembly) -> `run_primary_content_export_loop` (export).
+- **An exhausted handler stack is an error, not an `Option`.** The source throws `There is no
+  exporter that can handle '<asset>'`; through the default registration that branch is unreachable
+  (`JsonContentExtractor` claims `IUnityObjectBase` first). It is kept as a loud error anyway,
+  because a fallback collection would silently drop a resource the moment a caller narrows the
+  stack. The `IUnityObjectBase` stack is asserted to be exactly `JsonContentExtractor` then
+  `DeletedAssetsExporter`.
+- **A duplicate is skipped before dispatch**, so a stack that would decline is never consulted
+  twice for the same asset. That is why resolution moved *inside* the assembly loop.
+- **Lesson worth keeping:** my first draft of the dispatch compiled while ignoring its arguments
+  and always returning the error - a placeholder that a test could have "passed" against. If a
+  function takes inputs it does not use, that is a bug, not a simplification.
+- **Next concrete step for the scene GLB:** give `export_scene_glb` a caller reachable from the
+  primary-content path, and resolve per-node geometry (the reference reaches a mesh through
+  `BuildParameters.TryGetOrMakeMeshData`, so the caller resolves each GameObject's
+  `MeshFilter`/`Renderer` and passes per-node `MeshData`). `EXP-GLB-001` and `EXP-GLB-SCENE-001`
+  share this work. The scene GLB belongs to the **primary-content** path
+  (`GameFileLoader.cs:96`, `/Export/PrimaryContent`), **not** the Unity project export.
+- **Never format `src/resources/glb_tests_01.rs`** (nor `main_tests_01.rs`/`main_tests_03.rs`).
+- **A GLB is binary: decode the JSON chunk before asserting on text** (12-byte header, then the
+  chunk header).
+- **When a feature a gap cell calls unported lands, re-check that cell in the same round** - four
+  cells have been wrong this way (`EXP-GLB-001` twice, `RES-MODEL-001`, `RES-BLENDSHAPE-001`).
+- Parity ledger: 407 rows, 381 verified, 26 non-verified, DUPES=0, MALFORMED=0, gate OPEN.
+- `/Scenes/View` and `/Export/PrimaryContent` both still return 501.
+- Corpus replays are local-only and have not run in these rounds.
+- Verified: **1870** library + 199 bin tests, 0 failed; warnings-denied Clippy exit 0.
+
+## Previous checkpoint - 2026-10-16 (primary-content export loop ported)
 
 - **Ported `PrimaryContentExporter.Export`** as `run_primary_content_export_loop`. The
   primary-content control flow is now complete end to end: handler table -> collection assembly ->

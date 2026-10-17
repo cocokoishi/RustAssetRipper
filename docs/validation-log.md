@@ -1,5 +1,34 @@
 # Validation log
 
+## 2026-10-16 - `CreateCollection` dispatch ported with its loud-failure contract
+
+- Outcome: ported `PrimaryContentExporter.CreateCollection`. The primary-content pipeline is now
+  complete: handler table -> dispatch -> assembly -> export loop. 1870 library tests.
+- **The interesting decision is what happens when nothing accepts.** The source throws
+  `There is no exporter that can handle '<asset>'`. Through the default registration that throw is
+  unreachable, because `RegisterHandler<IUnityObjectBase>(JsonContentExtractor)` is registered
+  first and claims anything remaining - so it would have been easy to treat the branch as dead and
+  return an `Option`. I kept it an error instead: a port that substituted a default collection
+  would silently drop a resource the moment a caller narrowed the stack, which is exactly the
+  "silent degradation" this objective forbids. The failure carries the asset identity and
+  reproduces the source's message text.
+- **I wrote a stub first and caught it before committing.** My initial draft of the dispatch took
+  its arguments, ignored them, and returned the error unconditionally - a placeholder dressed up as
+  an implementation. It compiled, which is the dangerous part; only re-reading it showed that a
+  test would have "passed" against a function that never walked anything. Replaced with a real
+  first-accepting-handler walk.
+- **Two wrong assumptions in my own tests were corrected by the code, not worked around:**
+  - I assumed the `IUnityObjectBase` stack had at least four handlers and staged a decline-three
+    test. It has **exactly two** - `JsonContentExtractor` first, `DeletedAssetsExporter` last - and
+    the test now asserts that exact pair, which is a stronger statement about the source anyway.
+  - The assembly loop no longer takes a pre-resolved extractor. Resolving *inside* the loop is what
+    makes the duplicate-skip rule observable: a duplicate is dropped **before** dispatch, so a stack
+    that would decline is never consulted twice for the same asset. That is now asserted.
+- Evidence: `cargo test --locked --workspace` - **1870** library (up from 1868) + 199 bin tests,
+  0 failed, 1 ignored. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+  `rustfmt --edition 2021 --check` on the changed file - clean. Parity: TOTAL=407, NONVERIFIED=26,
+  DUPES=0, MALFORMED=0, GATE=OPEN.
+
 ## 2026-10-16 - The primary-content export loop lands, with its counter semantics pinned
 
 - Outcome: ported `PrimaryContentExporter.Export` as `run_primary_content_export_loop`, completing

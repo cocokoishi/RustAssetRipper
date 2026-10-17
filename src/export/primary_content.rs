@@ -245,19 +245,15 @@ pub fn format_export_progress(one_based_current: usize, total: usize, name: &str
 
 /// One asset as `CreateCollections` sees it.
 ///
-/// The caller resolves the two questions the source answers by type tests: which extractor claims
-/// the asset, and which assets that extractor's collection would also claim. Keeping both as
-/// caller facts lets the assembly loop be exercised without building a whole game.
+/// The caller resolves the two questions the source answers by type tests: which collection the
+/// selected extractor would build, and what that collection is called. Keeping both as caller
+/// facts lets the assembly loop be exercised without building a whole game. *Which* extractor
+/// claims the asset is not a caller fact - [`create_primary_content_collection`] decides that by
+/// walking the handler stack, and its failure is the source's thrown exception.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PrimaryContentAsset<'a> {
     /// A stable identity for the `queued` set, which the source keys by asset reference.
     pub identity: u64,
-    /// The extractor the handler stack selects, or `None` when no handler claims the asset.
-    ///
-    /// `RegisterHandler<IUnityObjectBase>(JsonContentExtractor)` is registered first and the
-    /// deleted-asset handler last, so in practice a fetched asset always resolves; `None` models
-    /// the caller passing an asset the stack declined.
-    pub extractor: Option<&'static str>,
     /// True when the selected extractor produced an **empty** export collection.
     ///
     /// `EmptyExportCollection` results are dropped *without* queuing their remaining members,
@@ -314,9 +310,17 @@ impl PrimaryContentCollection {
 /// will not be reconsidered. And a non-empty collection queues **all** its members, so an asset
 /// claimed by an earlier collection is never exported twice even if a later handler would also
 /// accept it.
-pub fn create_primary_content_collections(
-    assets: &[PrimaryContentAsset],
-) -> Vec<PrimaryContentCollection> {
+///
+/// `resolve` is the caller's `CreateCollection`: given an asset it returns the extractor that
+/// claimed it, or the error the source throws when the stack is exhausted. Passing it in keeps the
+/// type tests and the collection construction - which need a whole game - outside this module,
+/// while the ordering rules above stay testable.
+pub fn create_primary_content_collections<'a>(
+    assets: &[PrimaryContentAsset<'_>],
+    mut resolve: impl FnMut(
+        &PrimaryContentAsset<'_>,
+    ) -> Result<&'a PrimaryHandlerRegistration, PrimaryContentNoHandler>,
+) -> Result<Vec<PrimaryContentCollection>, PrimaryContentNoHandler> {
     let mut queued: std::collections::HashSet<u64> = std::collections::HashSet::new();
     let mut collections = Vec::new();
     for asset in assets {
@@ -325,9 +329,7 @@ pub fn create_primary_content_collections(
         if !queued.insert(asset.identity) {
             continue;
         }
-        let Some(extractor) = asset.extractor else {
-            continue;
-        };
+        let registration = resolve(asset)?;
         if asset.is_empty_collection {
             // The empty check comes after the queue insert and skips the member queueing.
             continue;
@@ -337,13 +339,71 @@ pub fn create_primary_content_collections(
             queued.insert(*member);
         }
         collections.push(PrimaryContentCollection {
-            extractor,
+            extractor: registration.extractor,
             primary: asset.identity,
             assets: members,
             name: asset.collection_name.to_owned(),
         });
     }
-    collections
+    Ok(collections)
+}
+
+/// `CreateCollection` failed to find a handler for the asset.
+///
+/// The source throws `There is no exporter that can handle '<asset>'`. It is unreachable through
+/// the default registration because `RegisterHandler<IUnityObjectBase>(JsonContentExtractor)` is
+/// first and `DeletedAssetsExporter` is last, but the port keeps the failure loud rather than
+/// inventing a fallback: a silently-dropped asset would be a lost resource.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PrimaryContentNoHandler {
+    /// A stable identity for the asset, matching [`PrimaryContentAsset::identity`].
+    pub identity: u64,
+}
+
+impl core::fmt::Display for PrimaryContentNoHandler {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            formatter,
+            "There is no exporter that can handle asset {}",
+            self.identity
+        )
+    }
+}
+
+impl std::error::Error for PrimaryContentNoHandler {}
+
+/// The handler stack's answer for one asset: the first extractor that claims it.
+///
+/// `GetHandlerStack(asset.GetType())` returns the handlers registered for the asset's type and its
+/// bases in registration order, and `CreateCollection` takes the **first** whose
+/// `TryCreateCollection` succeeds.
+pub fn select_primary_content_extractor<'a>(
+    candidates: &[&'a PrimaryHandlerRegistration],
+    mut accepts: impl FnMut(&PrimaryHandlerRegistration) -> bool,
+) -> Option<&'a PrimaryHandlerRegistration> {
+    candidates
+        .iter()
+        .copied()
+        .find(|registration| accepts(registration))
+}
+
+/// `PrimaryContentExporter.CreateCollection` for one asset.
+///
+/// Walks `candidates` in order and returns the first handler whose `TryCreateCollection` reports
+/// success, or the error the source throws when every handler declined.
+///
+/// The failure is deliberately an error rather than a fallback. Through the default registration
+/// the stack can never be exhausted - `RegisterHandler<IUnityObjectBase>(JsonContentExtractor)` is
+/// registered first, so it claims any remaining asset - but a port that substituted a default
+/// collection here would silently drop a resource the moment a caller narrowed the stack, which is
+/// the class of bug this whole row is meant to rule out.
+pub fn create_primary_content_collection<'a>(
+    identity: u64,
+    candidates: &[&'a PrimaryHandlerRegistration],
+    mut try_create_collection: impl FnMut(&PrimaryHandlerRegistration) -> bool,
+) -> Result<&'a PrimaryHandlerRegistration, PrimaryContentNoHandler> {
+    select_primary_content_extractor(candidates, &mut try_create_collection)
+        .ok_or(PrimaryContentNoHandler { identity })
 }
 
 /// The number of collections the export loop reports progress against.
@@ -487,9 +547,12 @@ pub fn plan_single_export_paths(
 #[cfg(test)]
 mod tests {
     use super::{
-        create_primary_content_collections, format_export_progress, handlers_for_target,
-        plan_single_export_paths, primary_content_progress_total, run_primary_content_export_loop,
-        PrimaryContentAsset, PrimaryContentExportEvent, PrimaryContentExportStep, PRIMARY_HANDLERS,
+        create_primary_content_collection, create_primary_content_collections,
+        format_export_progress, handlers_for_target, plan_single_export_paths,
+        primary_content_progress_total, run_primary_content_export_loop,
+        select_primary_content_extractor, PrimaryContentAsset, PrimaryContentExportEvent,
+        PrimaryContentExportStep, PrimaryContentNoHandler, PrimaryHandlerRegistration,
+        PRIMARY_HANDLERS,
     };
     use crate::export::asset_path::{
         join_path, ExportAssetPathIdentity, ExportFileSystem, HostPathPlatform, UniqueNameState,
@@ -500,11 +563,7 @@ mod tests {
     ///
     /// The name is explicit so a test that asserts on a progress line says what it expects instead
     /// of depending on a naming rule hidden in this helper.
-    fn solo(
-        identity: u64,
-        extractor: &'static str,
-        name: &'static str,
-    ) -> PrimaryContentAsset<'static> {
+    fn solo(identity: u64, name: &'static str) -> PrimaryContentAsset<'static> {
         const ONE_2: [u64; 1] = [2];
         const ONE_3: [u64; 1] = [3];
         const ONE_6: [u64; 1] = [6];
@@ -518,11 +577,20 @@ mod tests {
         };
         PrimaryContentAsset {
             identity,
-            extractor: Some(extractor),
             is_empty_collection: false,
             collection_assets: members,
             collection_name: name,
         }
+    }
+
+    /// A resolver that always claims with `JsonContentExtractor`, which is the catch-all the
+    /// default registration puts first.
+    fn catch_all(
+        _asset: &PrimaryContentAsset<'_>,
+    ) -> Result<&'static PrimaryHandlerRegistration, PrimaryContentNoHandler> {
+        handlers_for_target("IUnityObjectBase")
+            .next()
+            .ok_or(PrimaryContentNoHandler { identity: 0 })
     }
 
     /// The assembly loop's two ordering rules, which are easy to get backwards.
@@ -533,15 +601,16 @@ mod tests {
         let empty_then_retry = [
             PrimaryContentAsset {
                 identity: 7,
-                extractor: Some("GlbModelExporter"),
                 is_empty_collection: true,
                 collection_assets: &[7],
                 collection_name: "Empty",
             },
-            solo(7, "JsonContentExtractor", "Seven"),
+            solo(7, "Seven"),
         ];
         assert!(
-            create_primary_content_collections(&empty_then_retry).is_empty(),
+            create_primary_content_collections(&empty_then_retry, catch_all)
+                .unwrap()
+                .is_empty(),
             "an asset queued by an empty collection is not reconsidered"
         );
 
@@ -551,38 +620,123 @@ mod tests {
         let claiming = [
             PrimaryContentAsset {
                 identity: 1,
-                extractor: Some("GlbModelExporter"),
                 is_empty_collection: false,
                 collection_assets: &members,
                 collection_name: "Model",
             },
-            solo(2, "JsonContentExtractor", "Two"),
-            solo(3, "JsonContentExtractor", "Three"),
-            solo(4, "JsonContentExtractor", "Four"),
+            solo(2, "Two"),
+            solo(3, "Three"),
+            solo(4, "Four"),
         ];
-        let collections = create_primary_content_collections(&claiming);
+        let collections = create_primary_content_collections(&claiming, catch_all).unwrap();
         let primaries: Vec<u64> = collections
             .iter()
             .map(|collection| collection.primary)
             .collect();
         assert_eq!(primaries, [1, 4], "members 2 and 3 were already claimed");
         assert_eq!(collections[0].assets, members.to_vec());
-        assert_eq!(collections[0].extractor, "GlbModelExporter");
+        assert_eq!(collections[0].extractor, "JsonContentExtractor");
         // The progress total counts all collections, which is the primary-content delta.
         assert_eq!(primary_content_progress_total(&collections), 2);
     }
 
-    /// An asset the handler stack declined is skipped without becoming a collection.
+    /// `CreateCollection` reports the source's exception when the stack is exhausted.
     #[test]
-    fn primary_content_assembly_skips_an_unclaimed_asset() {
+    fn primary_content_create_collection_reports_the_source_exception() {
+        let stack: Vec<&PrimaryHandlerRegistration> =
+            handlers_for_target("IUnityObjectBase").collect();
+        // A handler that claims the asset.
+        let selected = create_primary_content_collection(4, &stack, |registration| {
+            registration.extractor == "DeletedAssetsExporter"
+        })
+        .expect("the last handler accepts");
+        assert_eq!(selected.extractor, "DeletedAssetsExporter");
+        // A stack where nothing claims it: the message is the source's own text.
+        let error = create_primary_content_collection(4, &stack, |_| false).unwrap_err();
+        assert_eq!(error.identity, 4);
+        assert_eq!(
+            error.to_string(),
+            "There is no exporter that can handle asset 4"
+        );
+        // An empty stack is the same failure, not a panic.
+        let empty: [&PrimaryHandlerRegistration; 0] = [];
+        assert!(create_primary_content_collection(4, &empty, |_| true).is_err());
+    }
+
+    /// An exhausted handler stack is the source's thrown exception, not a skipped asset.
+    #[test]
+    fn primary_content_assembly_fails_loudly_when_no_handler_claims_an_asset() {
         let assets = [PrimaryContentAsset {
             identity: 9,
-            extractor: None,
             is_empty_collection: false,
             collection_assets: &[9],
             collection_name: "Unclaimed",
         }];
-        assert!(create_primary_content_collections(&assets).is_empty());
+        let error = create_primary_content_collections(&assets, |_| {
+            Err(PrimaryContentNoHandler { identity: 9 })
+        })
+        .unwrap_err();
+        assert_eq!(error.identity, 9);
+        assert_eq!(
+            error.to_string(),
+            "There is no exporter that can handle asset 9"
+        );
+        // A duplicate is skipped before dispatch, so a stack that would decline is never consulted
+        // for an asset an earlier collection already claimed.
+        let duplicate_then_unclaimed = [
+            PrimaryContentAsset {
+                identity: 9,
+                is_empty_collection: false,
+                collection_assets: &[9],
+                collection_name: "First",
+            },
+            PrimaryContentAsset {
+                identity: 9,
+                is_empty_collection: false,
+                collection_assets: &[9],
+                collection_name: "Second",
+            },
+        ];
+        let resolved = create_primary_content_collections(&duplicate_then_unclaimed, catch_all)
+            .expect("the duplicate never reaches the resolver twice");
+        assert_eq!(resolved.len(), 1);
+    }
+
+    /// `CreateCollection` takes the **first** handler that accepts, in stack order.
+    #[test]
+    fn primary_content_dispatch_takes_the_first_accepting_handler() {
+        let stack: Vec<&PrimaryHandlerRegistration> =
+            handlers_for_target("IUnityObjectBase").collect();
+        // Exactly two handlers claim the root interface: the JSON catch-all registered first and
+        // `DeletedAssetsExporter` registered last.
+        assert_eq!(
+            stack
+                .iter()
+                .map(|registration| registration.extractor)
+                .collect::<Vec<_>>(),
+            ["JsonContentExtractor", "DeletedAssetsExporter"],
+            "the IUnityObjectBase stack is the source's first and last registration"
+        );
+
+        // Accepting the first yields the catch-all, and the walk stops there.
+        let mut seen = 0;
+        let selected = select_primary_content_extractor(&stack, |_| {
+            seen += 1;
+            true
+        })
+        .expect("the first handler accepts");
+        assert_eq!(selected.extractor, "JsonContentExtractor");
+        assert_eq!(seen, 1, "the walk stops at the first accepting handler");
+
+        // Declining the first falls through to the second.
+        let selected = select_primary_content_extractor(&stack, |registration| {
+            registration.extractor == "DeletedAssetsExporter"
+        })
+        .expect("the last handler accepts");
+        assert_eq!(selected.extractor, "DeletedAssetsExporter");
+
+        // An entirely declining stack yields no selection rather than a default.
+        assert!(select_primary_content_extractor(&stack, |_| false).is_none());
     }
 
     /// A primary asset is claimed by its own collection even when the member list omits it.
@@ -590,12 +744,11 @@ mod tests {
     fn primary_content_assembly_keeps_the_primary_asset() {
         let assets = [PrimaryContentAsset {
             identity: 5,
-            extractor: Some("AudioContentExtractor"),
             is_empty_collection: false,
             collection_assets: &[5, 6],
             collection_name: "Audio",
         }];
-        let collections = create_primary_content_collections(&assets);
+        let collections = create_primary_content_collections(&assets, catch_all).unwrap();
         assert_eq!(collections.len(), 1);
         assert_eq!(collections[0].primary, 5);
         assert_eq!(collections[0].assets, [5, 6]);
@@ -605,12 +758,16 @@ mod tests {
     /// The export loop's progress counter spans **all** collections, not the exportable ones.
     #[test]
     fn primary_content_export_loop_indexes_over_every_collection() {
-        let collections = create_primary_content_collections(&[
-            solo(1, "JsonContentExtractor", "One"),
-            solo(2, "JsonContentExtractor", "Two"),
-            solo(3, "JsonContentExtractor", "Three"),
-            solo(4, "JsonContentExtractor", "Four"),
-        ]);
+        let collections = create_primary_content_collections(
+            &[
+                solo(1, "One"),
+                solo(2, "Two"),
+                solo(3, "Three"),
+                solo(4, "Four"),
+            ],
+            catch_all,
+        )
+        .unwrap();
         assert_eq!(collections.len(), 4);
         // Skip the first two: the loop still reports the third as (3/4), not (1/2).
         let steps: Vec<PrimaryContentExportStep<'_>> = collections
@@ -653,7 +810,7 @@ mod tests {
     #[test]
     fn primary_content_export_loop_reports_a_failed_collection() {
         let collections =
-            create_primary_content_collections(&[solo(7, "JsonContentExtractor", "Seven")]);
+            create_primary_content_collections(&[solo(7, "Seven")], catch_all).unwrap();
         let steps = [PrimaryContentExportStep {
             collection: &collections[0],
             exportable: true,
@@ -680,7 +837,7 @@ mod tests {
     #[test]
     fn primary_content_export_loop_is_silent_for_skipped_collections() {
         let collections =
-            create_primary_content_collections(&[solo(7, "JsonContentExtractor", "Seven")]);
+            create_primary_content_collections(&[solo(7, "Seven")], catch_all).unwrap();
         let steps = [PrimaryContentExportStep {
             collection: &collections[0],
             exportable: false,
