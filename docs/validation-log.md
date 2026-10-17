@@ -1,5 +1,31 @@
 # Validation log
 
+## 2026-10-16 - Auditing the pending routes, which corrected a claim I had made
+
+- Outcome: added a test that dispatches **every** route in `WEB_ROUTES` and pins the set that still
+  answers 501. It found **six** routes I had claimed were gone. 1927 library + 205 CLI tests.
+- **What I had claimed, and why it was wrong.** After wiring `/Scenes/View` I wrote that the port "no
+  longer has a single pending tree view" and let that stand as though no route were pending. The first
+  run of the audit listed `GET /ConfigurationFiles` and its five `POST /ConfigurationFiles/...` form
+  routes. The narrow claim was true - no *tree view* is pending - and the broader one was unchecked
+  and false. **A claim about "everything else is done" needs a check, not a sentence.**
+- **The test pins the gap rather than asserting it is empty.** `PINNED_PENDING` lists the six, and the
+  test fails both when a route falls back to the pending page and when the list stops matching. So
+  wiring one of them fails until the list is updated, which is what keeps the ledger's pending list
+  from drifting away from the code - the failure mode this round was an instance of.
+- **The ledger already knew.** `PRODUCT-CONFIG-001`'s evidence cell says the DataSet subsystem claim
+  was false and that `/ConfigurationFiles` and its five posts remain open. The code and the ledger
+  disagreed with my summary, not with each other; the audit now holds the two together.
+- **The configuration-files feature is bounded, and I established its shape for the next round.**
+  `AssetRipper.Configuration` is about 300 lines across fifteen small files: a keyed map of singleton
+  texts and a keyed map of string lists, with `Clear` resetting every entry's value rather than
+  removing keys. **The two storages are not persisted** - they are in-memory configuration, and the
+  three settings records live in them in the baseline while the port models those directly - so the
+  port needs the model on the state, a page with two tabs, and the five handlers. No settings-file
+  change is required, which is why this is a page feature rather than a persistence one.
+- Evidence: `cargo test --locked --workspace` - **1927** library + **205** CLI tests, 0 failed, 1
+  ignored. `cargo clippy --workspace --all-targets --locked -- -D warnings` - exit 0.
+
 ## 2026-10-16 - `/Scenes/View` is wired, and no tree view is pending any more
 
 - Outcome: implemented `/Scenes/View` (the last route that answered 501), deleted the two helpers that

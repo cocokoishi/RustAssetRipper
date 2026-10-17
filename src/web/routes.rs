@@ -2038,6 +2038,51 @@ mod tests {
         }
     }
 
+    /// Every declared route is answered by a handler, except the pinned configuration-files gap.
+    ///
+    /// **This is the audit `PRODUCT-GUI-001` needs, and it corrected me.** After `/Scenes/View` was
+    /// wired I wrote that the port "no longer has a pending tree view" and let that stand as if no
+    /// route were pending; the first run of this test listed **six** still-pending routes, all in the
+    /// configuration-files group. The distinction is real - no *tree view* is pending - but the
+    /// broader claim was not checked and was wrong.
+    ///
+    /// The expected set is pinned rather than asserted empty: a route added to the table without a
+    /// handler, or one of these six wired without updating this list, fails the test. That is what
+    /// keeps the ledger's pending list from drifting away from the code.
+    #[test]
+    fn only_the_pinned_configuration_files_routes_are_still_pending() {
+        use assetripper::product::{RouteMethod, WEB_ROUTES};
+
+        // The configuration-files pages and their five form posts. `PRODUCT-CONFIG-001` owns them.
+        const PINNED_PENDING: [&str; 6] = [
+            "GET /ConfigurationFiles",
+            "POST /ConfigurationFiles/Singleton/Add",
+            "POST /ConfigurationFiles/Singleton/Remove",
+            "POST /ConfigurationFiles/List/Add",
+            "POST /ConfigurationFiles/List/Remove",
+            "POST /ConfigurationFiles/List/Replace",
+        ];
+
+        let mut pending = Vec::new();
+        for route in WEB_ROUTES {
+            let method = match route.method {
+                RouteMethod::Get => "GET",
+                RouteMethod::Post => "POST",
+            };
+            let mut state = state();
+            if status(&mut state, method, route.path) == 501 {
+                pending.push(format!("{method} {}", route.path));
+            }
+        }
+        pending.sort();
+        let mut expected = PINNED_PENDING.to_vec();
+        expected.sort();
+        assert_eq!(
+            pending, expected,
+            "the pending set changed: wire the route and update PINNED_PENDING, or add the handler"
+        );
+    }
+
     fn request_with_body(target: &str, body: &str) -> Request {
         let text = format!(
             "POST {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n{body}",
