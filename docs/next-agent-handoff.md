@@ -1,6 +1,32 @@
 # RustAssetRipper hand-off — 2026-10-17
 
-## Latest current checkpoint - 2026-10-17 (the scene GLB geometry is reference-anchored)
+## Latest current checkpoint - 2026-10-17 (the scene view is covered end to end)
+
+- **`PRODUCT-GUI-001`'s `/Scenes/View` render path is now covered, and the collection page
+  gained the baseline's Scene section.** The reference's `Collections/ViewPage` renders a
+  `Localization.Scene` heading and a `ScenePath` link when `Collection.IsScene`; the port's
+  `collection_page` now takes the scene definition's display name and renders the same section,
+  with `scene_name_for_collection` resolving it from the cached scene-definition pass that
+  `collections_view` now triggers on first use (it was only triggered by `/Scenes/View` before).
+- **The web e2e fixture carries a real scene collection.** `make_occlusion_settings_file` in
+  `crate::tests` was promoted to `pub(super)` and its payload corrected to the **production**
+  class-29 release layout (36 bytes: GUID + `m_OcclusionCullingData` + two empty pointer vectors).
+  A shorter 16-byte payload decodes as truncated under the source TPK tree the factory prefers over
+  any file TypeTree, so the scene GUID read as absent; the embedded file TypeTree now mirrors the
+  36-byte shape for the synthetic-layout tests.
+- **The e2e test asserts the whole path**: the `z-zone.assets` collection page renders
+  `<h2>Scene</h2>` and one `/Scenes/View?Path=` link named after the definition; the resolved scene
+  page renders the name, the `Assets/Scenes/z-zone.assets` collection-name-fallback path, the
+  preserved GUID `4433221188776655ccbbaa9900ffeedd`, and a link back to the collection; a non-scene
+  collection renders no Scene section.
+- Verified by GitHub Actions (the local machine is not used for compute): the `Rust CI` run for the
+  commit must be green before this unit counts.
+- **Next:** keep working the wrap-up plan - the primary-content extractor layer's script producer
+  (blocked on the decompiler decision), the remaining `实现中` rows with `RES-TEXTURE-001` /
+  `EXPORT-UNITY-001` first, `PRODUCT-CONFIG-001`'s data-set subsystem, the `EXP-GLB-*` production
+  wiring, then the 22-sample local replay and `docs/acceptance-corpus.md` refresh.
+
+## Previous checkpoint - 2026-10-17 (the scene GLB geometry is reference-anchored)
 
 - **The probe's `mesh` mode closes `SCOPE-GLB-SCENE-ANCHORING-001`.** `tools/probes/res-glb`
   gained a `mesh` case that builds a class-43 `Mesh` with one Float32 dimension-3 vertex channel

@@ -628,20 +628,24 @@ fn tree_link(html: &mut Html, href: &str, name: &str) {
     html.close("a");
 }
 
-/// The collection page: the collection name, its bundle, and the asset table.
+/// The collection page: the collection name, its bundle, its scene link, and the asset table.
 ///
 /// `position` addresses the collection in the bundle at `bundle_index` and `path` is its
 /// `CollectionPath`. The table keeps the frozen columns (path ID, class, name) with one
 /// linked row per asset; the class filter, the page control and the client script have no
-/// port counterpart (the server renders every row with no client code), and the scene and
-/// dependency sections wait for their own data ports. A `None` return means the tree
-/// disagrees with the resolved position.
+/// port counterpart (the server renders every row with no client code). `scene` is the scene
+/// definition's display name when the collection is a scene, so the page renders the same
+/// `Localization.Scene` section and `ScenePath` link the baseline's `Collection.IsScene`
+/// branch adds; it is `None` for a non-scene collection. The collection dependency section
+/// still waits for its own data port. A `None` return means the tree disagrees with the
+/// resolved position.
 pub fn collection_page(
     state: &WebState,
     tree: &super::tree::BundleTree,
     bundle_index: usize,
     position: usize,
     path: &assetripper::web_paths::CollectionPath,
+    scene: Option<&str>,
 ) -> Option<String> {
     use assetripper::web_paths::{asset_view_url, bundle_view_url};
 
@@ -652,6 +656,17 @@ pub fn collection_page(
 
     inner.element("h2", &[], &t(state, "bundle"));
     tree_link(&mut inner, &bundle_view_url(&path.bundle), &bundle.name);
+
+    // The baseline links a scene collection to its `ScenePath` view under a Scene heading.
+    if let Some(scene_name) = scene {
+        use assetripper::web_paths::{scene_view_url, ScenePath};
+        inner.element("h2", &[], &t(state, "scene"));
+        tree_link(
+            &mut inner,
+            &scene_view_url(&ScenePath::from(path.clone())),
+            scene_name,
+        );
+    }
 
     if !collection.assets.is_empty() {
         inner.element("h2", &[], &t(state, "assets"));

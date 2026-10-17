@@ -1588,26 +1588,50 @@
         file
     }
 
-    fn make_occlusion_settings_file(scene_guid: [u32; 4]) -> Vec<u8> {
+    /// Build a class-29 `OcclusionCullingSettings` SerializedFile at 2019.4.
+    ///
+    /// The collection it forms is a scene (the class ID is one of the four
+    /// `LevelGameManager` classes), and its `m_SceneGUID` words are what the scene
+    /// definition preserves. Shared with the web scene-view coverage, which needs a
+    /// committed scene collection to render the definition page.
+    ///
+    /// The payload follows the **production** class-29 release layout (36 bytes: the GUID, the
+    /// occlusion-data pointer, and the two renderer/portal pointer vectors). The asset factory
+    /// prefers the source TPK tree over any file TypeTree, so a shorter hand-written payload
+    /// decodes as truncated and the GUID reads as absent; the embedded file TypeTree mirrors the
+    /// same 36-byte shape for the synthetic-layout tests that use it instead.
+    pub(super) fn make_occlusion_settings_file(scene_guid: [u32; 4]) -> Vec<u8> {
         let mut string_buffer = Vec::new();
         let root_type = push_type_tree_string(&mut string_buffer, "OcclusionCullingSettings");
         let empty_name = push_type_tree_string(&mut string_buffer, "");
         let guid_type = push_type_tree_string(&mut string_buffer, "GUID");
         let scene_guid_name = push_type_tree_string(&mut string_buffer, "m_SceneGUID");
-        let uint32_type = push_type_tree_string(&mut string_buffer, "UInt32");
+        let uint32_type = push_type_tree_string(&mut string_buffer, "unsigned int");
         let word_names = [
-            push_type_tree_string(&mut string_buffer, "m_Data_0_"),
-            push_type_tree_string(&mut string_buffer, "m_Data_1_"),
-            push_type_tree_string(&mut string_buffer, "m_Data_2_"),
-            push_type_tree_string(&mut string_buffer, "m_Data_3_"),
+            push_type_tree_string(&mut string_buffer, "data[0]"),
+            push_type_tree_string(&mut string_buffer, "data[1]"),
+            push_type_tree_string(&mut string_buffer, "data[2]"),
+            push_type_tree_string(&mut string_buffer, "data[3]"),
         ];
+        let pptr_type = push_type_tree_string(&mut string_buffer, "PPtr<OcclusionCullingData>");
+        let data_name = push_type_tree_string(&mut string_buffer, "m_OcclusionCullingData");
+        let file_id_name = push_type_tree_string(&mut string_buffer, "m_FileID");
+        let path_id_name = push_type_tree_string(&mut string_buffer, "m_PathID");
+        let int_type = push_type_tree_string(&mut string_buffer, "int");
+        let sint64_type = push_type_tree_string(&mut string_buffer, "SInt64");
+        let vector_type = push_type_tree_string(&mut string_buffer, "vector");
+        let array_type = push_type_tree_string(&mut string_buffer, "Array");
+        let size_name = push_type_tree_string(&mut string_buffer, "size");
+        let static_renderers_name =
+            push_type_tree_string(&mut string_buffer, "m_StaticRenderers");
+        let portals_name = push_type_tree_string(&mut string_buffer, "m_Portals");
 
         let mut metadata = Vec::new();
         metadata.extend_from_slice(b"2019.4.0f1\0");
         put_u32_le(&mut metadata, 0);
         put_i32_le(&mut metadata, 1);
         put_i32_le(&mut metadata, 29);
-        put_i32_le(&mut metadata, 6);
+        put_i32_le(&mut metadata, 15);
         put_i32_le(&mut metadata, i32::try_from(string_buffer.len()).unwrap());
         put_node(&mut metadata, 0, root_type, empty_name, -1, 0);
         put_node(&mut metadata, 1, guid_type, scene_guid_name, 16, 1);
@@ -1621,13 +1645,22 @@
                 i32::try_from(index + 2).unwrap(),
             );
         }
+        put_node(&mut metadata, 1, pptr_type, data_name, 12, 6);
+        put_node(&mut metadata, 2, int_type, file_id_name, 4, 7);
+        put_node(&mut metadata, 2, sint64_type, path_id_name, 8, 8);
+        put_node(&mut metadata, 1, vector_type, static_renderers_name, -1, 9);
+        put_node(&mut metadata, 2, array_type, empty_name, -1, 10);
+        put_node(&mut metadata, 3, int_type, size_name, 4, 11);
+        put_node(&mut metadata, 1, vector_type, portals_name, -1, 12);
+        put_node(&mut metadata, 2, array_type, empty_name, -1, 13);
+        put_node(&mut metadata, 3, int_type, size_name, 4, 14);
         metadata.extend_from_slice(&string_buffer);
 
         put_u32_le(&mut metadata, 0);
         put_i32_le(&mut metadata, 1);
         put_i32_le(&mut metadata, 42);
         put_u32_le(&mut metadata, 0);
-        put_i32_le(&mut metadata, 16);
+        put_i32_le(&mut metadata, 36);
         put_i32_le(&mut metadata, 29);
         put_u16_le(&mut metadata, 29);
         put_u16_le(&mut metadata, 0);
@@ -1639,6 +1672,8 @@
         for word in scene_guid {
             put_u32_le(&mut payload, word);
         }
+        // 16-byte GUID + 12-byte pointer + two empty pointer vectors (4 + 4) = 36 bytes.
+        payload.resize(36, 0);
         let file_size = data_offset + payload.len();
         let mut file = Vec::with_capacity(file_size);
         file.extend_from_slice(&i32::try_from(metadata.len()).unwrap().to_be_bytes());

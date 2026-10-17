@@ -430,23 +430,59 @@ fn collections_view(state: &mut WebState, request: &Request) -> Response {
         Ok(path) => path,
         Err(response) => return response,
     };
-    let Some(tree) = loaded_tree(state) else {
-        return Response::internal_error("A game is loaded but its bundle tree is missing.");
+    // Resolve the collection address first; the scene-definition pass below needs a mutable
+    // borrow of the state, so the tree borrow must end before it runs.
+    let address = {
+        let Some(tree) = loaded_tree(state) else {
+            return Response::internal_error("A game is loaded but its bundle tree is missing.");
+        };
+        tree.resolve_collection(&path)
     };
-    let Some((bundle_index, position)) = tree.resolve_collection(&path) else {
+    let Some((bundle_index, position)) = address else {
         return Response::text(format!(
             "Asset collection could not be resolved: {}",
             path.to_diagnostic()
         ))
         .with_status(404);
     };
-    match pages::collection_page(state, tree, bundle_index, position, &path) {
+    // The baseline reads `Collection.Scene` directly; the port computes the scene-definition
+    // pass once and caches it, then names the scene the same way.
+    state.ensure_scene_definitions();
+    let scene_name = scene_name_for_collection(state, bundle_index, position);
+    let Some(tree) = loaded_tree(state) else {
+        return Response::internal_error("A game is loaded but its bundle tree is missing.");
+    };
+    match pages::collection_page(
+        state,
+        tree,
+        bundle_index,
+        position,
+        &path,
+        scene_name.as_deref(),
+    ) {
         Some(page) => Response::html(page),
         None => Response::internal_error(format!(
             "The bundle tree disagrees with the resolved path {}.",
             path.to_diagnostic()
         )),
     }
+}
+
+/// The scene definition's display name for a collection, when the collection is a scene.
+///
+/// Reads the cached scene definitions, so it must run after [`WebState::ensure_scene_definitions`].
+/// A non-scene collection, a missing definition, or a pass that could not run all yield `None`, which
+/// leaves the page without a Scene section rather than inventing a link.
+fn scene_name_for_collection(
+    state: &WebState,
+    bundle_index: usize,
+    position: usize,
+) -> Option<String> {
+    let tree = loaded_tree(state)?;
+    let file_index = tree.collection_file_index(bundle_index, position)?;
+    let definitions = state.scene_definitions()?;
+    let scene_index = definitions.scene_index_for_collection(file_index)?;
+    Some(definitions.definitions().get(scene_index)?.plan.name.clone())
 }
 
 /// `GET /Assets/View`: render the resolved asset's information section.
@@ -1229,8 +1265,8 @@ mod tests {
         // The probe input lives under the ignored `target/` scratch tree, like the
         // other repository tests' temporary inputs.
         use crate::tests::{
-            make_font_file, make_generated_audio_clip_file, make_production_mesh_file,
-            make_reference_texture_file, make_video_clip_file,
+            make_font_file, make_generated_audio_clip_file, make_occlusion_settings_file,
+            make_production_mesh_file, make_reference_texture_file, make_video_clip_file,
         };
 
         /// The video clip's external-resource range points at the probe resource input, so the
@@ -1329,6 +1365,16 @@ mod tests {
         let mesh_input = directory.join("z-mesh.assets");
         std::fs::write(&mesh_input, make_production_mesh_file())
             .expect("the mesh asset is written");
+        // A class-29 `OcclusionCullingSettings` file: its collection is a scene, so the
+        // collection page renders the Scene section and `/Scenes/View` renders the definition
+        // with the preserved GUID. The name sorts last, so it appends to the root collection list
+        // without shifting the other fixtures' indices.
+        let scene_input = directory.join("z-zone.assets");
+        std::fs::write(
+            &scene_input,
+            make_occlusion_settings_file([0x1122_3344, 0x5566_7788, 0x99aa_bbcc, 0xddee_ff00]),
+        )
+        .expect("the scene asset is written");
         // A VideoClip whose external-resource range names the probe resource input, so the
         // video fixture is exercised against a real class-329 payload end to end. The range
         // must match the resource exactly, so it reuses the probe bytes' own length.
@@ -1359,6 +1405,7 @@ mod tests {
                     font_input.to_string_lossy().into_owned(),
                     video_input.to_string_lossy().into_owned(),
                     mesh_input.to_string_lossy().into_owned(),
+                    scene_input.to_string_lossy().into_owned(),
                     failed_input.to_string_lossy().into_owned(),
                 ])
                 .expect("the probe inputs load");
@@ -1454,7 +1501,8 @@ mod tests {
                     "z-textasset.assets",
                     "z-texture.assets",
                     "z-unknown.assets",
-                    "z-video.assets"
+                    "z-video.assets",
+                    "z-zone.assets"
                 ]
             );
 
@@ -1678,6 +1726,55 @@ mod tests {
                 response.body(),
                 b"Asset could not be resolved: AssetPath { CollectionPath = CollectionPath { BundlePath = {\"P\":[0]}, Index = 0 }, PathID = 999999 }"
             );
+
+            // A class-29 scene collection renders the Scene section the baseline's
+            // `Collection.IsScene` branch adds, and its `/Scenes/View` link renders the scene
+            // definition. The definitions come from the scene-definition pass, which the
+            // collection page triggers on first use and the scene view reads from the cache.
+            let scene_view = format!(
+                "/Collections/View?Path={}",
+                url_encode("{\"B\":{\"P\":[]},\"I\":7}")
+            );
+            let response = get(&mut state, &scene_view);
+            assert_eq!(response.status(), 200);
+            let scene_collection =
+                String::from_utf8(response.body().to_vec()).expect("pages are UTF-8");
+            assert!(
+                scene_collection.contains("<h1>z-zone.assets</h1>"),
+                "{scene_collection}"
+            );
+            assert!(
+                scene_collection.contains("<h2>Scene</h2>"),
+                "{scene_collection}"
+            );
+            assert_eq!(
+                anchor_texts(&scene_collection, "/Scenes/View?Path="),
+                ["z-zone.assets"],
+                "{scene_collection}"
+            );
+            let scene_hrefs = anchor_hrefs(&scene_collection, "/Scenes/View?Path=");
+            assert_eq!(scene_hrefs.len(), 1, "{scene_collection}");
+            let response = get(&mut state, &scene_hrefs[0]);
+            assert_eq!(response.status(), 200);
+            let scene_page = String::from_utf8(response.body().to_vec()).expect("pages are UTF-8");
+            assert!(scene_page.contains("<h1>z-zone.assets</h1>"), "{scene_page}");
+            // Without BuildSettings the path falls back to the collection name under Assets/Scenes.
+            assert!(
+                scene_page.contains("Assets/Scenes/z-zone.assets"),
+                "{scene_page}"
+            );
+            // `UnityGuid.ToString` renders each word's nibbles least-significant first.
+            assert!(
+                scene_page.contains("4433221188776655ccbbaa9900ffeedd"),
+                "{scene_page}"
+            );
+            // The collections list links back to the scene collection.
+            let scene_collection_back = anchor_hrefs(&scene_page, "/Collections/View?Path=");
+            assert_eq!(scene_collection_back.len(), 1, "{scene_page}");
+            assert_eq!(scene_collection_back[0], scene_view, "{scene_page}");
+
+            // A resolved non-scene collection renders no Scene section.
+            assert!(!collection.contains("<h2>Scene</h2>"), "{collection}");
 
             // The texture collection's single asset serves a real PNG. The asset page
             // advertises it and the image route returns the encoded pixels, so the tab is
