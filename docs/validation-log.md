@@ -1,5 +1,35 @@
 # Validation log
 
+## 2026-10-16 - Blend-shape frame decoding is a baseline boundary, not a port gap
+
+- Outcome: `RES-BLENDSHAPE-001` listed "MeshData geometry and frame/delta/weight decoding" among
+  its remaining work. Investigating it showed the **baseline never decodes that data at all**, so
+  the item does not belong on a list of things to port. The row keeps 已实现但未验证 for its real
+  remaining gaps.
+- **The evidence is exhaustive rather than a spot check.** A search of the whole frozen `Source`
+  tree for blend-shape consumers returns exactly **two** hits, both name resolution:
+  `BlendShapeDataExtensions.FindShapeNameByCRC` and the modern/legacy branches of
+  `MeshExtensions.FindBlendShapeNameByCRC`. Nothing reads `m_Frames`, `m_DeltaVertices`,
+  `m_DeltaNormals` or `m_FullWeights`, and the GLB export module contains no morph-target code -
+  which matches the independent finding recorded against `EXP-GLB-001` earlier. Decoding those
+  fields would be *beyond* the baseline.
+- **I also checked whether the port wires the one consumer, and initially mis-read the answer.**
+  `blend_shape_attribute_name` appeared to have no production caller, which looked like a missing
+  integration. It does not call itself; it is a lower-level helper. The real path is
+  `converter.rs`'s `BindingCustomType::BLEND_SHAPE` branch, which asks
+  `AnimationSceneFacts::blend_shape_name` for the resolved name, and the production implementor
+  serves it from a table populated by the real resolver. **A helper with no direct caller is not
+  evidence of a missing path** - I checked the caller chain before writing anything down, and the
+  path is complete.
+- **This is the third stale-claim correction across these rows**, after `EXP-GLB-001` and
+  `RES-MODEL-001`. The recurring shape is the same: a gap cell listing an *unimplemented upstream
+  feature* alongside genuine port gaps, where the two need different dispositions. When a row names
+  something as unported, the first question is whether the baseline implements it at all.
+- What genuinely remains for the row: real animation binding and export over a real sample, other
+  versioned layouts, and Unity-produced mesh validation.
+- Evidence: `cargo test --locked --workspace` unchanged at 1862 library + 199 bin tests, 0 failed,
+  1 ignored. Parity: TOTAL=406, NONVERIFIED=25, DUPES=0, MALFORMED=0, GATE=OPEN.
+
 ## 2026-10-16 - Both Crunch dispatch branches proven load-bearing by the reference runtime
 
 - Outcome: `RES-TEXTURE-CRUNCH-001` claimed "multi-face/multi-mip payloads ... remain unverified".

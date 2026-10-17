@@ -1,6 +1,35 @@
 # RustAssetRipper hand-off — 2026-10-16
 
-## Latest current checkpoint - 2026-10-16 (Crunch dispatch proven load-bearing)
+## Latest current checkpoint - 2026-10-16 (blend-shape frames are a baseline boundary)
+
+- `RES-BLENDSHAPE-001` listed "MeshData geometry and frame/delta/weight decoding" as remaining
+  work. **The baseline never decodes that data**, so it is a baseline boundary rather than a port
+  gap, and the cell is corrected. The row keeps 已实现但未验证 for its real gaps (real animation
+  binding/export over a real sample, other versioned layouts, Unity-produced mesh validation).
+- **Evidence is exhaustive:** the frozen `Source` tree references blend-shape data in exactly two
+  places, both name resolution. Nothing reads `m_Frames`, `m_DeltaVertices`, `m_DeltaNormals` or
+  `m_FullWeights`, and the GLB module has no morph-target code - matching the independent finding
+  already recorded on `EXP-GLB-001`.
+- **A methodological note that cost me a false start:** `blend_shape_attribute_name` looked like it
+  had no production caller, i.e. a missing integration. It is a *lower-level helper*; the real path
+  runs `converter.rs` -> `BindingCustomType::BLEND_SHAPE` -> `AnimationSceneFacts::blend_shape_name`
+  -> a table populated by the real resolver. **A helper with no direct caller is not evidence of a
+  missing path.** Follow the caller chain before writing down a finding.
+- **This is the third stale-claim correction on these rows** (after `EXP-GLB-001` and
+  `RES-MODEL-001`). The recurring shape: a gap cell mixing an *unimplemented upstream feature* with
+  genuine port gaps. **When a row says something is unported, first ask whether the baseline
+  implements it at all.**
+- **Next candidates, in order:** `RES-TEXTURE-001` (`实现中`), the scene export's real-file
+  verification (`EXP-GLB-SCENE-001`), `PROC-ANIM-*`.
+- **Never format `src/resources/glb_tests_01.rs`** (nor `main_tests_01.rs`/`main_tests_03.rs`).
+- **A GLB is binary: decode the JSON chunk before asserting on text** (12-byte header, then the
+  chunk header).
+- Parity ledger: 406 rows, 381 verified, 25 non-verified, DUPES=0, MALFORMED=0, gate OPEN.
+- `/Scenes/View` still returns 501 (`load_game` does not run `process_workspace_scenes_and_prefabs`).
+- Corpus replays are local-only and have not run in these rounds.
+- Verified: **1862** library + 199 bin tests, 0 failed; warnings-denied Clippy exit 0.
+
+## Previous checkpoint - 2026-10-16 (Crunch dispatch proven load-bearing)
 
 - **The Crunch dispatch is now cross-checked against the reference runtime**, not taken on faith.
   `tools/probes/crunch-faces` loads the shipped `AssetRipper.Conversions.Crunch.dll` and
