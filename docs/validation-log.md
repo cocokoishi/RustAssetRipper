@@ -1,5 +1,35 @@
 # Validation log
 
+## 2026-10-16 - Three parts of the primary-content collection contract that must NOT be ported
+
+- Outcome: closed the primary-content pipeline audit by establishing that its observable contract is
+  fully modelled, and by naming the three parts that are unobservable or dead. Recording those is the
+  point: each is a plausible next task that would produce code nobody can verify.
+- **The observable contract is complete.** The `Exportable` gate with no progress line for a skipped
+  collection, the one-based `(i + 1)/count` line over *all* collections, the `Failed` event for a
+  collection whose `Export` returns false, the empty-collection drop without queueing its members, the
+  single-asset path planner with the full file-name budget, and the caller-supplied membership list
+  are all ported and tested.
+- **Not a gap 1: `ExportAsset` never runs.** `ExportCollectionBase.ExportAsset` is `protected` and has
+  **no callers anywhere** in `AssetRipper.Export.PrimaryContent`. Its distinguishing habit - it calls
+  `ContentExtractor.Export(...)` and **discards the return value**, so an inner failure does not
+  propagate - therefore never executes. Porting it would be porting dead code.
+- **Not a gap 2: the secondary-asset bookkeeping is unobservable.** `MultipleExportCollection` adds
+  non-main assets to a `HashSet`, and `AddAsset` skips the main asset by reference. That set reaches
+  only `CreateCollections`'s `queued` set, which is itself a set, so neither the deduplication nor the
+  enumeration order can change any output. The order could not be reproduced faithfully in any case,
+  since it depends on .NET hash codes. The port takes membership as a caller-supplied list and says so,
+  which is the correct shape rather than a shortcut.
+- **Not a gap 3: the throwing `Export` is unreachable.** `DeletedAssetsExportCollection.Export` throws
+  `NotSupportedException`, but its `Exportable` is false, so the loop never calls it. The port's
+  `exportable` flag prevents the call structurally, which is stronger than reproducing the throw.
+- **What this leaves.** The pipeline's remaining work is the route and the per-extractor payload
+  production against the asset model - the same dependency that `EXP-GLB-SCENE-001` and
+  `PRODUCT-PRIMARY-CONTENT-EXTRACTORS-001` share. The script half of it additionally waits on the
+  decompiler decision (`TYPE-SCRIPT-DECOMPILE-001`).
+- Evidence: ledger 409 rows, 已验证 380, 实现中 7, 已实现但未验证 20, 受外部条件阻塞 2, MALFORMED=0,
+  DUPES=0. Test suite unchanged at 1897 library + 199 CLI, 0 failed.
+
 ## 2026-10-16 - The scene GLB has exactly one entry point, and it is not the project export
 
 - Outcome: audited the remaining six 实现中 rows, and pinned where the scene GLB's production caller
