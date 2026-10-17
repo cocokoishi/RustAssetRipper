@@ -1,5 +1,47 @@
 # Validation log
 
+## 2026-10-16 - .NET-semantics sweep: the coverage inventory, and why two heuristics failed
+
+- Outcome: completed the first pass of the sweep for "expectations derived from the implementation"
+  across the surfaces that emulate .NET behaviour. Result: **the surfaces are broadly covered by
+  runtime evidence**; the four defects found were concentrated in the JSON walker, which was an
+  outlier. The inventory below is the durable artefact - future rounds should extend it rather than
+  re-derive it.
+- **Coverage inventory (behaviour → evidence).** Every row is runtime-derived, not inferred:
+  - `float`/`double` `ToString(invariant)` → `float_tostring_fixture.txt` (28 rows) plus the
+    probe-documented inline cases in `unity_yaml`; the JSON walker now delegates to that one
+    implementation.
+  - `UnityGuid.ToString` nibble order → `guid_fixture.txt` plus
+    `reference_assemblies::source_unity_guid_parser_preserves_word_nibble_order`.
+  - `Guid` ↔ System byte order → `unity_guid_byte_conversion_matches_the_package_rule`.
+  - `HttpUtility.JavaScriptStringEncode` → `json_escape_fixture.txt` (34 rows, added this session).
+  - YAML scalar quoting/escaping → the probe-backed case table in
+    `unity_yaml::scalar_quoting_matches_the_reference_yaml_runtime`, whose probe configuration and
+    command are recorded in this log. It already caught a `-` + non-space-whitespace divergence.
+  - `Hash128` rendering → `hash128_fixture.txt` (7 rows).
+  - File-name and path rules → `file_names_fixture.txt` (86 rows).
+  - Matrix/vector/bounds/rect/color and the texture/mesh/animation/container/metadata families →
+    their own fixtures; roughly 190 exist under `src/`.
+- **Two heuristics failed, and the failures are the useful part.**
+  - "File claims .NET fidelity and has no `include_str!`" flagged eight files, all false positives:
+    `compressed_mesh.rs` has `geometry_matches_the_reference_runtime` and siblings, and
+    `metadata.rs`'s `UnityGuid` rendering is covered by `export/guid_fixture.txt` even though the
+    fixture lives in another module.
+  - Tightening to "no reference-named test **and** no fixture in the file" left three files, and two
+    are web UI. Attribute-based heuristics keep producing false positives because **evidence is
+    shared across modules**. The workable formulation is behaviour-level: enumerate the .NET
+    behaviours and ask which evidence covers each, as in the inventory above.
+- **What this says about the three defects found earlier.** They were not evidence of a broad
+  regression; they were a gap in one module that had been written without the runtime probe the rest
+  of the codebase uses. The corrective is the probe habit, not a rewrite - and the habit is already
+  the norm elsewhere.
+- **A remaining item worth a future round:** `UnityGuid`/`Hash128` fixtures are small (4 and 7 rows)
+  compared with the float and path fixtures. Widening those with the runtime probe is cheap and would
+  pin the word/nibble order against more inputs, including edge words such as `0x80000000`.
+- Evidence: `cargo test --locked --workspace` - 1877 library + 199 bin tests, 0 failed, 1 ignored.
+  CI on `dfb150f` (the preceding commit) is **green** on GitHub Actions; the four runs before it are
+  also green.
+
 ## 2026-10-16 - The sweep's first hit: a duplicate .NET float formatter that dropped the tie rule
 
 - Outcome: swept the .NET-semantic formatting surfaces for the "expectation derived from the
