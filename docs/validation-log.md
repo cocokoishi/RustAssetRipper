@@ -1,5 +1,37 @@
 # Validation log
 
+## 2026-10-16 - The scene GLB has exactly one entry point, and it is not the project export
+
+- Outcome: audited the remaining six 实现中 rows, and pinned where the scene GLB's production caller
+  must live. No status changed: all six gaps cells describe missing **implementation**, so 实现中 is
+  correct for them - the opposite of the two priority rows corrected earlier.
+- **The remaining six are accurate.** `PROC-SCENE-001` (general component materialization, complete
+  scene asset lists, Prefab grouping and recursion, missing-Transform synthesis, Scene YAML parity),
+  `PROC-ANIM-001` (state-free controllers with nested selectors, release shared-claim cloning,
+  legacy/default-state branches), `IO-STREAM-001` (downstream layers still materialize contiguous
+  bytes, other Raw/Web nesting), `SER-TT-ABSENT-001` (recovery across class-version pairs, other
+  managed assemblies, unreadable fallbacks), `TYPE-SCRIPT-001` (IL2CPP/Cpp2IL reconstruction, content
+  levels, decompile/save behaviour, all script-export options) and `OBJ-REF-001` (bundle hierarchy
+  matrix, unresolved and ambiguous dependencies, built-in resources) each list work that is missing
+  rather than work that is merely uncompared. **Only the two priority rows were stale**, and both had
+  a cell that was false.
+- **The scene GLB's wiring is a trap, and this is the finding.** `GlbModelExporter` is instantiated in
+  **exactly one place** in the frozen source, `PrimaryContentExporter.cs:99`, and
+  `GlbLevelBuilder.Build` is called in **exactly one place**, `GlbModelExporter.cs:34`. So the whole
+  scene and prefab GLB capability has a single entry point, and it belongs to the **primary-content**
+  pipeline. The obvious shortcut - wiring `export_scene_glb` into the Unity-project export, where a
+  materialized scene collection and a post-export output stage already exist - would be a
+  **divergence, not a fix**: it would emit `.glb` files the reference never writes for that pipeline,
+  and every future project-export comparison would show an extra file. The row's gap cell now says so,
+  because the shortcut is otherwise the natural thing to reach for.
+- **What this means for the row's dependency.** `EXP-GLB-SCENE-001` is not blocked on conversion code:
+  the mesh gate, the material and texture resolution, the dynamic-versus-static dispatch, the subset
+  indices and the transform composition are all ported, and `scene_glb.rs` composes the three
+  verified stages. It is blocked on the primary-content route, which is the same thing that blocks
+  `PRODUCT-PRIMARY-CONTENT-001`. Two rows that look independent share one dependency.
+- Evidence: ledger 409 rows, 已验证 380, 实现中 7, 已实现但未验证 20, 受外部条件阻塞 2, MALFORMED=0,
+  DUPES=0. Test suite unchanged at 1897 library + 199 CLI, 0 failed.
+
 ## 2026-10-16 - EXPORT-UNITY-001 audited and left at 实现中, because it is right
 
 - Outcome: audited the third priority row and **confirmed** its status rather than changing it. Not
