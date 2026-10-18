@@ -1229,7 +1229,9 @@ fn normalize_empty_engine_resource_data_json(content: &str) -> Option<String> {
         normalized.insert(key.to_owned(), entries);
     }
 
-    serde_json::to_string_pretty(&Value::Object(normalized)).ok()
+    let json = serde_json::to_string_pretty(&Value::Object(normalized)).ok()?;
+    let newline = if cfg!(windows) { "\r\n" } else { "\n" };
+    Some(json.replace('\n', newline))
 }
 
 #[cfg(test)]
@@ -1303,7 +1305,14 @@ mod tests {
             );
         }
 
-        let expected = "{\n  \"DefaultResources\": {},\n  \"ExtraResources\": {}\n}".to_owned();
+        let newline = if cfg!(windows) { "\r\n" } else { "\n" };
+        let expected = [
+            "{",
+            "  \"DefaultResources\": {},",
+            "  \"ExtraResources\": {}",
+            "}",
+        ]
+        .join(newline);
         for content in [
             "{}",
             r#"{"DefaultResources":null,"ExtraResources":{}}"#,
