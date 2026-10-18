@@ -89,6 +89,10 @@ fn recovery_class_names_follow_the_source_enum_rule() {
     assert_eq!(super::class_id_type_name(129), None);
     assert_eq!(super::class_id_type_name(3), None);
     assert_eq!(super::class_id_type_name(99999), None);
+    assert_eq!(super::class_id_from_type_name("$Object"), Some(0));
+    assert_eq!(super::class_id_from_type_name("Component"), Some(2));
+    assert_eq!(super::class_id_from_type_name("Material"), Some(21));
+    assert_eq!(super::class_id_from_type_name("UnknownAsset"), None);
     // `RawDataObject.ClassName` renders undefined values numerically.
     assert_eq!(super::raw_data_class_name(48).as_ref(), "Shader");
     assert_eq!(super::raw_data_class_name(3).as_ref(), "3");

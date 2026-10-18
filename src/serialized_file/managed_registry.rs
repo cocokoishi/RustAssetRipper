@@ -937,6 +937,8 @@ pub struct ManagedRegistryEntry {
     pub namespace_name: String,
     /// The referenced assembly name.
     pub assembly_name: String,
+    /// Index of this entry's serialized TypeTree in the owning file, when present.
+    pub reference_type_index: Option<usize>,
     /// The decoded content, or empty for sentinels and empty triples.
     pub data: ManagedRegistryEntryData,
 }
@@ -1198,6 +1200,7 @@ fn read_entry(
         triple.assembly_name.is_empty(),
     );
     let mut payload_allocated_bytes = 0usize;
+    let mut reference_type_index = None;
     let data = if !frame.has_content {
         ManagedRegistryEntryData::Empty
     } else {
@@ -1206,6 +1209,8 @@ fn read_entry(
             namespace: triple.namespace_name.clone(),
             name: Some(triple.class_name.clone()),
         };
+        reference_type_index =
+            crate::processing::script_identity::find_type_reference_index(references, &script);
         let resolved_tree = resolver
             .map(|resolver| resolver.resolve_type_tree(&script))
             .transpose()
@@ -1218,13 +1223,13 @@ fn read_entry(
         let payload_tree = if let Some(tree) = resolved_tree {
             tree
         } else {
-            let matched =
-                crate::processing::script_identity::find_type_reference_index(references, &script)
-                    .ok_or_else(|| ManagedRegistryReadError::UnresolvableType {
+            let matched = reference_type_index.ok_or_else(|| {
+                ManagedRegistryReadError::UnresolvableType {
                         entry_index,
                         unique_name: script.unique_name(),
                         reason: TYPE_REFERENCE_NOT_FOUND.to_owned(),
-                    })?;
+                    }
+            })?;
             let tree = references[matched].type_tree.as_ref().ok_or_else(|| {
                 ManagedRegistryReadError::UnresolvableType {
                     entry_index,
@@ -1278,6 +1283,7 @@ fn read_entry(
         class_name: triple.class_name,
         namespace_name: triple.namespace_name,
         assembly_name: triple.assembly_name,
+        reference_type_index,
         data,
     };
     Ok((entry, payload_allocated_bytes))

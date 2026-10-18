@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::processing::scene_naming::SceneUnityVersion;
 use crate::serialized_file::metadata::{TypeTree, TypeTreeNode};
 
@@ -18,7 +20,31 @@ use super::type_rules::{
 };
 pub(super) const TRANSFER_USING_FLOW_MAPPING_STYLE: u32 = 0x0020_0000;
 pub(super) const TRANSFER_IGNORE_IN_META_FILES: u32 = 0x0008_0000;
-const COMPONENT_CLASS_ID: i32 = 2;
+
+fn pptr_target_class_id(type_name: &str) -> Option<i32> {
+    let target_type_name = type_name
+        .strip_prefix("PPtr<")?
+        .strip_suffix('>')?;
+    crate::serialized_file::object::class_id_from_type_name(target_type_name)
+}
+
+pub(crate) fn pointer_target_class_ids_from_type_tree(
+    type_tree: &TypeTree,
+    limits: UnityYamlObjectConversionLimits,
+) -> Result<HashMap<String, i32>, UnityYamlObjectConversionError> {
+    let layout = UnityYamlTypeTreeLayout::new(type_tree, limits)?;
+    let mut pointer_target_class_ids = HashMap::new();
+    let mut budget = ConversionBudget::new(limits);
+    layout.collect_pointer_target_class_ids(
+        0,
+        "",
+        0,
+        limits,
+        &mut pointer_target_class_ids,
+        &mut budget,
+    )?;
+    Ok(pointer_target_class_ids)
+}
 
 impl UnityYamlObjectConversionHints {
     /// Build YAML representation hints from the same TypeTree flags and array shapes used to
@@ -921,9 +947,9 @@ impl<'a> UnityYamlTypeTreeLayout<'a> {
         }
 
         if node_type == "TypelessData" || node_type == "string" || node_type.starts_with("PPtr<") {
-            if node_type == "PPtr<Component>" {
+            if let Some(class_id) = pptr_target_class_id(node_type) {
                 if let Some(previous) = hints.pointer_target_class_ids.get(field_path) {
-                    if *previous != COMPONENT_CLASS_ID {
+                    if *previous != class_id {
                         return Err(UnityYamlObjectConversionError::InvalidTypeTree {
                             node_index,
                             reason: "ambiguous PPtr target classes share one field path",
@@ -938,7 +964,7 @@ impl<'a> UnityYamlTypeTreeLayout<'a> {
                     })?;
                     hints.pointer_target_class_ids.insert(
                         try_copy_string(field_path, "Unity YAML PPtr target-class path")?,
-                        COMPONENT_CLASS_ID,
+                        class_id,
                     );
                 }
             }
@@ -1020,6 +1046,75 @@ impl<'a> UnityYamlTypeTreeLayout<'a> {
                 budget,
             )?;
             child = self.next_sibling[child_index];
+        }
+        Ok(())
+    }
+
+    fn collect_pointer_target_class_ids(
+        &self,
+        node_index: usize,
+        field_path: &str,
+        depth: usize,
+        limits: UnityYamlObjectConversionLimits,
+        pointer_target_class_ids: &mut HashMap<String, i32>,
+        budget: &mut ConversionBudget,
+    ) -> Result<(), UnityYamlObjectConversionError> {
+        budget.visit(depth)?;
+        budget.check_field_path(field_path)?;
+        let node_type = self.type_name(node_index)?;
+        if let Some(class_id) = pptr_target_class_id(node_type) {
+            if let Some(previous) = pointer_target_class_ids.get(field_path) {
+                if *previous != class_id {
+                    return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                        node_index,
+                        reason: "ambiguous PPtr target classes share one field path",
+                    });
+                }
+            } else {
+                pointer_target_class_ids.try_reserve(1).map_err(|_| {
+                    UnityYamlObjectConversionError::AllocationFailed {
+                        resource: "Unity YAML PPtr target-class hints",
+                        requested: pointer_target_class_ids.len().saturating_add(1),
+                    }
+                })?;
+                pointer_target_class_ids.insert(
+                    try_copy_string(field_path, "Unity YAML PPtr target-class path")?,
+                    class_id,
+                );
+            }
+            return Ok(());
+        }
+
+        if let Some(element_node) = self.array_element_node(node_index)? {
+            let element_path = wildcard_element_path(field_path, limits)?;
+            return self.collect_pointer_target_class_ids(
+                element_node,
+                &element_path,
+                depth + 1,
+                limits,
+                pointer_target_class_ids,
+                budget,
+            );
+        }
+
+        for child_index in self.child_indices(node_index)? {
+            let child = self.node(child_index)?;
+            let field_name = child.name.as_deref().ok_or(
+                UnityYamlObjectConversionError::InvalidTypeTree {
+                    node_index: child_index,
+                    reason: "field name is unresolved",
+                },
+            )?;
+            let child_path =
+                child_field_path(field_path, field_name, limits.max_field_path_bytes)?;
+            self.collect_pointer_target_class_ids(
+                child_index,
+                &child_path,
+                depth + 1,
+                limits,
+                pointer_target_class_ids,
+                budget,
+            )?;
         }
         Ok(())
     }

@@ -530,6 +530,103 @@
     }
 
     #[test]
+    fn export_project_keeps_nested_missing_dependency_as_source_missing_pointer() {
+        let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
+        let source_fixture =
+            include_str!("export/managed_reference_missing_nested_dependency_fixture.txt");
+        assert!(source_fixture
+            .contains("MISSING|source.bundle/managed.assets|missing.assets"));
+        assert!(source_fixture.contains(
+            "POINTER|m_Asset: {fileID: 0, guid: 0000000deadbeef15deadf00d0000000, type: 2}"
+        ));
+        let source_root_yaml = include_str!(
+            "export/managed_reference_project_fixture/source_nested_missing_external_reference.asset"
+        );
+        let bundled_fixture = include_bytes!(
+            "export/managed_reference_project_fixture/nested_missing_external_reference.bundle"
+        );
+
+        let directory = TestInputDirectory::new_root();
+        let bundle_path = directory.join("workspace.bundle");
+        fs::write(&bundle_path, bundled_fixture).expect("nested missing-dependency UnityFS fixture");
+        let input = TestInputDirectory {
+            directory: directory.clone(),
+            files: vec![bundle_path.clone()],
+            subdirectories: Vec::new(),
+        };
+        let (mut filesystem, selected_paths, mut mount_report) =
+            super::mount_project_inputs(std::slice::from_ref(&bundle_path)).unwrap();
+        let mixed = super::MixedGameStructure::from_vfs_paths(
+            &filesystem,
+            &selected_paths,
+            super::MixedGameStructureLimits::default(),
+        )
+        .unwrap();
+        let (workspace, dependency_report) = super::load_workspace_with_mount_report(
+            &mut filesystem,
+            &mixed.serialized_file_inputs,
+            &mixed.registered_files,
+            &mixed.data_paths,
+            super::WorkspaceLoadLimits::default(),
+            &mut mount_report,
+        )
+        .unwrap();
+        assert!(!dependency_report.is_complete());
+        let requester_file_index = workspace
+            .files()
+            .iter()
+            .position(|file| file.virtual_path.ends_with("source.bundle/managed.assets"))
+            .expect("missing requester stays nested under source.bundle");
+        assert!(dependency_report.requests.iter().any(|request| {
+            request.source_file_index == requester_file_index
+                && request.dependency_name == "missing.assets"
+                && matches!(
+                    &request.outcome,
+                    assetripper::serialized_file::workspace::SerializedFileDependencyOutcome::Missing
+                )
+        }));
+
+        let graph = workspace
+            .reference_graph(
+                assetripper::serialized_file::reference_graph::MultiFileReferenceGraphLimits::default(),
+            )
+            .unwrap();
+        let root_pointer = graph
+            .references()
+            .iter()
+            .find(|reference| {
+                reference.source_file_index == requester_file_index
+                    && reference.field_path == "references.RefIds[0].data.m_Asset"
+            })
+            .expect("managed root retains its external m_Asset pointer");
+        assert_eq!(
+            root_pointer.resolution,
+            assetripper::serialized_file::reference_graph::MultiFilePPtrResolution::MissingDependency {
+                external_index: 0,
+                path_id: 900,
+            }
+        );
+        assert!(!graph.is_complete());
+
+        let output_root = directory.join("project-nested-missing-dependency");
+        super::export_project_to(
+            std::slice::from_ref(&bundle_path),
+            &output_root,
+            false,
+            &default_export_settings(),
+            &mut Vec::new(),
+        )
+        .expect("nested missing dependency exports with the source MissingReference pointer");
+        let root_path = output_root.join("Assets/MonoBehaviour/ManagedRoot.asset");
+        let root_yaml = fs::read_to_string(&root_path).expect("managed root YAML is exported");
+        assert_eq!(source_root_yaml.trim_end(), root_yaml.trim_end());
+        assert_eq!(fs::read(&bundle_path).unwrap(), bundled_fixture);
+
+        fs::remove_dir_all(&output_root).expect("remove nested missing-dependency project output");
+        drop(input);
+    }
+
+    #[test]
     fn export_project_saves_managed_assembly_and_maps_script_pointer() {
         let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
         let fixture = include_str!("processing/managed_assembly_saved_project_fixture.txt");

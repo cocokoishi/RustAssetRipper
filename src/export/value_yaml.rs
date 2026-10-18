@@ -1,6 +1,7 @@
 mod conversion;
 mod field_rules;
 mod layout;
+mod managed_reference_hints;
 mod model;
 mod object_document;
 mod paths;
@@ -14,6 +15,8 @@ pub use model::{
     UnityYamlSceneObjectIdentifierSchema,
 };
 pub use object_document::serialized_object_value_to_unity_yaml_document;
+pub(crate) use layout::pointer_target_class_ids_from_type_tree;
+pub(crate) use managed_reference_hints::add_managed_reference_pointer_target_hints;
 
 #[cfg(test)]
 mod tests;

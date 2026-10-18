@@ -1,0 +1,9 @@
+# Frozen source AssetRipper export for an unresolved external requested by a nested collection.
+VERSION|2019.4.40f1|format=21|platform=StandaloneWin64Player
+MISSING|source.bundle/managed.assets|missing.assets
+INPUT|workspace.bundle|2465|8ECAB33E69DB6D291781BAC53BBBD8C3CA539426DE91B614FAEBF243C21C95FB
+ENTRY|workspace.bundle|source.bundle|2341|A8F49C2ADA0ED19FC9DD266A878B35F41337A298D81C773651EB0D1084A513A1
+ENTRY|source.bundle|managed.assets|2216|F800F7A949B8DBC34B7124EF97CF802DAF7F47D4995C095B6C8ECC77DE5ECEDC
+OBJECT|MonoBehaviour|42|ManagedRoot
+POINTER|m_Asset: {fileID: 0, guid: 0000000deadbeef15deadf00d0000000, type: 2}
+ROOT_YAML_FILE|source_nested_missing_external_reference.asset

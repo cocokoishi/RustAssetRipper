@@ -467,6 +467,74 @@ internal static partial class ManagedProjectProbe
         return 0;
     }
 
+    internal static int ExportNestedMissingDependency(string inputRootArgument, string outputRootArgument, string rowsArgument)
+    {
+        string inputRoot = Path.GetFullPath(inputRootArgument);
+        string outputRoot = Path.GetFullPath(outputRootArgument);
+        string rowsPath = Path.GetFullPath(rowsArgument);
+        EnsureEmptyOrMissingDirectory(inputRoot, "input");
+        EnsureEmptyOrMissingDirectory(outputRoot, "output");
+        if (File.Exists(rowsPath) || Directory.Exists(rowsPath))
+        {
+            throw new IOException($"refusing to overwrite probe rows {rowsPath}");
+        }
+
+        Directory.CreateDirectory(inputRoot);
+        Directory.CreateDirectory(outputRoot);
+        Directory.CreateDirectory(Path.GetDirectoryName(rowsPath)!);
+
+        byte[] managedFile = BuildManagedRootFile("missing.assets");
+        byte[] sourceBundle = BuildUnityFs(("managed.assets", managedFile));
+        byte[] outerBundle = BuildUnityFs(("source.bundle", sourceBundle));
+        string bundlePath = Path.Combine(inputRoot, "workspace.bundle");
+        File.WriteAllBytes(bundlePath, outerBundle);
+
+        using StreamWriter rows = new(rowsPath, false, new UTF8Encoding(false)) { NewLine = "\n" };
+        rows.WriteLine("# Frozen source AssetRipper export for a missing external requested by a nested collection.");
+        rows.WriteLine("VERSION|2019.4.40f1|format=21|platform=StandaloneWin64Player");
+        rows.WriteLine("MISSING|source.bundle/managed.assets|missing.assets");
+        WriteInputRow(rows, bundlePath, outerBundle);
+        rows.WriteLine($"ENTRY|workspace.bundle|source.bundle|{sourceBundle.Length}|{Convert.ToHexString(SHA256.HashData(sourceBundle))}");
+        rows.WriteLine($"ENTRY|source.bundle|managed.assets|{managedFile.Length}|{Convert.ToHexString(SHA256.HashData(managedFile))}");
+
+        Logger.Add(new ConsoleLogger());
+        ExportHandler handler = new(new FullConfiguration());
+        var gameData = handler.LoadAndProcess([inputRoot], LocalFileSystem.Instance);
+        string[] sourceObjects = gameData.GameBundle.FetchAssets()
+            .Where(asset => asset.ClassID == 114 && asset.PathID is 42 or 900)
+            .Select(asset => $"{asset.ClassName}|{asset.PathID}|{asset}")
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        if (sourceObjects.Length != 1 || !sourceObjects[0].Contains("ManagedRoot", StringComparison.Ordinal))
+        {
+            throw new InvalidDataException($"AssetRipper loaded an unexpected object set for the missing external: {string.Join(";", sourceObjects)}");
+        }
+
+        handler.Export(gameData, outputRoot, LocalFileSystem.Instance);
+        string projectAssets = Path.Combine(outputRoot, "ExportedProject", "Assets");
+        string? rootYamlPath = Directory.Exists(projectAssets)
+            ? Directory.GetFiles(projectAssets, "*.asset", SearchOption.AllDirectories)
+                .FirstOrDefault(path => File.ReadAllText(path).Contains("m_Name: ManagedRoot", StringComparison.Ordinal))
+            : null;
+        if (rootYamlPath is null)
+        {
+            throw new InvalidDataException("AssetRipper export omitted ManagedRoot for the missing external dependency");
+        }
+
+        string rootYaml = File.ReadAllText(rootYamlPath);
+        string normalizedRootYaml = rootYaml.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
+        string pointerLine = normalizedRootYaml.Split('\n')
+            .FirstOrDefault(line => line.Contains("m_Asset:", StringComparison.Ordinal))
+            ?? throw new InvalidDataException("AssetRipper root YAML omitted the managed m_Asset field");
+        rows.WriteLine($"OBJECT|{string.Join(";", sourceObjects)}");
+        rows.WriteLine($"POINTER|{pointerLine.Trim()}");
+        rows.WriteLine($"ROOT_YAML|{Convert.ToBase64String(Encoding.UTF8.GetBytes(normalizedRootYaml))}");
+        Console.WriteLine($"source_objects={string.Join(';', sourceObjects)}");
+        Console.WriteLine($"source_missing_pointer={pointerLine.Trim()}");
+        Console.WriteLine($"bundle_bytes={outerBundle.Length}");
+        return 0;
+    }
+
     internal static byte[] BuildUnityFs(params (string Path, byte[] Data)[] entries)
     {
         if (entries.Length == 0)

@@ -27,6 +27,7 @@ use super::super::unity_yaml::{
     UnityYamlDocument, UnityYamlNode, UnityYamlNodeKind, UnityYamlScalar,
 };
 use super::super::value_yaml::{
+    add_managed_reference_pointer_target_hints,
     serialized_object_value_to_unity_yaml_document, UnityYamlObjectConversionError,
     UnityYamlObjectConversionHints, UnityYamlObjectConversionLimits, UnityYamlObjectFieldMode,
     UnityYamlPPtrRequest,
@@ -806,6 +807,13 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
             merge_editor_yaml_hints_with_source_fallback(&mut hints, source_hints)
                 .map_err(UnityYamlWorkspaceExportError::Conversion)?;
         }
+        add_managed_reference_pointer_target_hints(
+            export_root,
+            &file.metadata.reference_types,
+            &mut hints,
+            limits,
+        )
+        .map_err(UnityYamlWorkspaceExportError::Conversion)?;
         if should_preserve_type_tree_field_names(
             class_id,
             &object.factory.kind,

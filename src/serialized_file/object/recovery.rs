@@ -1,4 +1,6 @@
 use std::borrow::Cow;
+use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use super::super::metadata::TypeTree;
 /// Reader-side TypeTree usability behind the absent-TypeTree recovery row
@@ -411,6 +413,33 @@ pub fn class_id_type_name(class_id: i32) -> Option<&'static str> {
         2126867596 => Some("TilemapEditorUserSettings"),
         _ => None,
     }
+}
+
+/// Resolve a serialized TypeTree class name to its Unity `ClassIDType` value.
+///
+/// `$Object` is the TypeTree spelling for UnityEngine.Object, whose class ID is zero and is
+/// intentionally absent from the enum-name table above. The remaining names are inverted from
+/// that same frozen table so PPtr target types retain their source class identity.
+pub fn class_id_from_type_name(type_name: &str) -> Option<i32> {
+    let type_name = type_name.strip_prefix('$').unwrap_or(type_name);
+    if type_name == "Object" {
+        return Some(0);
+    }
+
+    static CLASS_IDS_BY_NAME: OnceLock<HashMap<&'static str, i32>> = OnceLock::new();
+    let class_ids = CLASS_IDS_BY_NAME.get_or_init(|| {
+        let mut class_ids = HashMap::new();
+        for class_id in 1..=4096 {
+            if let Some(name) = class_id_type_name(class_id) {
+                class_ids.entry(name).or_insert(class_id);
+            }
+        }
+        if let Some(name) = class_id_type_name(2_126_867_596) {
+            class_ids.entry(name).or_insert(2_126_867_596);
+        }
+        class_ids
+    });
+    class_ids.get(type_name).copied()
 }
 
 /// `RawDataObject.ClassName` over a caller-supplied class ID: the `ClassIDType`
