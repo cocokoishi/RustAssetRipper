@@ -1409,6 +1409,112 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
     }
 
+    /// `PRODUCT-PRIMARY-CONTENT-001`: a loaded Prefab hierarchy becomes one semantic GLB.
+    ///
+    /// The committed fixture builder creates a 2019.4 SerializedFile with a GameObject, Transform,
+    /// and PrefabInstance.
+    /// The frozen processor capture records the PrefabInstance as hidden and the GameObject and
+    /// Transform as the Prefab hierarchy's exportable assets. Its `GlbLevelBuilder` reference row
+    /// for an asset root is the `Root` node with no mesh and the identity transform. This route test
+    /// checks that the producer queues the whole hierarchy once, omits the hidden PrefabInstance's
+    /// JSON fallback, and emits those same node semantics through the shipped product.
+    #[test]
+    fn the_primary_content_export_writes_one_prefab_hierarchy_glb() {
+        use crate::export::workspace_yaml::tests::make_existing_prefab_instance_file;
+
+        let directory =
+            PathBuf::from("target/primary-content-prefab-e2e").join(std::process::id().to_string());
+        std::fs::create_dir_all(&directory).expect("the probe directory is created");
+        let input = directory.join("prefab-instance-2019.4.unity");
+        std::fs::write(&input, make_existing_prefab_instance_file())
+            .expect("the synthetic Prefab SerializedFile is written");
+
+        let mut state = state();
+        state
+            .load(&[input.to_string_lossy().into_owned()])
+            .expect("the Prefab input loads");
+        assert!(state.is_loaded());
+
+        let export_root = directory.join("primary-content");
+        let submitted = export_root.to_string_lossy().replace('\\', "/");
+        let response = dispatch(
+            &mut state,
+            &request_with_body(
+                "/Export/PrimaryContent",
+                &format!("Path={submitted}&ConfirmDelete=true"),
+            ),
+        );
+        assert_eq!(response.status(), 302);
+
+        let log = state.take_log().join("\n");
+        assert!(log.contains("Wrote 1 primary-content files to"), "{log}");
+        assert!(!log.contains("could not be decided"), "{log}");
+        assert!(!log.contains("collections failed:"), "{log}");
+
+        let mut files: Vec<(PathBuf, Vec<u8>)> = Vec::new();
+        collect_export_files(&export_root, &mut files);
+        assert_eq!(
+            files.len(),
+            1,
+            "the hidden PrefabInstance was not queued: {log}"
+        );
+        let (path, bytes) = &files[0];
+        assert_eq!(
+            path.file_stem().and_then(|value| value.to_str()),
+            Some("Root")
+        );
+        assert_eq!(
+            path.extension().and_then(|value| value.to_str()),
+            Some("glb")
+        );
+        assert_eq!(&bytes[..4], b"glTF");
+        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 2);
+        assert_eq!(
+            u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize,
+            bytes.len()
+        );
+        let json_length = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+        assert_eq!(&bytes[16..20], b"JSON");
+        let document: serde_json::Value = serde_json::from_slice(
+            bytes
+                .get(20..20 + json_length)
+                .expect("the GLB JSON chunk is in bounds"),
+        )
+        .expect("the GLB JSON chunk is valid");
+        assert_eq!(document["asset"]["version"], "2.0");
+        assert_eq!(document["scene"], 0);
+        assert_eq!(document["scenes"][0]["nodes"], serde_json::json!([0]));
+        let nodes = document["nodes"].as_array().expect("the scene has nodes");
+        assert_eq!(nodes.len(), 1);
+        let node = &nodes[0];
+        assert_eq!(node["name"], "Root");
+        assert!(node.get("children").is_none());
+        assert!(node.get("mesh").is_none());
+        let vector = |field: &str, default: &[f64]| {
+            node.get(field)
+                .and_then(serde_json::Value::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .map(|value| value.as_f64().expect("TRS values are numbers"))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_else(|| default.to_vec())
+        };
+        assert_eq!(vector("translation", &[0.0, 0.0, 0.0]), vec![0.0, 0.0, 0.0]);
+        assert_eq!(
+            vector("rotation", &[0.0, 0.0, 0.0, 1.0]),
+            vec![0.0, 0.0, 0.0, 1.0]
+        );
+        assert_eq!(vector("scale", &[1.0, 1.0, 1.0]), vec![1.0, 1.0, 1.0]);
+        assert!(document
+            .get("meshes")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(|meshes| meshes.is_empty()));
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
     /// `PRODUCT-PRIMARY-CONTENT-001`: a streamed texture's pixels come from its `.resS`.
     ///
     /// The 2019.4 tree carries `m_StreamData` on every texture, so "streamed" is a question of where

@@ -64,8 +64,12 @@ use assetripper::export::scene_wiring::{
     process_workspace_scenes_and_prefabs, WorkspaceSceneProcessing, WorkspaceSceneProcessingLimits,
 };
 use assetripper::processing::prefab_processing::WorkspaceProcessedCollectionKind;
-use assetripper::processing::prefab_processing::WorkspaceProcessedPrefabAssetKind;
-use assetripper::processing::scene_hierarchy::WorkspaceGameObjectHierarchyWalkLimits;
+use assetripper::processing::prefab_processing::{
+    WorkspaceProcessedPrefabAssetKind, WorkspaceProcessedPrefabReference,
+};
+use assetripper::processing::scene_hierarchy::{
+    WorkspaceGameObjectHierarchyEntryKind, WorkspaceGameObjectHierarchyWalkLimits,
+};
 use assetripper::resources::glb::{GlbBuildLimits, GlbLevelLimits};
 use assetripper::resources::packed_bit_vector::PackedBitVectorLimits;
 use assetripper::serialized_file::reference_graph::MultiFileReferenceGraphLimits;
@@ -119,8 +123,13 @@ pub(super) fn export_loaded_primary_content<W: io::Write>(
     // relation, so the relation has to be computed before any object's facts can be decided. The
     // processing result is kept: the hierarchy GLB producer needs the scene graph it holds.
     let scene_processing = process_scenes(game);
-    let (main_asset_of, hierarchy_file, scene_note) =
-        main_asset_classification(game, scene_processing.as_ref());
+    let (
+        main_asset_of,
+        hierarchy_file,
+        hierarchy_collection_assets,
+        hierarchy_collection_names,
+        scene_note,
+    ) = main_asset_classification(game, scene_processing.as_ref());
     if let Some(note) = &scene_note {
         writeln!(status_output, "{note}")?;
     }
@@ -250,10 +259,22 @@ pub(super) fn export_loaded_primary_content<W: io::Write>(
             stream_integrity
         }) {
             PrimaryContentObjectFactsOutcome::Known(facts) => {
-                names.push(best_name(&named_name, class_id, None));
-                // A single-asset collection claims only its primary. The hierarchy collections,
-                // which claim their members, are the ones this path cannot build yet.
-                members.push(vec![identity]);
+                names.push(
+                    hierarchy_collection_names
+                        .get(&identity)
+                        .cloned()
+                        .unwrap_or_else(|| best_name(&named_name, class_id, None)),
+                );
+                // Scene and prefab model collections claim every source asset in the hierarchy,
+                // including hidden PrefabInstances. Passing only this object would export the same
+                // hierarchy once per component and let the hidden PrefabInstance fall through to
+                // JSON on the next CreateCollections visit.
+                members.push(
+                    hierarchy_collection_assets
+                        .get(&identity)
+                        .cloned()
+                        .unwrap_or_else(|| vec![identity]),
+                );
                 facts_by_identity.insert(identity, facts);
                 payloads.insert(identity, &payload.root);
                 if let Some(bytes) = stream_bytes.take() {
@@ -806,13 +827,19 @@ fn main_asset_classification(
 ) -> (
     HashMap<u64, MainAssetFacts>,
     HashMap<u64, usize>,
+    HashMap<u64, Vec<u64>>,
+    HashMap<u64, String>,
     Option<String>,
 ) {
     let mut hierarchy_file: HashMap<u64, usize> = HashMap::new();
+    let mut hierarchy_collection_assets: HashMap<u64, Vec<u64>> = HashMap::new();
+    let mut hierarchy_collection_names: HashMap<u64, String> = HashMap::new();
     let Some(processing) = processing else {
         return (
             HashMap::new(),
             hierarchy_file,
+            hierarchy_collection_assets,
+            hierarchy_collection_names,
             Some(
                 "Scene and prefab processing did not run, so no object's main asset is known and \
                  every hierarchy object will be reported as undecidable."
@@ -823,23 +850,32 @@ fn main_asset_classification(
 
     let mut classification: HashMap<u64, MainAssetFacts> = HashMap::new();
     for hierarchy in &processing.scene_hierarchies {
-        for member in hierarchy
+        let mut members: Vec<_> = hierarchy
             .game_objects
             .iter()
             .chain(&hierarchy.components)
-            .chain(&hierarchy.managers)
             .chain(&hierarchy.prefab_instances)
-        {
+            .chain(&hierarchy.managers)
+            .copied()
+            .collect();
+        members.extend(hierarchy.scene_roots);
+        let collection_assets: Vec<_> = members
+            .iter()
+            .map(|member| object_identity(member.file_index, member.object_index))
+            .collect();
+        for member in members.drain(..) {
             let identity = object_identity(member.file_index, member.object_index);
             classification.insert(identity, MainAssetFacts::Scene);
             // The hierarchy GLB walks one collection, and a scene's members live in its own file.
             hierarchy_file.insert(identity, member.file_index);
+            hierarchy_collection_assets.insert(identity, collection_assets.clone());
+            hierarchy_collection_names.insert(identity, hierarchy.name.clone());
         }
     }
 
-    // A prefab hierarchy's members are `PrefabHierarchyObject.Create`'s walk of `root.FetchHierarchy`,
-    // which the workspace already implements; reusing it means the member order and the component
-    // edges are the same ones the prefab processing itself uses.
+    // A prefab hierarchy's GameObject and component members are `PrefabHierarchyObject.Create`'s
+    // walk of `root.FetchHierarchy`, which the workspace already implements. Reusing it preserves
+    // the member order and component edges used by prefab processing itself.
     let mut prefab_files: HashSet<usize> = HashSet::new();
     for collection in processing.processed_assets.collections() {
         if collection.kind != WorkspaceProcessedCollectionKind::PrefabHierarchies {
@@ -847,7 +883,8 @@ fn main_asset_classification(
         }
         for asset in &collection.assets {
             let WorkspaceProcessedPrefabAssetKind::PrefabHierarchy {
-                root_game_object, ..
+                root_game_object,
+                prefab,
             } = &asset.kind
             else {
                 continue;
@@ -860,12 +897,44 @@ fn main_asset_classification(
                 // The walk failed: this file's objects stay unknown rather than being guessed.
                 continue;
             };
-            for entry in walk.entries() {
-                let identity =
-                    object_identity(entry.identity.file_index, entry.identity.object_index);
+            // `GameObjectHierarchyObject.Assets` orders GameObjects, Components, PrefabInstances.
+            // PrefabHierarchyObject then appends its source Prefab, even though that asset is
+            // hidden and the GLB writer ignores it. Preserve that collection order for the same
+            // queued-member behavior in `CreateCollections`.
+            let mut hierarchy_members: Vec<_> = walk
+                .entries()
+                .iter()
+                .filter(|entry| entry.kind == WorkspaceGameObjectHierarchyEntryKind::GameObject)
+                .map(|entry| entry.identity)
+                .collect();
+            hierarchy_members.extend(
+                walk.entries()
+                    .iter()
+                    .filter(|entry| entry.kind == WorkspaceGameObjectHierarchyEntryKind::Component)
+                    .map(|entry| entry.identity),
+            );
+            if let WorkspaceProcessedPrefabReference::Existing(prefab_identity) = prefab {
+                hierarchy_members.push(*prefab_identity);
+            }
+            let collection_assets: Vec<_> = hierarchy_members
+                .iter()
+                .map(|member| object_identity(member.file_index, member.object_index))
+                .collect();
+            let root_name = game
+                .objects
+                .get(root_game_object.file_index, root_game_object.object_index)
+                .and_then(|object| object.payload.as_ref().ok())
+                .and_then(|payload| object_name(&payload.root))
+                .unwrap_or_default();
+            let collection_name =
+                best_name(&root_name, root_game_object.class_id.unwrap_or(1), None);
+            for member in hierarchy_members {
+                let identity = object_identity(member.file_index, member.object_index);
                 classification.insert(identity, MainAssetFacts::Prefab);
                 // The hierarchy GLB walks one collection; a prefab's is its root's file.
                 hierarchy_file.insert(identity, root_game_object.file_index);
+                hierarchy_collection_assets.insert(identity, collection_assets.clone());
+                hierarchy_collection_names.insert(identity, collection_name.clone());
             }
         }
     }
@@ -882,15 +951,21 @@ fn main_asset_classification(
         }
     }
 
-    // A prefab hierarchy's members are not derived yet, so its file's objects are left unknown
-    // rather than called not-a-hierarchy; the GLB producer cannot walk one either.
+    // Objects in a file that contains a prefab hierarchy but are not in any derived hierarchy
+    // remain unknown rather than being guessed as non-hierarchy assets.
     let note = (unknown_in_prefab_files > 0).then(|| {
         format!(
-            "{unknown_in_prefab_files} objects live in a file that holds a prefab hierarchy whose \
-             members are not derived on this path yet, so they are reported rather than guessed."
+            "{unknown_in_prefab_files} objects live in a file that holds a prefab hierarchy but \
+             are not present in any derived hierarchy membership, so they are reported rather than guessed."
         )
     });
-    (classification, hierarchy_file, note)
+    (
+        classification,
+        hierarchy_file,
+        hierarchy_collection_assets,
+        hierarchy_collection_names,
+        note,
+    )
 }
 
 #[cfg(test)]
