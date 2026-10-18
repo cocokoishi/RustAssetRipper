@@ -7,6 +7,7 @@ use std::fmt;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct EngineResourceData {
     text_assets: Vec<TextAssetEntry>,
+    texture_2d_assets: Vec<Texture2DEntry>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -14,6 +15,14 @@ struct TextAssetEntry {
     name: String,
     length: i32,
     hash: u128,
+    target: PredefinedEngineAssetTarget,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Texture2DEntry {
+    name: String,
+    width: i32,
+    height: i32,
     target: PredefinedEngineAssetTarget,
 }
 
@@ -77,6 +86,7 @@ impl EngineResourceData {
         };
 
         let mut text_assets = Vec::new();
+        let mut texture_2d_assets = Vec::new();
         for (resources, guid_words) in [
             (
                 raw.default_resources.unwrap_or_default(),
@@ -101,6 +111,32 @@ impl EngineResourceData {
                 let Some(kind) = object.get("$type").and_then(Value::as_str) else {
                     return Ok(None);
                 };
+                if kind == "Texture2D" {
+                    let Some(name) = object.get("Name").and_then(Value::as_str) else {
+                        return Ok(None);
+                    };
+                    let Some(width) = object
+                        .get("Width")
+                        .and_then(Value::as_i64)
+                        .and_then(|width| i32::try_from(width).ok())
+                    else {
+                        return Ok(None);
+                    };
+                    let Some(height) = object
+                        .get("Height")
+                        .and_then(Value::as_i64)
+                        .and_then(|height| i32::try_from(height).ok())
+                    else {
+                        return Ok(None);
+                    };
+                    texture_2d_assets.push(Texture2DEntry {
+                        name: name.to_owned(),
+                        width,
+                        height,
+                        target: PredefinedEngineAssetTarget { file_id, guid },
+                    });
+                    continue;
+                }
                 if kind != "TextAsset" {
                     if matches!(
                         kind,
@@ -149,7 +185,10 @@ impl EngineResourceData {
                 });
             }
         }
-        Ok(Some(Self { text_assets }))
+        Ok(Some(Self {
+            text_assets,
+            texture_2d_assets,
+        }))
     }
 
     /// The frozen cache keys TextAssets by their complete value: name, byte length, and MD5.
@@ -165,6 +204,19 @@ impl EngineResourceData {
         self.text_assets
             .iter()
             .find(|entry| entry.name == name && entry.length == length && entry.hash == hash)
+            .map(|entry| entry.target)
+    }
+
+    /// The frozen cache keys plain Texture2D objects by name and dimensions.
+    pub(super) fn texture_2d_target(
+        &self,
+        name: &str,
+        width: i32,
+        height: i32,
+    ) -> Option<PredefinedEngineAssetTarget> {
+        self.texture_2d_assets
+            .iter()
+            .find(|entry| entry.name == name && entry.width == width && entry.height == height)
             .map(|entry| entry.target)
     }
 }
@@ -199,6 +251,22 @@ mod tests {
                 .is_none(),
             "the serialized Length participates in the source TextAsset cache key"
         );
+    }
+
+    #[test]
+    fn engine_resource_data_texture2d_matches_name_dimensions_and_resource_identity() {
+        let data = EngineResourceData::parse(Some(
+            r#"{"DefaultResources":{"777":{"$type":"Texture2D","Name":"TextureFixture","Width":2,"Height":2}},"ExtraResources":{}}"#,
+        ))
+        .expect("Texture2D resource parses")
+        .expect("valid object selects a stored cache");
+        let target = data
+            .texture_2d_target("TextureFixture", 2, 2)
+            .expect("name and dimensions identify the source Texture2D");
+        assert_eq!(target.file_id, 777);
+        assert_eq!(target.guid[8..12], 14u32.to_le_bytes());
+        assert!(data.texture_2d_target("TextureFixture", 3, 2).is_none());
+        assert!(data.texture_2d_target("Other", 2, 2).is_none());
     }
 
     #[test]

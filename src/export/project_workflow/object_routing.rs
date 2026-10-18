@@ -1223,20 +1223,24 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
             } else {
                 None
             };
-            let predefined_engine_texture = if use_embedded_engine_data
-                && source_engine_guid.is_none()
+            let predefined_engine_texture = if source_engine_guid.is_none()
                 && class_id == crate::export::res_wiring::TEXTURE2D_CLASS_ID
             {
                 if let Some(payload) = payload {
                     let name = predefined_engine_object_name(&payload.root);
                     let dimensions = predefined_engine_texture_dimensions(&payload.root);
                     match (name, dimensions) {
-                        (Some(name), Some((width, height))) => predefined_engine_texture_target(
-                            &name,
-                            width,
-                            height,
-                            file.metadata.prefix.unity_version_text.as_deref(),
-                        )?,
+                        (Some(name), Some((width, height))) if use_embedded_engine_data => {
+                            predefined_engine_texture_target(
+                                &name,
+                                width,
+                                height,
+                                file.metadata.prefix.unity_version_text.as_deref(),
+                            )?
+                        }
+                        (Some(name), Some((width, height))) => context
+                            .engine_resource_data
+                            .and_then(|data| data.texture_2d_target(&name, width, height)),
                         _ => None,
                     }
                 } else {

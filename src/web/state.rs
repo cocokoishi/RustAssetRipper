@@ -1418,6 +1418,61 @@ mod tests {
     }
 
     #[test]
+    fn web_project_export_redirects_stored_texture2d_engine_resource_data() {
+        let _source_layouts = crate::SourceFactoryLayoutGuard::use_source_factory();
+        let fixture = include_str!("../export/texture_project_source_2022_3_fixture.txt");
+        let hex = fixture
+            .lines()
+            .find_map(|line| line.strip_prefix("INPUT_HEX|TextureFixture.assets|"))
+            .expect("source fixture includes the Texture2D SerializedFile");
+        let source_bytes = hex
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                u8::from_str_radix(std::str::from_utf8(pair).expect("hex is ASCII"), 16)
+                    .expect("fixture hex is valid")
+            })
+            .collect::<Vec<_>>();
+        let directory = test_directory("engine-resource-texture2d");
+        let source_path = directory.join("TextureFixture.assets");
+        std::fs::write(&source_path, &source_bytes).expect("write generated fixture");
+        let source_path_text = source_path.to_string_lossy().into_owned();
+
+        let mut state = state(true);
+        state
+            .load(&[source_path_text])
+            .expect("load source-generated Texture2D");
+        state
+            .set_singleton_data(
+                "EngineResourceData",
+                r#"{"DefaultResources":{"777":{"$type":"Texture2D","Name":"TextureFixture","Width":2,"Height":2}},"ExtraResources":{}}"#,
+            )
+            .expect("store source-shaped custom Texture2D resource data");
+
+        let output_root = directory.join("project-custom");
+        let output_root_text = output_root.to_string_lossy().into_owned();
+        state
+            .export_unity_project(&output_root_text, false)
+            .expect("the custom cache redirects a matching Texture2D");
+
+        let project = output_root.join("ExportedProject");
+        assert!(
+            !project.join("Assets").exists(),
+            "a Texture2D matched by name and dimensions is redirected"
+        );
+        assert!(project.join("ProjectSettings/ProjectVersion.txt").is_file());
+        assert!(project.join("Packages/manifest.json").is_file());
+        let path_map: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(output_root.join("AuxiliaryFiles/path_id_map.json")).unwrap(),
+        )
+        .expect("path ID map is valid JSON");
+        assert_eq!(path_map["Files"][0]["Assets"][0]["PathID"], 44);
+        assert_eq!(path_map["Files"][0]["Assets"][0]["Name"], "TextureFixture");
+        assert_eq!(path_map["Files"][0]["Assets"][0]["Type"], "Texture2D");
+        assert_eq!(std::fs::read(&source_path).unwrap(), source_bytes);
+    }
+
+    #[test]
     fn typed_configuration_singletons_update_and_reset_the_live_settings() {
         let mut state = state(false);
         state
