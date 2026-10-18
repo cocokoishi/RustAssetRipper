@@ -564,3 +564,79 @@ fn unityraw_routes_source_unityweb_through_the_common_stream_mount() {
         );
     }
 }
+
+#[test]
+fn unityraw_nested_unityraw_webdata_routes_through_the_common_stream_mount() {
+    let payload = b"three-level nested resource";
+    let webdata = webdata_fixture(&[("leaf.resS", payload)]);
+    let nested_raw = unityraw_fixture("inner.webdata", &webdata);
+    let input = unityraw_fixture("inner.raw", &nested_raw);
+
+    let mut legacy_filesystem = VirtualFileSystem::new();
+    let expected = SchemeReader::read(&input)
+        .unwrap()
+        .mount_container_tree_with_source_name(
+            &mut legacy_filesystem,
+            Some("/tree"),
+            Some("root.raw"),
+            ContainerMountLimits::default(),
+        )
+        .unwrap();
+
+    let mut filesystem = VirtualFileSystem::new();
+    let source = SmartStream::from_reader(Box::new(Cursor::new(input))).unwrap();
+    let actual = mount_stream_container_tree(
+        &source,
+        FileKind::UnityRaw,
+        Some("root.raw"),
+        &mut filesystem,
+        Some("/tree"),
+        SchemeReaderLimits::default(),
+        ContainerMountLimits {
+            max_active_nested_bytes: 0,
+            ..ContainerMountLimits::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(actual, expected);
+    assert_eq!(
+        actual.container_scopes,
+        ["/tree", "/tree/inner.raw", "/tree/inner.raw/inner.webdata"]
+    );
+    assert_eq!(actual.container_bundles.len(), 3);
+    assert_eq!(actual.mounted_entries, 1);
+    assert!(actual.failed_entries.is_empty());
+    assert_eq!(actual.resource_files.len(), 1);
+    let resource = &actual.resource_files[0];
+    assert_eq!(resource.name, "leaf.resS");
+    assert_eq!(resource.container_bundle_index, 2);
+    assert_eq!(resource.entry_index, 0);
+    assert_eq!(resource.resource_index, 0);
+    assert_eq!(
+        resource.virtual_path,
+        "/tree/inner.raw/inner.webdata/leaf.resS"
+    );
+    drop(source);
+    assert_eq!(
+        filesystem
+            .open_file(&resource.virtual_path)
+            .unwrap()
+            .stream_type(),
+        crate::io::stream::SmartStreamType::File
+    );
+    assert_eq!(
+        filesystem
+            .read_all_bytes(&resource.virtual_path, payload.len())
+            .unwrap(),
+        payload,
+    );
+    assert_eq!(
+        filesystem
+            .read_all_bytes(&resource.virtual_path, payload.len())
+            .unwrap(),
+        legacy_filesystem
+            .read_all_bytes(&resource.virtual_path, payload.len())
+            .unwrap(),
+    );
+}
