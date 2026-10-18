@@ -48,7 +48,7 @@ fn should_use_scene_editor_type_tree(class_id: i32, unity_version_text: Option<&
     };
     let supported_version =
         (version.major == 5 && version.minor == 6) || (version.major == 2022 && version.minor == 3);
-    let supported_class = matches!(class_id, 1 | 4 | 23 | 33 | 108)
+    let supported_class = matches!(class_id, 1 | 4 | 23 | 28 | 33 | 108)
         || (version.major == 2022
             && version.minor == 3
             && matches!(
@@ -4875,6 +4875,61 @@ mod tests {
         assert!(!should_use_scene_editor_type_tree(43, Some("5.6.0f1")));
         assert!(!should_use_scene_editor_type_tree(90, Some("5.6.0f1")));
         assert!(should_use_scene_editor_type_tree(1, Some("5.6.0f1")));
+    }
+
+    #[test]
+    fn unity_5_6_texture2d_uses_editor_tree_fields_and_hash_schema() {
+        let version = FactoryUnityVersion::parse("5.6.0f1").unwrap();
+        let (release, editor) = reference_class_layouts()
+            .tpk_trees(28, &version)
+            .unwrap()
+            .expect("Unity 5.6 source TPK must contain the Texture2D layout");
+
+        assert!(should_use_scene_editor_type_tree(28, Some("5.6.0f1")));
+        assert_eq!(editor.nodes[0].type_name.as_deref(), Some("Texture2D"));
+        for field in [
+            "m_ObjectHideFlags",
+            "m_PrefabParentObject",
+            "m_PrefabInternal",
+            "m_ImageContentsHash",
+            "m_AlphaIsTransparency",
+        ] {
+            assert!(
+                editor
+                    .nodes
+                    .iter()
+                    .any(|node| node.name.as_deref() == Some(field)),
+                "Unity 5.6 Texture2D editor tree must contain {field}"
+            );
+            assert!(
+                !release
+                    .nodes
+                    .iter()
+                    .any(|node| node.name.as_deref() == Some(field)),
+                "Unity 5.6 Texture2D release tree must omit {field}"
+            );
+        }
+
+        let hints = UnityYamlObjectConversionHints::from_type_tree(
+            &editor,
+            SceneUnityVersion::parse("5.6.0f1").unwrap(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            hints
+                .hash128_schemas
+                .get("m_ImageContentsHash")
+                .map(|schema| schema.serialized_version),
+            Some(2)
+        );
+        assert!(should_preserve_type_tree_field_names(
+            28,
+            &FactoryAssetKind::Generated("Texture2D_5_5".to_owned()),
+            true,
+            false,
+            false,
+        ));
     }
 
     /// Evidence for the fourth-world editor-route additions: every class added

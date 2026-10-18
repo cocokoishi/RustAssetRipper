@@ -1701,7 +1701,7 @@ mod tests {
     }
 
     #[test]
-    fn web_project_export_redirects_stored_mesh_engine_resource_data() {
+    fn web_project_export_redirects_stored_mesh_and_matches_5_6_texture_yaml() {
         let _source_layouts = crate::SourceFactoryLayoutGuard::use_source_factory();
         let fixture = include_str!("../export/lightmap_project_source_5_6_meshfilter_fixture.txt");
         let hex = fixture
@@ -1741,6 +1741,15 @@ mod tests {
         assert!(!matching_project
             .join("Assets/Mesh/LightmappedMesh.asset")
             .exists());
+        let matching_texture = std::fs::read_to_string(
+            matching_project.join("Assets/Scenes/lightmapfixture.assets/LightmapFixture.texture2D"),
+        )
+        .expect("Texture2D YAML is exported beside the Scene");
+        assert_eq!(
+            matching_texture,
+            include_str!("../export/lightmap_project_web_texture2d_source_5_6.yaml"),
+            "Unity 5.6 Texture2D YAML differs from frozen source"
+        );
         let matching_scene = std::fs::read_to_string(
             matching_project.join("Assets/Scenes/lightmapfixture.assets.unity"),
         )
