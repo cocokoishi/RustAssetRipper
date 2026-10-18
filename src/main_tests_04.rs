@@ -1661,3 +1661,212 @@
         let meta = fs::read_to_string(&meta_path).unwrap();
         assert!(meta.contains("AudioImporter:"), "{meta}");
     }
+
+    #[test]
+    fn export_project_rebuilds_source_atlas_sprite_yaml_and_importer() {
+        let fixture = include_str!("export/sprite_atlas_project_source_2019_4_fixture.txt");
+
+        fn decode_hex(hex: &str) -> Vec<u8> {
+            assert!(hex.len().is_multiple_of(2), "fixture hex has even length");
+            hex.as_bytes()
+                .chunks_exact(2)
+                .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+                .collect()
+        }
+
+        fn normalize_guid_field(line: &str) -> String {
+            let Some(marker) = line.find("guid:") else {
+                return line.to_owned();
+            };
+            let bytes = line.as_bytes();
+            let mut start = marker + "guid:".len();
+            while start < bytes.len() && bytes[start].is_ascii_whitespace() {
+                start += 1;
+            }
+            let end = start + 32;
+            let is_guid = end <= bytes.len()
+                && bytes[start..end].iter().all(u8::is_ascii_hexdigit)
+                && (end == bytes.len()
+                    || !(bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_'));
+            if is_guid {
+                format!("{}<GUID>{}", &line[..start], &line[end..])
+            } else {
+                line.to_owned()
+            }
+        }
+
+        fn normalize_text(bytes: &[u8]) -> Vec<u8> {
+            let text = String::from_utf8(bytes.to_vec()).expect("source text output is UTF-8");
+            let text = text.replace("\r\n", "\n").replace('\r', "\n");
+            let had_final_newline = text.ends_with('\n');
+            let mut normalized = text
+                .lines()
+                .map(|line| {
+                    if line.starts_with("timeCreated: ") {
+                        "timeCreated: <TIME>".to_owned()
+                    } else {
+                        normalize_guid_field(line)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if had_final_newline {
+                normalized.push('\n');
+            }
+            normalized.into_bytes()
+        }
+
+        fn collect_files(path: &std::path::Path, files: &mut Vec<PathBuf>) {
+            for entry in fs::read_dir(path).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if entry.file_type().unwrap().is_dir() {
+                    collect_files(&path, files);
+                } else {
+                    files.push(path);
+                }
+            }
+        }
+
+        fn collect_directories(path: &std::path::Path, directories: &mut Vec<PathBuf>) {
+            for entry in fs::read_dir(path).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if entry.file_type().unwrap().is_dir() {
+                    directories.push(path.clone());
+                    collect_directories(&path, directories);
+                }
+            }
+        }
+
+        let input_row = fixture
+            .lines()
+            .find_map(|line| line.strip_prefix("INPUT_HEX|"))
+            .expect("source fixture contains its SerializedFile");
+        let (file_name, hex) = input_row
+            .split_once('|')
+            .expect("source input row contains a path and hex bytes");
+        assert_eq!(file_name, "SpriteAtlasFixture.assets");
+        let input_bytes = decode_hex(hex);
+
+        let settings = include_str!("export/settings_file_defaults.json")
+            .replace("\"ImageExportFormat\": 4", "\"ImageExportFormat\": 0")
+            .replace(
+                "\"PreferOriginalTextureExtension\": true",
+                "\"PreferOriginalTextureExtension\": false",
+            );
+        assert!(settings.contains("\"ImageExportFormat\": 0"));
+        assert!(settings.contains("\"PreferOriginalTextureExtension\": false"));
+
+        let directory = TestInputDirectory::new_root();
+        let source_path = directory.join(file_name);
+        let settings_path = directory.join("sprite-atlas-settings.json");
+        let output_root = directory.join("project-sprite-atlas");
+        fs::write(&source_path, &input_bytes).unwrap();
+        fs::write(&settings_path, settings.as_bytes()).unwrap();
+        let mut input = TestInputDirectory {
+            directory,
+            files: vec![source_path.clone(), settings_path.clone()],
+            subdirectories: Vec::new(),
+        };
+
+        let arguments = vec![
+            std::ffi::OsString::from("export-project"),
+            std::ffi::OsString::from("--settings"),
+            settings_path.into_os_string(),
+            output_root.clone().into_os_string(),
+            source_path.clone().into_os_string(),
+        ];
+        super::run(arguments.into_iter())
+            .unwrap_or_else(|error| panic!("export-project failed for source SpriteAtlas fixture: {error}"));
+
+        let mut expected_paths = Vec::new();
+        for row in fixture
+            .lines()
+            .filter_map(|line| line.strip_prefix("SOURCE_OUTPUT|"))
+        {
+            let (source_path, hex) = row
+                .split_once('|')
+                .expect("source output row contains a path and hex bytes");
+            let relative_path = source_path
+                .strip_prefix("ExportedProject/")
+                .unwrap_or(source_path);
+            let output_path = output_root.join(relative_path);
+            let expected = decode_hex(hex);
+            let actual = fs::read(&output_path)
+                .unwrap_or_else(|error| panic!("could not read {relative_path}: {error}"));
+            let expected = if Path::new(relative_path)
+                .extension()
+                .is_some_and(|extension| matches!(extension.to_str(), Some("meta" | "asset" | "json" | "txt")))
+            {
+                normalize_text(&expected)
+            } else {
+                expected
+            };
+            let actual = if Path::new(relative_path)
+                .extension()
+                .is_some_and(|extension| matches!(extension.to_str(), Some("meta" | "asset" | "json" | "txt")))
+            {
+                normalize_text(&actual)
+            } else {
+                actual
+            };
+            assert_eq!(actual, expected, "source output differs for {relative_path}");
+            expected_paths.push(relative_path.replace('\\', "/"));
+        }
+
+        let mut actual_files = Vec::new();
+        collect_files(&output_root, &mut actual_files);
+        let mut actual_paths = actual_files
+            .iter()
+            .map(|path| {
+                path.strip_prefix(&output_root)
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .replace('\\', "/")
+            })
+            .collect::<Vec<_>>();
+        actual_paths.sort();
+        expected_paths.sort();
+        assert_eq!(actual_paths, expected_paths, "the entire SpriteAtlas project file inventory matches AssetRipper");
+
+        let sprite_yaml = fs::read_to_string(
+            output_root.join("Assets/Sprite/PackedSpriteFixture.asset"),
+        )
+        .unwrap();
+        assert!(sprite_yaml.contains("m_Rect:\n    serializedVersion: 2\n    x: 8\n    y: 10\n    width: 48\n    height: 32"));
+        assert!(sprite_yaml.contains("m_Offset: {x: -12, y: 16}"));
+        assert!(sprite_yaml.contains("m_Border: {x: 1, y: 2, z: 8, w: 8}"));
+        assert!(sprite_yaml.contains("m_Pivot: {x: 0.25, y: 1}"));
+        assert!(sprite_yaml.contains(
+            "m_RenderDataKey:\n    00000000000000000000000000000000: 91"
+        ));
+        assert!(sprite_yaml.contains("settingsRaw: 37"));
+        assert!(sprite_yaml.contains("uvTransform: {x: 0.5, y: 0.25, z: 0.125, w: 0.0625}"));
+        assert!(sprite_yaml.contains("downscaleMultiplier: 1.5"));
+        assert!(sprite_yaml.contains("m_AtlasTags: []"));
+        assert!(sprite_yaml.contains("m_SpriteAtlas: {fileID: 0}"));
+        let texture_meta = fs::read_to_string(
+            output_root.join("Assets/Texture2D/AtlasTextureFixture.bmp.meta"),
+        )
+        .unwrap();
+        let texture_meta_guid = texture_meta
+            .lines()
+            .find_map(|line| line.strip_prefix("guid: "))
+            .expect("texture meta has its generated GUID");
+        let sprite_texture_guid = sprite_yaml
+            .lines()
+            .find_map(|line| {
+                let (_, value) = line.split_once("guid: ")?;
+                Some(value.split(',').next().unwrap())
+            })
+            .expect("Sprite render data points to the exported texture");
+        assert_eq!(sprite_texture_guid, texture_meta_guid);
+        assert_eq!(fs::read(&source_path).unwrap(), input_bytes);
+        input.files.extend(actual_files);
+        let mut actual_directories = vec![output_root.clone()];
+        collect_directories(&output_root, &mut actual_directories);
+        actual_directories.sort_by_key(|path| path.components().count());
+        input.subdirectories.extend(actual_directories);
+    }

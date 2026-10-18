@@ -65,6 +65,11 @@ if (args.Length == 1 && args[0] == "describe-lightmap")
     return DescribeLightmap();
 }
 
+if (args.Length == 4 && args[0] == "export-sprite-atlas-project")
+{
+    return ExportSpriteAtlasProject(args[1], args[2], args[3]);
+}
+
 if (args.Length == 1 && args[0] == "describe-lighting-assets")
 {
     return DescribeLightingAssets();

@@ -181,6 +181,233 @@ ObjectData = textureBody,
         return 0;
     }
 
+    internal static int ExportSpriteAtlasProject(string inputRootValue, string outputRootValue, string rowsValue)
+    {
+        string inputRoot = Path.GetFullPath(inputRootValue);
+        string outputRoot = Path.GetFullPath(outputRootValue);
+        string rowsPath = Path.GetFullPath(rowsValue);
+        EnsureEmptyOrMissingDirectory(inputRoot, "input");
+        EnsureEmptyOrMissingDirectory(outputRoot, "output");
+        if (File.Exists(rowsPath) || Directory.Exists(rowsPath))
+        {
+            throw new IOException($"rows file must be new: {rowsPath}");
+        }
+        Directory.CreateDirectory(inputRoot);
+        Directory.CreateDirectory(outputRoot);
+        Directory.CreateDirectory(Path.GetDirectoryName(rowsPath)!);
+
+        UnityVersion version = UnityVersion.Parse("2019.4.40f1");
+        GameBundle bundle = new();
+        ProcessedAssetCollection collection = new(bundle);
+        collection.GetType().GetProperty("Version")!.SetValue(collection, version);
+
+        object texture = MakeGenerated(
+            "AssetRipper.SourceGenerated.Classes.ClassID_28.Texture2D",
+            28,
+            301,
+            collection,
+            version);
+        object sprite = MakeGenerated(
+            "AssetRipper.SourceGenerated.Classes.ClassID_213.Sprite",
+            213,
+            303,
+            collection,
+            version);
+        object atlas = MakeGenerated(
+            "AssetRipper.SourceGenerated.Classes.ClassID_687078895.SpriteAtlas",
+            687078895,
+            302,
+            collection,
+            version);
+
+        SetGeneratedProperty(texture, "Name", "AtlasTextureFixture");
+        SetGeneratedProperty(texture, "Width_C28", 64);
+        SetGeneratedProperty(texture, "Height_C28", 48);
+        SetGeneratedProperty(texture, "ImageCount_C28", 1);
+        SetGeneratedProperty(texture, "MipMap_C28", false);
+        byte[] imageBytes = new byte[64 * 48 * 4];
+        for (int pixel = 0; pixel < 64 * 48; pixel++)
+        {
+            int offset = pixel * 4;
+            imageBytes[offset] = (byte)(pixel * 3);
+            imageBytes[offset + 1] = (byte)(pixel * 5);
+            imageBytes[offset + 2] = (byte)(pixel * 7);
+            imageBytes[offset + 3] = 255;
+        }
+        SetGeneratedProperty(texture, "CompleteImageSize_C28_Int32", imageBytes.Length);
+        SetGeneratedProperty(texture, "Format_C28E", 4); // RGBA32
+        SetGeneratedProperty(texture, "ImageData_C28", imageBytes);
+
+        SetGeneratedProperty(sprite, "Name", "PackedSpriteFixture");
+        SetGeneratedProperty(sprite, "AtlasName", "AtlasFixture");
+        SetGeneratedProperty(sprite, "SpriteID", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        SetGeneratedProperty(sprite, "PixelsToUnits", 16.0f);
+        SetRect(sprite, "Rect", 0, 0, 64, 48);
+        SetVector2(sprite, "Pivot", 0.25f, 0.75f);
+        SetVector2(sprite, "Offset", 0, 0);
+        SetVector4(sprite, "Border", 5, 6, 20, 20);
+        AddGeneratedString(sprite, "AtlasTags", "AtlasFixtureTag");
+
+        SetGeneratedProperty(atlas, "Name", "AtlasFixture");
+
+        MethodInfo addAsset = collection.GetType().GetMethod("AddAsset", BindingFlags.NonPublic | BindingFlags.Instance)
+            ?? throw new MissingMethodException(collection.GetType().FullName, "AddAsset");
+        foreach (object asset in new[] { texture, sprite, atlas })
+        {
+            addAsset.Invoke(collection, new[] { asset });
+        }
+        SetGeneratedAssetPointer(sprite, "SpriteAtlas", collection, atlas);
+        object spriteRenderData = FindGeneratedProperty(sprite, "RD").GetValue(sprite)
+            ?? throw new InvalidOperationException("generated Sprite has no RD");
+        SetGeneratedAssetPointer(spriteRenderData, "Texture", collection, texture);
+        AddGeneratedTypedAssetPointer(atlas, "PackedSprites", collection, sprite);
+
+        object renderDataMap = FindGeneratedProperty(atlas, "RenderDataMap").GetValue(atlas)
+            ?? throw new InvalidOperationException("generated SpriteAtlas has no RenderDataMap");
+        MethodInfo addNew = renderDataMap.GetType().GetMethods(BindingFlags.Public | BindingFlags.Instance)
+            .Single(method => method.Name == "AddNew" && method.GetParameters().Length == 0
+                && method.ReturnType.Name.StartsWith("AccessPair`", StringComparison.Ordinal));
+        object mapEntry = addNew.Invoke(renderDataMap, null)
+            ?? throw new InvalidOperationException("SpriteAtlas.RenderDataMap.AddNew returned null");
+        object atlasRenderDataKey = FindGeneratedProperty(mapEntry, "Key").GetValue(mapEntry)
+            ?? throw new InvalidOperationException("SpriteAtlas render-data entry has no key");
+        object atlasData = FindGeneratedProperty(mapEntry, "Value").GetValue(mapEntry)
+            ?? throw new InvalidOperationException("SpriteAtlas render-data entry has no value");
+        object renderDataKey = FindGeneratedProperty(sprite, "RenderDataKey").GetValue(sprite)
+            ?? throw new InvalidOperationException("generated Sprite has no RenderDataKey");
+        SetGeneratedProperty(renderDataKey, "Value", 91L);
+        SetGeneratedProperty(atlasRenderDataKey, "Value", 91L);
+        SetGeneratedAssetPointer(atlasData, "Texture", collection, texture);
+        SetRect(atlasData, "TextureRect", 8, 10, 48, 32);
+        SetVector2(atlasData, "TextureRectOffset", 4, 4);
+        SetVector2(atlasData, "AtlasRectOffset", 5, 6);
+        SetGeneratedProperty(atlasData, "SettingsRaw", 37);
+        SetVector4(atlasData, "UvTransform", 0.5f, 0.25f, 0.125f, 0.0625f);
+        SetGeneratedProperty(atlasData, "DownscaleMultiplier", 1.5f);
+
+        SerializedFileBuilder builder = new()
+        {
+            Generation = FormatVersion.StoresTypeDependencies,
+            Version = version,
+            Platform = (BuildTarget)19,
+            EndianType = EndianType.LittleEndian,
+            HasTypeTree = false,
+        };
+        foreach (object asset in new[] { texture, sprite, atlas })
+        {
+            int classId = (int)asset.GetType().GetProperty("ClassID")!.GetValue(asset)!;
+            long pathId = (long)asset.GetType().GetProperty("PathID")!.GetValue(asset)!;
+            byte[] body;
+            using (MemoryStream bodyStream = new())
+            using (AssetWriter writer = new(bodyStream, collection))
+            {
+                ((IAssetWritable)asset).WriteRelease(writer);
+                body = bodyStream.ToArray();
+            }
+            SerializedType type = new() { RawTypeID = classId };
+            int typeIndex = builder.Types.Count;
+            builder.Types.Add(type);
+            builder.Objects.Add(new ObjectInfo(type)
+            {
+                FileID = pathId,
+                TypeID = classId,
+                SerializedTypeIndex = typeIndex,
+                ObjectData = body,
+            });
+        }
+
+        SerializedFile serializedFile = builder.Build();
+        serializedFile.FilePath = "SpriteAtlasFixture.assets";
+        byte[] inputBytes = serializedFile.ToByteArray();
+        string inputPath = Path.Combine(inputRoot, "SpriteAtlasFixture.assets");
+        File.WriteAllBytes(inputPath, inputBytes);
+
+        FullConfiguration configuration = new();
+        configuration.ExportSettings.ImageExportFormat = ImageExportFormat.Bmp;
+        configuration.ExportSettings.PreferOriginalTextureExtension = false;
+        ExportHandler handler = new(configuration);
+        var gameData = handler.LoadAndProcess([inputRoot], LocalFileSystem.Instance);
+        handler.Export(gameData, outputRoot, LocalFileSystem.Instance);
+
+        string exportedProjectRoot = Path.Combine(outputRoot, "ExportedProject");
+        string spriteYamlPath = Path.Combine(exportedProjectRoot, "Assets", "Sprite", "PackedSpriteFixture.asset");
+        string textureMetaPath = Path.Combine(exportedProjectRoot, "Assets", "Texture2D", "AtlasTextureFixture.bmp.meta");
+        string spriteTextureGuid = Regex.Match(
+            File.ReadAllText(spriteYamlPath),
+            @"\bguid:\s*([0-9a-fA-F]{32})\b").Groups[1].Value;
+        string textureMetaGuid = Regex.Match(
+            File.ReadAllText(textureMetaPath),
+            @"(?m)^guid: ([0-9a-fA-F]{32})$").Groups[1].Value;
+        if (spriteTextureGuid.Length != 32 || spriteTextureGuid != textureMetaGuid)
+        {
+            throw new InvalidDataException("source Sprite texture PPtr does not match the exported Texture2D meta GUID");
+        }
+
+        using StreamWriter rows = new(rowsPath, false, new UTF8Encoding(false)) { NewLine = "\n" };
+        rows.WriteLine("# Source-generated Sprite, SpriteAtlas, and Texture2D through SpriteProcessor and ExportHandler.Export.");
+        rows.WriteLine("UNITY_VERSION|2019.4.40f1");
+        rows.WriteLine("SETTINGS|ImageExportFormat=Bmp|PreferOriginalTextureExtension=false");
+        WriteInputRow(rows, inputPath, inputBytes);
+        foreach (string outputPath in Directory.EnumerateFiles(outputRoot, "*", SearchOption.AllDirectories)
+            .OrderBy(path => Path.GetRelativePath(outputRoot, path), StringComparer.Ordinal))
+        {
+            string relativePath = Path.GetRelativePath(outputRoot, outputPath).Replace('\\', '/');
+            byte[] outputBytes = File.ReadAllBytes(outputPath);
+            if (relativePath.EndsWith(".meta", StringComparison.Ordinal))
+            {
+                outputBytes = Encoding.UTF8.GetBytes(
+                    NormalizeTextureProjectMeta(new UTF8Encoding(false, true).GetString(outputBytes)));
+            }
+            else if (Path.GetExtension(relativePath) is ".unity" or ".asset" or ".json" or ".txt")
+            {
+                outputBytes = Encoding.UTF8.GetBytes(
+                    NormalizeSpriteAtlasProjectText(new UTF8Encoding(false, true).GetString(outputBytes)));
+            }
+            rows.WriteLine($"SOURCE_OUTPUT|{relativePath}|{Convert.ToHexString(outputBytes)}");
+        }
+        Console.WriteLine($"SPRITE_ATLAS_PROJECT|input={inputBytes.Length}|texture={imageBytes.Length}|files={Directory.GetFiles(outputRoot, "*", SearchOption.AllDirectories).Length}");
+        return 0;
+    }
+
+    private static string NormalizeSpriteAtlasProjectText(string text)
+    {
+        text = text.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
+        text = Regex.Replace(text, "(?i)(\\bguid:\\s*)[0-9a-f]{32}\\b", "$1<GUID>");
+        return Regex.Replace(text, "(?m)^timeCreated: [0-9]+$", "timeCreated: <TIME>");
+    }
+
+    private static void SetVector2(object asset, string propertyName, float x, float y)
+    {
+        object vector = FindGeneratedProperty(asset, propertyName).GetValue(asset)
+            ?? throw new InvalidOperationException($"generated {propertyName} has no value");
+        SetGeneratedProperty(vector, "X", x);
+        SetGeneratedProperty(vector, "Y", y);
+    }
+
+    private static void SetRect(object asset, string propertyName, float x, float y, float width, float height)
+    {
+        object rect = FindGeneratedProperty(asset, propertyName).GetValue(asset)
+            ?? throw new InvalidOperationException($"generated {propertyName} has no value");
+        SetGeneratedProperty(rect, "X", x);
+        SetGeneratedProperty(rect, "Y", y);
+        SetGeneratedProperty(rect, "Width", width);
+        SetGeneratedProperty(rect, "Height", height);
+    }
+
+    private static void AddGeneratedString(object owner, string propertyName, string value)
+    {
+        object list = FindGeneratedProperty(owner, propertyName).GetValue(owner)
+            ?? throw new InvalidOperationException($"generated {propertyName} list is null");
+        MethodInfo add = list.GetType().GetMethods(BindingFlags.Public | BindingFlags.Instance)
+            .Single(method => method.Name == "Add" && method.GetParameters().Length == 1);
+        Type stringType = add.GetParameters()[0].ParameterType;
+        object generatedString = stringType == typeof(string)
+            ? value
+            : Activator.CreateInstance(stringType, value)
+                ?? throw new InvalidOperationException($"could not create {stringType.Name}");
+        add.Invoke(list, new[] { generatedString });
+    }
+
     internal static int DescribeLightmap()
     {
         UnityVersion version = UnityVersion.Parse("2019.4.40f1");
@@ -716,6 +943,21 @@ ObjectData = textureBody,
         SetGeneratedProperty(component, "ClassID", (int)target.GetType().GetProperty("ClassID")!.GetValue(target)!);
         object pointer = FindGeneratedProperty(component, "Component").GetValue(component)
             ?? throw new InvalidOperationException($"generated {propertyName} component pointer is null");
+        MethodInfo setter = pointer.GetType().GetMethods(BindingFlags.Public | BindingFlags.Instance)
+            .Single(method => method.Name == "SetAsset"
+                && method.GetParameters().Length == 2
+                && method.GetParameters()[1].ParameterType.IsInstanceOfType(target));
+        setter.Invoke(pointer, new[] { collection, target });
+    }
+
+    private static void AddGeneratedTypedAssetPointer(object owner, string propertyName, AssetCollection collection, object target)
+    {
+        object list = FindGeneratedProperty(owner, propertyName).GetValue(owner)
+            ?? throw new InvalidOperationException($"generated {propertyName} list is null");
+        MethodInfo add = list.GetType().GetMethods(BindingFlags.Public | BindingFlags.Instance)
+            .Single(method => method.Name == "AddNew" && method.GetParameters().Length == 0);
+        object pointer = add.Invoke(list, null)
+            ?? throw new InvalidOperationException($"generated {propertyName}.AddNew returned null");
         MethodInfo setter = pointer.GetType().GetMethods(BindingFlags.Public | BindingFlags.Instance)
             .Single(method => method.Name == "SetAsset"
                 && method.GetParameters().Length == 2
