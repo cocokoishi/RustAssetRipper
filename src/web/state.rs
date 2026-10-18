@@ -1592,22 +1592,25 @@ mod tests {
         assert_eq!(std::fs::read(&resource_path).unwrap(), resource_bytes);
     }
 
-    #[test]
-    fn web_project_export_redirects_stored_material_engine_resource_data() {
-        let _source_layouts = crate::SourceFactoryLayoutGuard::use_source_factory();
+    fn source_material_shader_fixture_bytes() -> Vec<u8> {
         let fixture = include_str!("../export/material_engine_resource_project_2019_4_fixture.txt");
         let hex = fixture
             .lines()
             .find_map(|line| line.strip_prefix("INPUT_HEX|MaterialFixture.assets|"))
             .expect("source fixture includes the Material and Shader SerializedFile");
-        let source_bytes = hex
-            .as_bytes()
+        hex.as_bytes()
             .chunks_exact(2)
             .map(|pair| {
                 u8::from_str_radix(std::str::from_utf8(pair).expect("hex is ASCII"), 16)
                     .expect("fixture hex is valid")
             })
-            .collect::<Vec<_>>();
+            .collect()
+    }
+
+    #[test]
+    fn web_project_export_redirects_stored_material_engine_resource_data() {
+        let _source_layouts = crate::SourceFactoryLayoutGuard::use_source_factory();
+        let source_bytes = source_material_shader_fixture_bytes();
         let directory = test_directory("engine-resource-material");
         let source_path = directory.join("MaterialFixture.assets");
         std::fs::write(&source_path, &source_bytes).expect("write generated fixture");
@@ -1646,6 +1649,55 @@ mod tests {
             .as_array()
             .is_some_and(Vec::is_empty));
         assert_eq!(std::fs::read(&source_path).unwrap(), source_bytes);
+    }
+
+    #[test]
+    fn web_project_export_redirects_stored_shader_engine_resource_data() {
+        let _source_layouts = crate::SourceFactoryLayoutGuard::use_source_factory();
+        let source_bytes = source_material_shader_fixture_bytes();
+        let directory = test_directory("engine-resource-shader");
+        let source_path = directory.join("MaterialFixture.assets");
+        std::fs::write(&source_path, &source_bytes).expect("write generated fixture");
+        let source_path_text = source_path.to_string_lossy().into_owned();
+
+        let mut state = state(true);
+        state
+            .load(&[source_path_text])
+            .expect("load source-generated Shader and Material");
+        state
+            .set_singleton_data(
+                "EngineResourceData",
+                r#"{"DefaultResources":{"777":{"$type":"Shader","Name":"ShaderFixture","PropertyNames":[]}},"ExtraResources":{}}"#,
+            )
+            .expect("store source-shaped custom Shader resource data");
+
+        let matching_output = directory.join("project-matching");
+        let matching_output_text = matching_output.to_string_lossy().into_owned();
+        state
+            .export_unity_project(&matching_output_text, false)
+            .expect("the custom cache redirects a matching Shader");
+        let matching_project = matching_output.join("ExportedProject");
+        assert!(!matching_project
+            .join("Assets/Shader/ShaderFixture.shader")
+            .exists());
+        assert!(matching_project
+            .join("Assets/Material/MaterialFixture.mat")
+            .is_file());
+
+        state
+            .set_singleton_data(
+                "EngineResourceData",
+                r#"{"DefaultResources":{"777":{"$type":"Shader","Name":"ShaderFixture","PropertyNames":["DifferentProperty"]}},"ExtraResources":{}}"#,
+            )
+            .expect("store a mismatching Shader property list");
+        let mismatching_output = directory.join("project-mismatching");
+        let mismatching_output_text = mismatching_output.to_string_lossy().into_owned();
+        state
+            .export_unity_project(&mismatching_output_text, false)
+            .expect("a Shader with different properties remains a normal export");
+        assert!(mismatching_output
+            .join("ExportedProject/Assets/Shader/ShaderFixture.shader")
+            .is_file());
     }
 
     #[test]

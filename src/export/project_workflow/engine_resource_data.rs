@@ -8,6 +8,7 @@ use std::fmt;
 pub(super) struct EngineResourceData {
     text_assets: Vec<TextAssetEntry>,
     material_assets: Vec<MaterialEntry>,
+    shader_assets: Vec<ShaderEntry>,
     texture_2d_assets: Vec<Texture2DEntry>,
     cubemap_assets: Vec<CubemapEntry>,
     audio_clip_assets: Vec<AudioClipEntry>,
@@ -25,6 +26,13 @@ struct TextAssetEntry {
 struct MaterialEntry {
     name: String,
     shader_name: Option<String>,
+    target: PredefinedEngineAssetTarget,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ShaderEntry {
+    name: String,
+    property_names: Vec<String>,
     target: PredefinedEngineAssetTarget,
 }
 
@@ -97,8 +105,8 @@ struct RawEngineResourceData {
 }
 
 impl EngineResourceData {
-    /// Parses the supported TextAsset, Material, Texture2D, Cubemap, and AudioClip subsets of the
-    /// Mining EngineResourceData model.
+    /// Parses the supported TextAsset, Material, Shader, Texture2D, Cubemap, and AudioClip subsets
+    /// of the Mining EngineResourceData model.
     ///
     /// A missing, null, malformed, or otherwise non-deserializable nullable value means the
     /// frozen serializer produced `null` and the exporter falls back to embedded TPK data. A
@@ -115,6 +123,7 @@ impl EngineResourceData {
 
         let mut text_assets = Vec::new();
         let mut material_assets = Vec::new();
+        let mut shader_assets = Vec::new();
         let mut texture_2d_assets = Vec::new();
         let mut cubemap_assets = Vec::new();
         let mut audio_clip_assets = Vec::new();
@@ -154,6 +163,29 @@ impl EngineResourceData {
                     material_assets.push(MaterialEntry {
                         name: name.to_owned(),
                         shader_name,
+                        target: PredefinedEngineAssetTarget { file_id, guid },
+                    });
+                    continue;
+                }
+                if kind == "Shader" {
+                    let Some(name) = object.get("Name").and_then(Value::as_str) else {
+                        return Ok(None);
+                    };
+                    let property_names = match object.get("PropertyNames") {
+                        None | Some(Value::Null) => Vec::new(),
+                        Some(Value::Array(values)) => {
+                            let Some(names) =
+                                values.iter().map(Value::as_str).collect::<Option<Vec<_>>>()
+                            else {
+                                return Ok(None);
+                            };
+                            names.into_iter().map(str::to_owned).collect()
+                        }
+                        Some(_) => return Ok(None),
+                    };
+                    shader_assets.push(ShaderEntry {
+                        name: name.to_owned(),
+                        property_names,
                         target: PredefinedEngineAssetTarget { file_id, guid },
                     });
                     continue;
@@ -255,11 +287,10 @@ impl EngineResourceData {
                             | "Mesh"
                             | "MonoBehaviour"
                             | "MonoScript"
-                            | "Shader"
                             | "Sprite"
                     ) {
                         return Err(super::invalid_project(format!(
-                            "stored EngineResourceData contains unsupported {kind} cache entries; only TextAsset, Material, Texture2D, Cubemap, and AudioClip matching is currently wired"
+                            "stored EngineResourceData contains unsupported {kind} cache entries; only TextAsset, Material, Shader, Texture2D, Cubemap, and AudioClip matching is currently wired"
                         )));
                     }
                     return Ok(None);
@@ -292,6 +323,7 @@ impl EngineResourceData {
         Ok(Some(Self {
             text_assets,
             material_assets,
+            shader_assets,
             texture_2d_assets,
             cubemap_assets,
             audio_clip_assets,
@@ -323,6 +355,27 @@ impl EngineResourceData {
         self.material_assets
             .iter()
             .find(|entry| entry.name == name && entry.shader_name.as_deref() == shader_name)
+            .map(|entry| entry.target)
+    }
+
+    /// The frozen cache hashes the ordered Shader property names alongside the Shader name.
+    /// Comparing the hash inputs directly preserves the identity without depending on .NET's
+    /// process-randomized HashCode seed.
+    pub(super) fn shader_target(
+        &self,
+        name: &str,
+        property_names: &[&str],
+    ) -> Option<PredefinedEngineAssetTarget> {
+        self.shader_assets
+            .iter()
+            .find(|entry| {
+                entry.name == name
+                    && entry
+                        .property_names
+                        .iter()
+                        .map(String::as_str)
+                        .eq(property_names.iter().copied())
+            })
             .map(|entry| entry.target)
     }
 
@@ -432,6 +485,36 @@ mod tests {
             .material_target("OtherMaterial", Some("ShaderFixture"))
             .is_none());
         assert!(data.material_target("MaterialFixture", None).is_none());
+    }
+
+    #[test]
+    fn engine_resource_data_shader_matches_name_and_ordered_property_names() {
+        let data = EngineResourceData::parse(Some(
+            r#"{"DefaultResources":{"777":{"$type":"Shader","Name":"ShaderFixture","PropertyNames":["_Color","_MainTex"]},"778":{"$type":"Shader","Name":"EmptyShader","PropertyNames":null}},"ExtraResources":{"779":{"$type":"Shader","Name":"ExtraShader","PropertyNames":["_MainTex","_Color"]}}}"#,
+        ))
+        .expect("Shader resource entries parse")
+        .expect("valid object selects a stored cache");
+        let target = data
+            .shader_target("ShaderFixture", &["_Color", "_MainTex"])
+            .expect("Shader name and ordered properties identify the source Shader");
+        assert_eq!(target.file_id, 777);
+        assert_eq!(target.guid[8..12], 14u32.to_le_bytes());
+        let empty_target = data
+            .shader_target("EmptyShader", &[])
+            .expect("null property lists become the source empty array");
+        assert_eq!(empty_target.file_id, 778);
+        let extra_target = data
+            .shader_target("ExtraShader", &["_MainTex", "_Color"])
+            .expect("extra Shader entries retain their identity");
+        assert_eq!(extra_target.file_id, 779);
+        assert_eq!(extra_target.guid[8..12], 15u32.to_le_bytes());
+        assert!(data
+            .shader_target("ShaderFixture", &["_MainTex", "_Color"])
+            .is_none());
+        assert!(data.shader_target("ShaderFixture", &["_Color"]).is_none());
+        assert!(data
+            .shader_target("OtherShader", &["_Color", "_MainTex"])
+            .is_none());
     }
 
     #[test]
@@ -551,11 +634,11 @@ mod tests {
     #[test]
     fn known_unimplemented_resource_types_fail_before_project_writes() {
         let error = EngineResourceData::parse(Some(
-            r#"{"DefaultResources":{"900":{"$type":"Shader","Name":"Custom"}},"ExtraResources":{}}"#,
+            r#"{"DefaultResources":{"900":{"$type":"Sprite","Name":"Custom"}},"ExtraResources":{}}"#,
         ))
         .expect_err("unsupported typed resources must not be silently discarded");
         assert!(error.to_string().contains(
-            "only TextAsset, Material, Texture2D, Cubemap, and AudioClip matching is currently wired"
+            "only TextAsset, Material, Shader, Texture2D, Cubemap, and AudioClip matching is currently wired"
         ));
     }
 }

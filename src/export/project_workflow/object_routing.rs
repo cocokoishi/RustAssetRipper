@@ -1167,6 +1167,27 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
             } else {
                 None
             };
+            let predefined_stored_engine_shader = if context.engine_asset_source
+                == EngineAssetSource::StoredResourceData
+                && source_engine_guid.is_none()
+                && class_id == SHADER_CLASS_ID
+            {
+                match shader_view.as_ref().and_then(|view| view.parsed.as_ref()) {
+                    Some(parsed) => {
+                        let property_names = parsed
+                            .properties
+                            .iter()
+                            .map(|property| property.name.as_str())
+                            .collect::<Vec<_>>();
+                        context
+                            .engine_resource_data
+                            .and_then(|data| data.shader_target(&parsed.name, &property_names))
+                    }
+                    None => None,
+                }
+            } else {
+                None
+            };
             let material_view = if source_engine_guid.is_none() && class_id == 21 {
                 payload
                     .map(|payload| crate::resources::material::MaterialView::from_value(&payload.root))
@@ -1349,6 +1370,7 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                 None
             };
             let predefined_engine_target = predefined_engine_shader
+                .or(predefined_stored_engine_shader)
                 .or(predefined_engine_material)
                 .or(predefined_engine_sprite)
                 .or(predefined_engine_audio_clip)
