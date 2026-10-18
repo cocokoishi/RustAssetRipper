@@ -742,7 +742,7 @@ mod tests {
         ))
         .expect_err("unsupported typed resources must not be silently discarded");
         assert!(error.to_string().contains(
-            "only TextAsset, Material, Shader, Texture2D, Cubemap, and AudioClip matching is currently wired"
+            "only TextAsset, Mesh, Material, Shader, Texture2D, Cubemap, and AudioClip matching is currently wired"
         ));
     }
 }
