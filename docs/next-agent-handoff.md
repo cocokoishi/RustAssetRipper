@@ -2,16 +2,16 @@
 
 ## Latest verified checkpoint
 
-- Latest product-code revision: `296ff2bc1b5690278a275b1a330364573fc4a949`.
-- GitHub Actions run [`39157239238`](https://github.com/cocokoishi/RustAssetRipper/actions/runs/39157239238) passed all eight jobs and uploaded Windows/Linux release artifacts.
-- The CRN header probe now reports the six original fixtures as 512x512, 10 levels, one face. A generated public 8x8 DXT1 CRN cubemap adds a bounded three-level, six-face conversion case. The frozen classic decoder returns 288 DXT bytes and UnityCrunch throws on this pre-2017.3 input; Rust matches all six top-level face RGBA hashes against the Crunch `-split` output. Details: `DIFF-RES-TEXTURE-CRUNCH-MULTIFACE-001`.
-- The ledger remains 409 rows: 381 verified and 28 non-verified. `RES-TEXTURE-CRUNCH-001` remains unverified for broader codec/version/product coverage.
+- Latest product-code revision: `e5917a4b09958c5d432665cb81975c4505f490db`.
+- GitHub Actions run [`39159501038`](https://github.com/cocokoishi/RustAssetRipper/actions/runs/39159501038) passed all eight jobs; Windows/Linux release artifacts were uploaded.
+- `OBJ-REF-001` now has a nested-owner differential: a requester inside `source.bundle` resolves duplicate `target.assets` siblings to the first remaining outer-entry match. Rust's PPtr graph, collection dependency table, and project YAML match frozen AssetRipper. See `DIFF-OBJ-REF-NESTED-OWNER-SCOPE-001`.
+- The ledger remains 409 rows: 381 verified and 28 non-verified. `OBJ-REF-001` remains in progress; this case does not close the row.
 - Preserve the existing untracked `tools/__pycache__/` directory.
 
 ## Primary next gap
 
-Advance `OBJ-REF-001` by reproducing one unresolved or ambiguous external dependency case in a nested bundle. The live ledger still lists unresolved/ambiguous dependencies and the full bundle hierarchy matrix as required. Compare AssetRipper and Rust by exact collection/file identity and resolved PPtr target, then exercise the corresponding export mapping if the fixture supports it. Do not infer parity from output counts or filenames.
+Probe a missing external dependency requested by a SerializedFile inside a nested UnityFS bundle. Compare frozen `Bundle.ResolveCollection`/PPtr/export behavior with Rust's dependency report, unresolved graph edge, and CLI/export result. Pin the requester bundle identity and exact missing name; do not infer parity from output counts.
 
 ## External limitation
 
-Unity Editor import/runtime validation remains unrun because this workstation has no valid Editor license. The UABEA checkout has no prebuilt executable, so UABEA runtime comparison was unavailable for the recent Texture2D YAML slices. Other external blockers remain individually marked in the ledger.
+Unity Editor import/runtime validation remains unrun because this workstation has no valid Editor license. The UABEA checkout has no prebuilt executable. Other external blockers remain individually marked in the ledger.
