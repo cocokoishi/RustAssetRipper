@@ -660,6 +660,7 @@
             ("unreadable_version", 20),
             ("unreadable_no_tree", 8),
             ("textasset_bad_tail", 25),
+            ("patch_retry_light_failed", 151),
         ] {
             let hex = fixture
                 .lines()
@@ -709,7 +710,7 @@
             )
             .unwrap_or_else(|error| panic!("{case}: workspace load failed: {error}"));
 
-            if case != "textasset_bad_tail" {
+            if !matches!(case, "textasset_bad_tail" | "patch_retry_light_failed") {
                 assert!(!workspace.files()[0].reference_graph.is_complete());
                 assert!(!workspace.files()[0]
                     .reference_graph
@@ -747,10 +748,18 @@
                 let (source_prefix, source_path) = source_message
                     .split_once(" Path:")
                     .expect("source log includes its file-path context");
-                assert_eq!(
-                    source_path, "\u{2420}",
-                    "the fixture marks its trailing path space visibly"
-                );
+                match case {
+                    "textasset_bad_tail" => assert_eq!(
+                        source_path, "\u{2420}",
+                        "the fixture marks its trailing path space visibly"
+                    ),
+                    "patch_retry_light_failed" => {
+                        assert!(source_path.starts_with("\u{2420}"));
+                        assert!(source_path.contains("System.ArgumentOutOfRangeException"));
+                        assert!(source_path.contains("Parameter 'length'"));
+                    }
+                    _ => unreachable!("only malformed source rows carry Error logs"),
+                }
                 let actual_message = object
                     .factory
                     .log_message
@@ -760,7 +769,20 @@
                     .split_once(" Path: ")
                     .expect("Rust error log includes its file-path context");
                 assert_eq!(actual_prefix, source_prefix);
-                assert_eq!(actual_path, virtual_path.as_str());
+                match case {
+                    "textasset_bad_tail" => {
+                        assert_eq!(actual_path, virtual_path.as_str());
+                    }
+                    "patch_retry_light_failed" => {
+                        let (actual_file_path, actual_error) = actual_path
+                            .split_once('\n')
+                            .expect("Rust retry failure retains the path and read error");
+                        assert_eq!(actual_file_path, virtual_path.as_str());
+                        assert!(actual_error.contains("truncated input"));
+                        assert!(!actual_message.contains("2017.1.1f0"));
+                    }
+                    _ => unreachable!("only malformed source rows carry Error logs"),
+                }
             } else {
                 assert_eq!(
                     object.factory.log_level,
