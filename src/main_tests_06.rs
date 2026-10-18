@@ -949,7 +949,7 @@
             .expect("target file contains ReferencedRoot at PathID 900");
         let target_object =
             &object_workspace.objects_for_file(target_file_index)[target_object_index];
-        assert_eq!(target_object.class_id, Some(114));
+        assert_eq!(target_object.raw_type_id, 114);
         let loaded_dependency = dependency_report
             .requests
             .iter()
