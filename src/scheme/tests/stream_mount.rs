@@ -458,3 +458,109 @@ fn source_unityfs_nested_webdata_routes_through_the_common_stream_mount() {
         );
     }
 }
+
+#[test]
+fn unityraw_routes_source_unityweb_through_the_common_stream_mount() {
+    let row = include_str!("../../io/io_differential_stream_fixture.txt")
+        .lines()
+        .find(|line| line.starts_with("SCHEME|web_nested_webdata|"))
+        .expect("frozen source UnityWeb-with-WebData row");
+    let fields: Vec<&str> = row.split('|').collect();
+    let nested_web = fields
+        .iter()
+        .find_map(|field| field.strip_prefix("in="))
+        .map(decode_hex_fixture)
+        .expect("source UnityWeb row includes exact input bytes");
+    let expected_tree = fields
+        .iter()
+        .find_map(|field| field.strip_prefix("tree="))
+        .expect("source UnityWeb row includes its frozen mount tree");
+    assert_eq!(
+        expected_tree,
+        "CONTAINER:WebBundleFile:web_nested_webdata.bin:res=0:failed=0,CONTAINER:WebFile:nested.webdata:res=2:failed=0,RES:inner.bin:77656221,RES:sub/deep.bin:64656570"
+    );
+    let scene_bytes = u64::from(
+        crate::container::raw_web::RawWebBundle::parse(&nested_web)
+            .unwrap()
+            .header
+            .scenes
+            .last()
+            .unwrap()
+            .decompressed_size,
+    );
+    let expected_entries = [
+        ("inner.bin", b"web!".as_slice()),
+        ("sub/deep.bin", b"deep".as_slice()),
+    ];
+    let input = unityraw_fixture("nested.web", &nested_web);
+
+    let mut legacy_filesystem = VirtualFileSystem::new();
+    let expected = SchemeReader::read(&input)
+        .unwrap()
+        .mount_container_tree_with_source_name(
+            &mut legacy_filesystem,
+            Some("/tree"),
+            Some("root.raw"),
+            ContainerMountLimits::default(),
+        )
+        .unwrap();
+
+    let mut filesystem = VirtualFileSystem::new();
+    let source = SmartStream::from_reader(Box::new(Cursor::new(input))).unwrap();
+    let actual = mount_stream_container_tree(
+        &source,
+        FileKind::UnityRaw,
+        Some("root.raw"),
+        &mut filesystem,
+        Some("/tree"),
+        SchemeReaderLimits::default(),
+        ContainerMountLimits {
+            // UnityWeb owns one decoded scene; nested WebData entry ranges share it.
+            max_active_nested_bytes: scene_bytes,
+            ..ContainerMountLimits::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(actual, expected);
+    assert_eq!(
+        actual.container_scopes,
+        [
+            "/tree",
+            "/tree/nested.web",
+            "/tree/nested.web/nested.webdata"
+        ]
+    );
+    assert_eq!(actual.container_bundles.len(), 3);
+    assert_eq!(actual.mounted_entries, expected_entries.len());
+    assert!(actual.failed_entries.is_empty());
+    assert_eq!(actual.resource_files.len(), expected_entries.len());
+    drop(source);
+    for (index, (name, expected_bytes)) in expected_entries.iter().enumerate() {
+        let virtual_path = format!("/tree/nested.web/nested.webdata/{name}");
+        let resource = &actual.resource_files[index];
+        assert_eq!(resource.name, *name);
+        assert_eq!(resource.virtual_path, virtual_path);
+        assert_eq!(resource.container_bundle_index, 2);
+        assert_eq!(resource.entry_index, index);
+        assert_eq!(resource.resource_index, index);
+        assert_eq!(
+            filesystem.open_file(&virtual_path).unwrap().stream_type(),
+            crate::io::stream::SmartStreamType::File
+        );
+        assert_eq!(
+            filesystem
+                .read_all_bytes(&virtual_path, expected_bytes.len())
+                .unwrap(),
+            *expected_bytes,
+        );
+        assert_eq!(
+            filesystem
+                .read_all_bytes(&virtual_path, expected_bytes.len())
+                .unwrap(),
+            legacy_filesystem
+                .read_all_bytes(&virtual_path, expected_bytes.len())
+                .unwrap(),
+        );
+    }
+}
