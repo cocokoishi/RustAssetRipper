@@ -587,6 +587,7 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
         let mut editor_manager_root = None;
         if ((animation_clip_editor_format && class_id == 74)
             || matches!(class_id, 104 | 157)
+            || class_id == 213
             || should_use_scene_editor_type_tree(class_id, unity_version_text))
             && matches!(&object.factory.kind, FactoryAssetKind::Generated(_))
         {

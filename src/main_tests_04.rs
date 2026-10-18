@@ -1664,6 +1664,7 @@
 
     #[test]
     fn export_project_rebuilds_source_atlas_sprite_yaml_and_importer() {
+        let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
         let fixture = include_str!("export/sprite_atlas_project_source_2019_4_fixture.txt");
 
         fn decode_hex(hex: &str) -> Vec<u8> {

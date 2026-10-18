@@ -830,6 +830,19 @@ mod tests {
     fn full_tpk_tree_for_2019_material_matches_source_probe_rows() {
         let database = SourceTpkDatabase::embedded();
         let version = FactoryUnityVersion::parse("2019.4.40f1").unwrap();
+        let sprite_atlas_trees = crate::processing::asset_factory::reference_class_layouts()
+            .tpk_trees(687_078_895, &version)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            tree_signature(&sprite_atlas_trees.0),
+            (59, 0x5C05_7753_BCB9_3AD6)
+        );
+        assert_eq!(
+            tree_signature(&sprite_atlas_trees.1),
+            (79, 0xD7F5_9E1C_4416_4E10)
+        );
+
         for class_id in [49, 114, 115, 194] {
             let actual = database.trees(class_id, &version).unwrap().unwrap();
             let expected =
