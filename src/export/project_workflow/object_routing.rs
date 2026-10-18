@@ -1264,7 +1264,7 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
             let predefined_engine_cubemap = if context.engine_asset_source
                 == EngineAssetSource::StoredResourceData
                 && source_engine_guid.is_none()
-                && class_id == crate::export::res_wiring::CUBEMAP_CLASS_ID
+                && class_id == crate::resources::texture::CUBEMAP_CLASS_ID
             {
                 payload
                     .and_then(|payload| predefined_engine_cubemap_key(&payload.root))
