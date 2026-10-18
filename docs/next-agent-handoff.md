@@ -2,16 +2,16 @@
 
 ## Latest verified checkpoint
 
-- Latest product-code revision: `af9943ad08ce861ea1587627269adec2b6560e43`.
-- GitHub Actions run [`39162781437`](https://github.com/cocokoishi/RustAssetRipper/actions/runs/39162781437) passed all eight jobs and uploaded Windows/Linux release artifacts.
-- `OBJ-REF-001` now has a source-backed nested missing-dependency case: the graph retains `MissingDependency { external_index: 0, path_id: 900 }`, and CI-artifact `export-project` output matches the frozen root YAML byte-for-byte. See `DIFF-OBJ-REF-NESTED-MISSING-DEPENDENCY-001`.
-- The ledger remains 409 rows: 381 verified and 28 non-verified. `OBJ-REF-001` remains in progress; this case does not close the row.
-- Preserve the existing untracked `tools/__pycache__/` directory.
+- Latest validated revision: 1ced2d04adf1390ae4e5fd5f0177251c355f5baa.
+- GitHub Actions run 39164813775 passed all eight jobs and uploaded Windows/Linux release artifacts.
+- DIFF-OBJ-REF-NESTED-MISSING-ARRAY-001 verifies two unresolved PPtrs inside an array-valued managed-reference entry in a nested UnityFS collection. The reference graph preserves concrete [0]/[1] paths and exact missing targets; the final-run Windows CLI artifact emits full root YAML byte-for-byte equal to the frozen source.
+- OBJ-REF-001 remains in progress. The ledger remains 409 rows: 381 verified and 28 non-verified.
+- Preserve the existing untracked tools/__pycache__/ directory.
 
 ## Primary next gap
 
-Exercise a `PPtr` inside an array-valued managed-reference entry. The exporter now maps concrete `SerializedValue` paths such as `[0]` to TypeTree wildcard paths such as `[*]`, but the current missing-reference fixture only exercises a scalar `m_Asset`. Build a public synthetic input, compare the frozen source graph and full project YAML with the CI-built Rust `export-project` artifact, and keep the parent row open until broader identity coverage is complete.
+Exercise resolved PPtrs inside an array-valued managed-reference entry. Generate a public nested UnityFS fixture with at least one array element resolving to a loaded target object; compare the frozen source and Rust graph target file/PathID, dependency-collection choice, complete exported root/target YAML, and relevant metadata using the exact CI-built artifact. Keep OBJ-REF-001 open until broader identity and reference branches are covered.
 
 ## External limitation
 
-Unity Editor import/runtime validation remains unrun because this workstation has no valid Editor license. The UABEA checkout has no prebuilt executable. Other external blockers remain individually marked in the ledger.
+Unity Editor import/runtime validation remains unrun because this workstation has no valid Editor license. The UABEA checkout has source and classdata but no prebuilt executable. Other external blockers remain individually marked in the ledger.
