@@ -88,6 +88,15 @@ struct ObjectEntry {
     class_facts: ObjectClassFacts,
 }
 
+/// The scene and Prefab relationships used to classify and queue primary-content collections.
+struct MainAssetClassification {
+    main_asset_of: HashMap<u64, MainAssetFacts>,
+    hierarchy_file: HashMap<u64, usize>,
+    hierarchy_collection_assets: HashMap<u64, Vec<u64>>,
+    hierarchy_collection_names: HashMap<u64, String>,
+    note: Option<String>,
+}
+
 /// One object the driver could not decide, with the reason.
 ///
 /// The reason is owned because a resource failure carries the resource path and the underlying
@@ -123,13 +132,13 @@ pub(super) fn export_loaded_primary_content<W: io::Write>(
     // relation, so the relation has to be computed before any object's facts can be decided. The
     // processing result is kept: the hierarchy GLB producer needs the scene graph it holds.
     let scene_processing = process_scenes(game);
-    let (
+    let MainAssetClassification {
         main_asset_of,
         hierarchy_file,
         hierarchy_collection_assets,
         hierarchy_collection_names,
-        scene_note,
-    ) = main_asset_classification(game, scene_processing.as_ref());
+        note: scene_note,
+    } = main_asset_classification(game, scene_processing.as_ref());
     if let Some(note) = &scene_note {
         writeln!(status_output, "{note}")?;
     }
@@ -796,11 +805,9 @@ impl ExportFileSystem for RunFileSystem {
 /// every component's main asset is its hierarchy, so this cannot be read from an object's own
 /// payload - it is a relation the scene processor computes.
 ///
-/// **The prefab half is deliberately conservative.** A scene hierarchy's member list is available in
-/// full (`game_objects`, `components`, `managers`, `prefab_instances`), so a scene member is
-/// classified exactly. A prefab hierarchy's members are not derived on this path yet, so every object
-/// in a file that holds one is left `Unknown` rather than called `NotAHierarchy`: the latter would
-/// hand prefab objects to the JSON fallback, which the reference never does for them.
+/// Scene membership follows `SceneHierarchyObject.Assets`. Prefab membership follows
+/// `PrefabHierarchyObject.Create`'s GameObject hierarchy walk and appends the source PrefabInstance,
+/// including the hidden marker that the GLB producer queues with the rest of the collection.
 ///
 /// Run the scene and prefab processing, which the main-asset relation and the hierarchy GLB both
 /// need. `None` means it could not run; the caller reports that.
@@ -819,33 +826,26 @@ fn process_scenes(game: &LoadedGame) -> Option<WorkspaceSceneProcessing> {
     .ok()
 }
 
-/// The third return value is a note for the run's log, present only when the relation could not be
-/// computed at all.
+/// Build each object's main-asset classification and the ordered members of its source collection.
 fn main_asset_classification(
     game: &LoadedGame,
     processing: Option<&WorkspaceSceneProcessing>,
-) -> (
-    HashMap<u64, MainAssetFacts>,
-    HashMap<u64, usize>,
-    HashMap<u64, Vec<u64>>,
-    HashMap<u64, String>,
-    Option<String>,
-) {
+) -> MainAssetClassification {
     let mut hierarchy_file: HashMap<u64, usize> = HashMap::new();
     let mut hierarchy_collection_assets: HashMap<u64, Vec<u64>> = HashMap::new();
     let mut hierarchy_collection_names: HashMap<u64, String> = HashMap::new();
     let Some(processing) = processing else {
-        return (
-            HashMap::new(),
+        return MainAssetClassification {
+            main_asset_of: HashMap::new(),
             hierarchy_file,
             hierarchy_collection_assets,
             hierarchy_collection_names,
-            Some(
+            note: Some(
                 "Scene and prefab processing did not run, so no object's main asset is known and \
                  every hierarchy object will be reported as undecidable."
                     .to_owned(),
             ),
-        );
+        };
     };
 
     let mut classification: HashMap<u64, MainAssetFacts> = HashMap::new();
@@ -959,13 +959,13 @@ fn main_asset_classification(
              are not present in any derived hierarchy membership, so they are reported rather than guessed."
         )
     });
-    (
-        classification,
+    MainAssetClassification {
+        main_asset_of: classification,
         hierarchy_file,
         hierarchy_collection_assets,
         hierarchy_collection_names,
         note,
-    )
+    }
 }
 
 #[cfg(test)]

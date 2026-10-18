@@ -565,5 +565,9 @@ use summary::*;
 mod web;
 
 #[cfg(test)]
+#[path = "test_fixtures.rs"]
+mod test_fixtures;
+
+#[cfg(test)]
 #[path = "main_tests.rs"]
 mod tests;

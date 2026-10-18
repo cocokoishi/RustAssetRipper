@@ -1420,7 +1420,7 @@ mod tests {
     /// JSON fallback, and emits those same node semantics through the shipped product.
     #[test]
     fn the_primary_content_export_writes_one_prefab_hierarchy_glb() {
-        use crate::export::workspace_yaml::tests::make_existing_prefab_instance_file;
+        use crate::test_fixtures::make_existing_prefab_instance_file;
 
         let directory =
             PathBuf::from("target/primary-content-prefab-e2e").join(std::process::id().to_string());

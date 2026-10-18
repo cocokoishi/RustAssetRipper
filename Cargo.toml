@@ -27,3 +27,6 @@ texture2ddecoder = { path = "vendor/texture2ddecoder" }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "=1.1.5", features = ["fs"] }
+
+[dev-dependencies]
+serde_json = "1.0.154"

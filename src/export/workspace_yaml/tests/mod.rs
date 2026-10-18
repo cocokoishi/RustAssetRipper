@@ -45,8 +45,8 @@ mod support;
 
 use support::*;
 
+pub(crate) use crate::test_fixtures::make_existing_prefab_instance_file;
 pub(crate) use support::{
     load_workspace_bytes, load_workspace_bytes_with_source_factory,
-    load_workspace_named_bytes_with_source_factory, make_existing_prefab_instance_file,
-    make_game_object_without_transform_file,
+    load_workspace_named_bytes_with_source_factory, make_game_object_without_transform_file,
 };

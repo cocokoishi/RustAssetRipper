@@ -20,5 +20,7 @@ pub mod resources;
 pub mod scheme;
 pub mod serialized_file;
 #[cfg(test)]
+pub(crate) mod test_fixtures;
+#[cfg(test)]
 mod test_support;
 pub mod web_paths;
