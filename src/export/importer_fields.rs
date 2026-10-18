@@ -567,6 +567,7 @@ struct SpriteImporterAssociation {
 #[derive(Default)]
 pub(crate) struct SpriteTextureAssociationIndex<'objects> {
     by_texture: HashMap<(usize, usize), Vec<SpriteImporterAssociation>>,
+    by_sprite: HashMap<(usize, usize), ((usize, usize), i64)>,
     atlas_indexes: HashMap<(usize, usize), SpriteAtlasRenderDataIndex<'objects>>,
 }
 
@@ -759,6 +760,32 @@ impl<'objects> SpriteTextureAssociationIndex<'objects> {
                 _ => {}
             }
         }
+        let association_count = groups
+            .values()
+            .try_fold(0usize, |count, group| {
+                count.checked_add(group.associations.len())
+            })
+            .ok_or_else(|| invalid_sprite_data("SpriteInformation association count overflows"))?;
+        let mut by_sprite = HashMap::new();
+        by_sprite
+            .try_reserve(association_count)
+            .map_err(|_| invalid_sprite_data("could not allocate Sprite subasset identities"))?;
+        for (&texture, group) in &groups {
+            for (ordinal, association) in group.associations.iter().enumerate() {
+                let sprite = (association.file_index, association.object_index);
+                let export_id = sprite_export_id_for_ordinal(ordinal)?;
+                if let Some((previous_texture, _)) = by_sprite.insert(sprite, (texture, export_id))
+                {
+                    if previous_texture != texture {
+                        return Err(invalid_sprite_data(format!(
+                            "Sprite object {} in file {} belongs to multiple Texture2D collections",
+                            association.object_index, association.file_index
+                        )));
+                    }
+                }
+            }
+        }
+
         let mut by_texture = HashMap::new();
         by_texture
             .try_reserve(groups.len())
@@ -768,8 +795,17 @@ impl<'objects> SpriteTextureAssociationIndex<'objects> {
         }
         Ok(Self {
             by_texture,
+            by_sprite,
             atlas_indexes,
         })
+    }
+
+    pub(crate) fn subasset_for_sprite(
+        &self,
+        file_index: usize,
+        object_index: usize,
+    ) -> Option<((usize, usize), i64)> {
+        self.by_sprite.get(&(file_index, object_index)).copied()
     }
 
     fn for_texture(&self, file_index: usize, object_index: usize) -> &[SpriteImporterAssociation] {
@@ -1062,14 +1098,22 @@ fn sprite_meta_data_to_yaml(
         )?;
     }
     metadata.insert_field("tessellationDetail", signed_node(0))?;
-    for (name, value) in sprite_bone_fields_to_yaml(sprite, sprite_sheet)? {
-        metadata.insert_field(name, value)?;
-    }
+    let mut bone_fields = sprite_bone_fields_to_yaml(sprite, sprite_sheet)?;
     if importer_node_has_field(sprite_sheet, "internalID") {
         let export_id = sprite
             .export_id
             .ok_or_else(|| invalid_sprite_data("Sprite metadata has no planned export ID"))?;
-        metadata.insert_field("internalID", signed_node(export_id))?;
+        let internal_id_position = bone_fields
+            .iter()
+            .position(|(name, _)| name == "vertices")
+            .unwrap_or(bone_fields.len());
+        bone_fields.insert(
+            internal_id_position,
+            ("internalID".to_owned(), signed_node(export_id)),
+        );
+    }
+    for (name, value) in bone_fields {
+        metadata.insert_field(name, value)?;
     }
     Ok(metadata)
 }
@@ -1185,6 +1229,11 @@ fn sprite_bone_vertices_to_yaml(vertices: &[[f32; 2]]) -> Result<UnityYamlNode, 
 }
 
 fn sprite_bone_indices_to_yaml(indices: &[i16]) -> Result<UnityYamlNode, Box<dyn Error>> {
+    if indices.is_empty() {
+        // The frozen exporter leaves an empty SpriteMetaData indices value blank (`indices:`)
+        // while its other empty bone-geometry arrays serialize as `[]`.
+        return Ok(UnityYamlNode::scalar(UnityYamlScalar::Empty));
+    }
     let mut sequence = empty_sprite_sequence();
     for index in indices {
         sequence.push(signed_node(i64::from(*index)))?;
@@ -1249,14 +1298,22 @@ fn write_sprite_export_name_table(
     sprites: &[SpriteFacts],
 ) -> Result<(), Box<dyn Error>> {
     if let Some(table) = yaml_mapping_field_mut(importer, "internalIDToNameTable") {
+        let UnityYamlNodeKind::Sequence { style, .. } = &mut table.kind else {
+            return Err(invalid_sprite_data(
+                "internalIDToNameTable must be a sequence",
+            ));
+        };
+        *style = crate::export::unity_yaml::UnityYamlSequenceStyle::Block;
         for sprite in sprites {
             let export_id = sprite
                 .export_id
                 .ok_or_else(|| invalid_sprite_data("Sprite name table has no planned export ID"))?;
             let mut id_pair =
                 UnityYamlNode::mapping(crate::export::unity_yaml::UnityYamlMappingStyle::Block);
-            id_pair.insert_field("first", signed_node(i64::from(SPRITE_OBJECT_CLASS_ID)))?;
-            id_pair.insert_field("second", signed_node(export_id))?;
+            id_pair.insert(
+                signed_node(i64::from(SPRITE_OBJECT_CLASS_ID)),
+                signed_node(export_id),
+            )?;
             let mut entry =
                 UnityYamlNode::mapping(crate::export::unity_yaml::UnityYamlMappingStyle::Block);
             entry.insert_field("first", id_pair)?;
@@ -1937,6 +1994,10 @@ fn read_sprite_bone_geometry(
         .as_ref()
         .is_some_and(crate::resource::StreamedResourceInfo::is_set);
     let decoded = match mesh.vertex_data {
+        // The frozen `VertexDataBlob.ReadData` returns false as soon as its inline `Data`
+        // array is empty, leaving vertices and skin unset. SpriteMetaDataExtensions then
+        // writes empty geometry arrays; it does not reject an absent channel/stream layout.
+        Some(vertex_data) if vertex_data.data.is_empty() => None,
         Some(vertex_data) => VertexDataBlob::from_parts(
             vertex_data.channels,
             vertex_data.streams,

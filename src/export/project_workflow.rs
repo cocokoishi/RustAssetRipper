@@ -238,6 +238,8 @@ enum ObjectRoute {
     /// A manager-backed MonoScript whose source collection only registers a pointer; saved DLL
     /// bytes are staged once per loaded assembly when present.
     ScriptPointerOnly,
+    /// A non-YAML Sprite embedded in its owning TextureExportCollection; pointer-only here.
+    TextureSpriteSubAsset,
     /// `UnknownExportCollection`: raw payload bytes, no `.meta`.
     Unknown,
     /// `UnreadableExportCollection`: raw payload bytes, no `.meta`.
@@ -280,6 +282,8 @@ struct RoutedObject<'a> {
     /// reference assembly GUID here while retaining its calculated script GUID in its `.meta`.
     pointer_guid: [u8; 16],
     file_id: i64,
+    /// Owning Texture2D object for a non-YAML Sprite subasset.
+    texture_subasset_target: Option<(usize, usize)>,
 }
 
 /// A generated ScriptableObjectGroup produced by the source Timeline/PostProcessing processor.

@@ -1269,6 +1269,14 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                 .or(predefined_engine_mesh);
             let engine_guid =
                 source_engine_guid.or_else(|| predefined_engine_target.map(|target| target.guid));
+            let sprite_subasset = if class_id == crate::resources::sprite::SPRITE_CLASS_ID
+                && !settings_facts.sprite_export_mode_yaml
+                && engine_guid.is_none()
+            {
+                sprite_texture_associations.subasset_for_sprite(file_index, object_index)
+            } else {
+                None
+            };
             let audio_view = if source_engine_guid.is_none()
                 && class_id == crate::resources::audio::AUDIO_CLIP_CLASS_ID
             {
@@ -1465,6 +1473,10 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                 // LightingDataProcessor assigns the generated LightingDataAsset as the
                 // main asset for every texture referenced by LightmapSettings.Lightmaps.
                 claim_facts.main = ClaimMainKind::LightingData;
+            } else if sprite_subasset.is_some() {
+                // In Native/Texture2D mode, a Sprite whose render data resolves to a Texture2D
+                // is a member of that texture's SpriteInformationObject/TextureExportCollection.
+                claim_facts.main = ClaimMainKind::SpriteInformation;
             } else if texture_route_supported
                 && !matches!(
                     class_id,
@@ -1770,7 +1782,7 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
             let texture_file_skipped = class_id == 28
                 && selection.collection_name == "YamlStreamedAssetExportCollection"
                 && texture_lacks_usable_image_data(payload);
-            let (route, skip_reason, fallback_reason) = if engine_guid.is_some() {
+            let (mut route, skip_reason, fallback_reason) = if engine_guid.is_some() {
                 if selection.exporter != "EngineAssetsExporter"
                     || kind != ExportCollectionKind::Redirect
                 {
@@ -1888,6 +1900,17 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                     ),
                 }
             };
+            if sprite_subasset.is_some() {
+                if selection.exporter != "TextureAssetExporter"
+                    || kind != ExportCollectionKind::Asset
+                {
+                    return Err(invalid_project(format!(
+                        "Sprite {}:{} is associated with a Texture2D in non-YAML mode, but registration selected {}",
+                        file_index, object_info.path_id, selection.exporter
+                    )));
+                }
+                route = ObjectRoute::TextureSpriteSubAsset;
+            }
             let fallback_reason = if should_report_unported_texture_route(
                 texture_image_exportable
                     || texture3d_image_exportable
@@ -1919,7 +1942,10 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                     reason: "raw bytes are preserved, but this object has no decoded fields or reference scan",
                 });
             }
-            let collection_index = if route == ObjectRoute::Skipped {
+            let collection_index = if matches!(
+                route,
+                ObjectRoute::Skipped | ObjectRoute::TextureSpriteSubAsset
+            ) {
                 usize::MAX
             } else {
                 let index = next_collection_index;
@@ -1958,6 +1984,13 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                         .as_ref()
                         .ok_or_else(|| invalid_project("MonoScript route has no export details"))?
                         .pointer_file_id
+                }
+                ObjectRoute::TextureSpriteSubAsset => {
+                    sprite_subasset
+                        .ok_or_else(|| {
+                            invalid_project("Sprite subasset route has no associated Texture2D")
+                        })?
+                        .1
                 }
                 ObjectRoute::EngineRedirect => {
                     predefined_engine_target.map_or(object_info.path_id, |target| target.file_id)
@@ -2062,7 +2095,9 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                     Ok::<_, Box<dyn Error>>(RoutedTerrainCollection { children })
                 })
                 .transpose()?;
-            let guid = if let Some(engine_guid) = engine_guid {
+            let guid = if route == ObjectRoute::TextureSpriteSubAsset {
+                [0; 16]
+            } else if let Some(engine_guid) = engine_guid {
                 used_guids.insert(engine_guid);
                 engine_guid
             } else if let Some(script) = script_export.as_ref() {
@@ -2113,10 +2148,12 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                 guid,
                 pointer_guid,
                 file_id,
+                texture_subasset_target: sprite_subasset.map(|(texture, _)| texture),
             });
         }
     }
 
+    attach_texture_sprite_subasset_pointers(&mut routed)?;
     attach_font_collection_subassets(&mut routed, objects, reference_graph)?;
     let fallback_notices = routed
         .iter()
@@ -2141,6 +2178,59 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
         next_guid_sequence,
         used_guids,
     })
+}
+
+fn attach_texture_sprite_subasset_pointers(
+    routed: &mut [RoutedObject<'_>],
+) -> Result<(), Box<dyn Error>> {
+    let texture_count = routed
+        .iter()
+        .filter(|entry| entry.route == ObjectRoute::TextureImage)
+        .count();
+    let mut texture_targets = HashMap::new();
+    texture_targets
+        .try_reserve(texture_count)
+        .map_err(|_| invalid_project("could not allocate Texture2D Sprite subasset targets"))?;
+    for entry in routed
+        .iter()
+        .filter(|entry| entry.route == ObjectRoute::TextureImage)
+    {
+        let identity = (entry.object.file_index, entry.object.object_index);
+        if texture_targets
+            .insert(
+                identity,
+                (entry.collection_index, entry.guid, entry.pointer_guid),
+            )
+            .is_some()
+        {
+            return Err(invalid_project(format!(
+                "Texture2D object {}:{} has multiple project image collections",
+                identity.0, entry.object.path_id
+            )));
+        }
+    }
+    for entry in routed
+        .iter_mut()
+        .filter(|entry| entry.route == ObjectRoute::TextureSpriteSubAsset)
+    {
+        let texture = entry.texture_subasset_target.ok_or_else(|| {
+            invalid_project("Texture Sprite subasset has no owning Texture2D identity")
+        })?;
+        let (collection_index, guid, pointer_guid) =
+            texture_targets.get(&texture).copied().ok_or_else(|| {
+                invalid_project(format!(
+                    "Sprite object {}:{} belongs to Texture2D {}:{}, which has no routed image collection",
+                    entry.object.file_index,
+                    entry.object.path_id,
+                    texture.0,
+                    texture.1
+                ))
+            })?;
+        entry.collection_index = collection_index;
+        entry.guid = guid;
+        entry.pointer_guid = pointer_guid;
+    }
+    Ok(())
 }
 
 fn attach_font_collection_subassets<'object>(

@@ -30,6 +30,9 @@ pub enum UnityYamlSequenceStyle {
 #[derive(Clone, Debug, PartialEq)]
 pub enum UnityYamlScalar {
     Null,
+    /// An implicit YAML null rendered as an empty mapping value (`field:`), matching the
+    /// frozen writer's empty scalar form.
+    Empty,
     Boolean(bool),
     Signed(i64),
     Unsigned(u64),
@@ -607,6 +610,7 @@ impl UnityYamlEmitter {
     fn emit_scalar(&mut self, scalar: &UnityYamlScalar) -> Result<(), UnityYamlWriteError> {
         match scalar {
             UnityYamlScalar::Null => self.write_str("null"),
+            UnityYamlScalar::Empty => Ok(()),
             UnityYamlScalar::Boolean(value) => self.write_str(if *value { "1" } else { "0" }),
             UnityYamlScalar::Signed(value) => self.write_str(&value.to_string()),
             UnityYamlScalar::Unsigned(value) => self.write_str(&value.to_string()),

@@ -182,7 +182,7 @@ pub(super) fn plan_routed_asset_files(
         }
         if matches!(
             entry.route,
-            ObjectRoute::Skipped | ObjectRoute::EngineRedirect
+            ObjectRoute::Skipped | ObjectRoute::EngineRedirect | ObjectRoute::TextureSpriteSubAsset
         ) {
             continue;
         }
@@ -364,6 +364,9 @@ pub(super) fn plan_routed_asset_files(
             }
             ObjectRoute::ScriptPointerOnly => {
                 unreachable!("pointer-only MonoScripts are filtered before file planning")
+            }
+            ObjectRoute::TextureSpriteSubAsset => {
+                unreachable!("Texture Sprite subassets are filtered before file planning")
             }
             ObjectRoute::TextAsset => {
                 let script = &entry
@@ -1003,6 +1006,9 @@ pub(super) fn plan_routed_asset_files(
             ObjectRoute::ScriptPointerOnly => {
                 unreachable!("pointer-only MonoScripts are filtered before path planning")
             }
+            ObjectRoute::TextureSpriteSubAsset => {
+                unreachable!("Texture Sprite subassets are filtered before path planning")
+            }
             ObjectRoute::EngineRedirect => {
                 unreachable!("engine redirects are filtered before path planning")
             }
@@ -1107,6 +1113,9 @@ pub(super) fn plan_routed_asset_files(
             }
             ObjectRoute::ScriptPointerOnly => {
                 unreachable!("pointer-only MonoScripts are filtered before metadata planning")
+            }
+            ObjectRoute::TextureSpriteSubAsset => {
+                unreachable!("Texture Sprite subassets are filtered before metadata planning")
             }
             ObjectRoute::ShaderText => {
                 let shader = entry.shader_view.as_ref().ok_or_else(|| {

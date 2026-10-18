@@ -1717,6 +1717,32 @@
             normalized.into_bytes()
         }
 
+        fn normalize_sprite_mode_meta(bytes: &[u8]) -> Vec<u8> {
+            let normalized = String::from_utf8(normalize_text(bytes))
+                .expect("normalized source metadata is UTF-8");
+            let had_final_newline = normalized.ends_with('\n');
+            let mut normalized = normalized
+                .lines()
+                .map(|line| {
+                    let indent_length = line.len() - line.trim_start().len();
+                    let trimmed = &line[indent_length..];
+                    let Some(sprite_id) = trimmed.strip_prefix("spriteID: ") else {
+                        return line.to_owned();
+                    };
+                    if sprite_id.len() == 32 && sprite_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                        format!("{}spriteID: <SPRITE_ID>", &line[..indent_length])
+                    } else {
+                        line.to_owned()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if had_final_newline {
+                normalized.push('\n');
+            }
+            normalized.into_bytes()
+        }
+
         fn is_text_output(relative_path: &str) -> bool {
             std::path::Path::new(relative_path)
                 .extension()
@@ -1757,6 +1783,17 @@
             .expect("source input row contains a path and hex bytes");
         assert_eq!(file_name, "SpriteAtlasFixture.assets");
         let input_bytes = decode_hex(hex);
+        let source_input_identity = fixture
+            .lines()
+            .find_map(|line| line.strip_prefix("INPUT|"))
+            .expect("source fixture records the SerializedFile identity");
+        let expected_texture_bytes = fixture
+            .lines()
+            .find_map(|line| {
+                let row = line.strip_prefix("SOURCE_OUTPUT|ExportedProject/Assets/Texture2D/AtlasTextureFixture.bmp|")?;
+                Some(decode_hex(row))
+            })
+            .expect("source fixture records the exported Texture2D bytes");
 
         let settings = include_str!("export/settings_file_defaults.json")
             .replace("\"ImageExportFormat\": 4", "\"ImageExportFormat\": 0")
@@ -1782,7 +1819,7 @@
         let arguments = vec![
             std::ffi::OsString::from("export-project"),
             std::ffi::OsString::from("--settings"),
-            settings_path.into_os_string(),
+            settings_path.clone().into_os_string(),
             output_root.clone().into_os_string(),
             source_path.clone().into_os_string(),
         ];
@@ -1872,6 +1909,124 @@
             .expect("Sprite render data points to the exported texture");
         assert_eq!(sprite_texture_guid, texture_meta_guid);
         assert_eq!(fs::read(&source_path).unwrap(), input_bytes);
+
+        for (mode, discriminant, mode_fixture) in [
+            (
+                "Native",
+                1,
+                include_str!("export/sprite_atlas_importer_native_2019_4_fixture.txt"),
+            ),
+            (
+                "Texture2D",
+                2,
+                include_str!("export/sprite_atlas_importer_texture2d_2019_4_fixture.txt"),
+            ),
+        ] {
+            assert!(mode_fixture.lines().any(|line| line == format!("MODE|{mode}")));
+            let mode_input_identity = mode_fixture
+                .lines()
+                .find_map(|line| line.strip_prefix("INPUT|"))
+                .expect("mode fixture records the SerializedFile identity");
+            assert_eq!(mode_input_identity, source_input_identity);
+
+            let mut mode_settings = include_str!("export/settings_file_defaults.json")
+                .replace("\"ImageExportFormat\": 4", "\"ImageExportFormat\": 0")
+                .replace(
+                    "\"PreferOriginalTextureExtension\": true",
+                    "\"PreferOriginalTextureExtension\": false",
+                );
+            mode_settings = mode_settings.replace(
+                "\"SpriteExportMode\": 0",
+                &format!("\"SpriteExportMode\": {discriminant}"),
+            );
+            assert!(mode_settings.contains(&format!("\"SpriteExportMode\": {discriminant}")));
+            fs::write(&settings_path, mode_settings.as_bytes()).unwrap();
+
+            let mode_output_root = output_root.with_file_name(format!(
+                "project-sprite-atlas-{}",
+                mode.to_ascii_lowercase()
+            ));
+            let mode_arguments = vec![
+                std::ffi::OsString::from("export-project"),
+                std::ffi::OsString::from("--settings"),
+                settings_path.clone().into_os_string(),
+                mode_output_root.clone().into_os_string(),
+                source_path.clone().into_os_string(),
+            ];
+            super::run(mode_arguments.into_iter()).unwrap_or_else(|error| {
+                panic!("export-project failed for source SpriteAtlas fixture in {mode} mode: {error}")
+            });
+
+            let mut expected_paths = mode_fixture
+                .lines()
+                .filter_map(|line| line.strip_prefix("FILE|"))
+                .map(|path| {
+                    path.strip_prefix("ExportedProject/")
+                        .unwrap_or(path)
+                        .replace('\\', "/")
+                })
+                .collect::<Vec<_>>();
+            let mut mode_files = Vec::new();
+            collect_files(&mode_output_root, &mut mode_files);
+            let mut actual_paths = mode_files
+                .iter()
+                .map(|path| {
+                    path.strip_prefix(&mode_output_root)
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .replace('\\', "/")
+                })
+                .collect::<Vec<_>>();
+            expected_paths.sort();
+            actual_paths.sort();
+            assert_eq!(actual_paths, expected_paths, "{mode} source project inventory");
+            assert!(
+                !actual_paths.iter().any(|path| path == "Assets/Sprite/PackedSpriteFixture.asset"),
+                "{mode} mode exports the Sprite as a Texture2D subasset"
+            );
+
+            for (prefix, normalize) in [
+                (
+                    "SOURCE_META|",
+                    normalize_sprite_mode_meta as fn(&[u8]) -> Vec<u8>,
+                ),
+                ("SOURCE_TEXT|", normalize_text as fn(&[u8]) -> Vec<u8>),
+            ] {
+                for row in mode_fixture
+                    .lines()
+                    .filter_map(|line| line.strip_prefix(prefix))
+                {
+                    let (source_relative_path, expected_hex) = row
+                        .split_once('|')
+                        .expect("source output row contains a path and normalized bytes");
+                    let relative_path = source_relative_path
+                        .strip_prefix("ExportedProject/")
+                        .unwrap_or(source_relative_path);
+                    let actual = fs::read(mode_output_root.join(relative_path))
+                        .unwrap_or_else(|error| panic!("could not read {mode} output {relative_path}: {error}"));
+                    assert_eq!(
+                        normalize(&actual),
+                        decode_hex(expected_hex),
+                        "{mode} source output differs for {relative_path}"
+                    );
+                }
+            }
+
+            let texture_path = mode_output_root.join("Assets/Texture2D/AtlasTextureFixture.bmp");
+            assert_eq!(
+                fs::read(texture_path).unwrap(),
+                expected_texture_bytes,
+                "{mode} retains the source-matched Texture2D image bytes"
+            );
+
+            input.files.extend(mode_files);
+            let mut mode_directories = vec![mode_output_root.clone()];
+            collect_directories(&mode_output_root, &mut mode_directories);
+            mode_directories.sort_by_key(|path| path.components().count());
+            input.subdirectories.extend(mode_directories);
+        }
+
         input.files.extend(actual_files);
         let mut actual_directories = vec![output_root.clone()];
         collect_directories(&output_root, &mut actual_directories);

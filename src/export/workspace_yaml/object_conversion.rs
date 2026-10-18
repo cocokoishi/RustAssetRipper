@@ -588,6 +588,7 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
         if ((animation_clip_editor_format && class_id == 74)
             || matches!(class_id, 104 | 157)
             || class_id == 213
+            || class_id == 687078895
             || should_use_scene_editor_type_tree(class_id, unity_version_text))
             && matches!(&object.factory.kind, FactoryAssetKind::Generated(_))
         {
@@ -715,6 +716,10 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
             }
             if class_id == 213 {
                 apply_sprite_geometry(export_root, &mut root)
+                    .map_err(|message| scene_editor_format_error(source, class_id, message))?;
+            }
+            if class_id == 687078895 {
+                apply_sprite_atlas_editor_format(&mut root)
                     .map_err(|message| scene_editor_format_error(source, class_id, message))?;
             }
             if animation_clip_editor_format && class_id == 74 {
@@ -3895,15 +3900,99 @@ fn set_nav_mesh_build_settings_int(
     Ok(())
 }
 
+/// Ports `SpriteAtlasExtensions.ConvertToEditorFormat` for the editor TypeTree.
+/// The editor `packables` list is rebuilt from packed sprites, and the nested settings use the
+/// generated `Initialize` defaults instead of zero-filled TypeTree defaults.
+fn apply_sprite_atlas_editor_format(root: &mut SerializedValue) -> Result<(), String> {
+    let packed_sprites = root
+        .unique_field_in_base_chain("m_PackedSprites")
+        .map_err(|error| format!("could not inspect SpriteAtlas.m_PackedSprites: {error}"))?
+        .cloned();
+    let editor_data = root
+        .unique_field_in_base_chain_mut("m_EditorData")
+        .map_err(|error| format!("could not inspect SpriteAtlas.m_EditorData: {error}"))?
+        .ok_or_else(|| "SpriteAtlas editor TypeTree has no m_EditorData field".to_owned())?;
+
+    if let Some(texture_settings) = editor_data
+        .unique_field_in_base_chain_mut("textureSettings")
+        .map_err(|error| format!("could not inspect SpriteAtlas textureSettings: {error}"))?
+    {
+        for (name, default) in [
+            ("anisoLevel", SceneEditorFormatDefault::I32(1)),
+            ("compressionQuality", SceneEditorFormatDefault::I32(50)),
+            ("maxTextureSize", SceneEditorFormatDefault::I32(2048)),
+            ("textureCompression", SceneEditorFormatDefault::I32(0)),
+            ("filterMode", SceneEditorFormatDefault::I32(1)),
+            ("generateMipMaps", SceneEditorFormatDefault::Bool(false)),
+            ("readable", SceneEditorFormatDefault::Bool(false)),
+            ("crunchedCompression", SceneEditorFormatDefault::Bool(false)),
+            ("sRGB", SceneEditorFormatDefault::Bool(true)),
+        ] {
+            set_scene_editor_format_default(texture_settings, name, default)?;
+        }
+    }
+
+    if let Some(packing_parameters) = editor_data
+        .unique_field_in_base_chain_mut("packingParameters")
+        .map_err(|error| format!("could not inspect SpriteAtlas packingParameters: {error}"))?
+    {
+        for (name, default) in [
+            ("padding", SceneEditorFormatDefault::I32(2)),
+            ("paddingPower", SceneEditorFormatDefault::I32(2)),
+            ("blockOffset", SceneEditorFormatDefault::I32(1)),
+            ("allowAlphaSplitting", SceneEditorFormatDefault::I32(0)),
+            ("enableRotation", SceneEditorFormatDefault::I32(1)),
+            ("enableTightPacking", SceneEditorFormatDefault::I32(1)),
+        ] {
+            set_scene_editor_format_default(packing_parameters, name, default)?;
+        }
+    }
+
+    if let Some(packing_settings) = editor_data
+        .unique_field_in_base_chain_mut("packingSettings")
+        .map_err(|error| format!("could not inspect SpriteAtlas packingSettings: {error}"))?
+    {
+        for (name, default) in [
+            ("padding", SceneEditorFormatDefault::I32(2)),
+            ("blockOffset", SceneEditorFormatDefault::I32(1)),
+            ("allowAlphaSplitting", SceneEditorFormatDefault::Bool(false)),
+            ("enableRotation", SceneEditorFormatDefault::Bool(true)),
+            ("enableTightPacking", SceneEditorFormatDefault::Bool(true)),
+            ("enableAlphaDilation", SceneEditorFormatDefault::Bool(true)),
+        ] {
+            set_scene_editor_format_default(packing_settings, name, default)?;
+        }
+    }
+
+    set_scene_editor_format_default(
+        editor_data,
+        "variantMultiplier",
+        SceneEditorFormatDefault::F32(1.0),
+    )?;
+    set_scene_editor_format_default(
+        editor_data,
+        "bindAsDefault",
+        SceneEditorFormatDefault::Bool(true),
+    )?;
+    if let Some(packed_sprites) = packed_sprites {
+        if let Some(packables) = editor_data
+            .unique_field_in_base_chain_mut("packables")
+            .map_err(|error| format!("could not inspect SpriteAtlas packables: {error}"))?
+        {
+            *packables = packed_sprites;
+        }
+    }
+    Ok(())
+}
+
 /// Applies the frozen `LightmapEditorSettingsExtensions.ConvertToEditorFormat`
 /// behavior for `ILightingSettings`: every editor-only field receives its Unity
 /// default, mirroring the source's unconditional assignments.
 ///
 /// Field names and value shapes follow the 2022.3 editor TypeTree node names; the
 /// numeric values reproduce the frozen method exactly (verified against a frozen
-/// scene-settings export, which carries these defaults verbatim).
-/// Fields absent from the active editor layout are left untouched, matching the
-/// versioned generated-class behavior of the source.
+/// scene-settings export, which carries these defaults verbatim). Fields absent from the active
+/// editor layout are left untouched, matching the versioned generated-class behavior of the source.
 fn apply_lighting_settings_editor_defaults(root: &mut SerializedValue) -> Result<(), String> {
     const DEFAULTS: &[(&str, SceneEditorFormatDefault)] = &[
         ("m_BakeBackend", SceneEditorFormatDefault::I32(0)),

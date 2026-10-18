@@ -181,7 +181,11 @@ ObjectData = textureBody,
         return 0;
     }
 
-    internal static int ExportSpriteAtlasProject(string inputRootValue, string outputRootValue, string rowsValue)
+    internal static int ExportSpriteAtlasProject(
+        string inputRootValue,
+        string outputRootValue,
+        string rowsValue,
+        string spriteExportModeName)
     {
         string inputRoot = Path.GetFullPath(inputRootValue);
         string outputRoot = Path.GetFullPath(outputRootValue);
@@ -322,50 +326,80 @@ ObjectData = textureBody,
         string inputPath = Path.Combine(inputRoot, "SpriteAtlasFixture.assets");
         File.WriteAllBytes(inputPath, inputBytes);
 
+        SpriteExportMode spriteExportMode = Enum.Parse<SpriteExportMode>(spriteExportModeName, false);
         FullConfiguration configuration = new();
         configuration.ExportSettings.ImageExportFormat = ImageExportFormat.Bmp;
         configuration.ExportSettings.PreferOriginalTextureExtension = false;
+        configuration.ExportSettings.SpriteExportMode = spriteExportMode;
         ExportHandler handler = new(configuration);
         var gameData = handler.LoadAndProcess([inputRoot], LocalFileSystem.Instance);
         handler.Export(gameData, outputRoot, LocalFileSystem.Instance);
 
         string exportedProjectRoot = Path.Combine(outputRoot, "ExportedProject");
-        string spriteYamlPath = Path.Combine(exportedProjectRoot, "Assets", "Sprite", "PackedSpriteFixture.asset");
         string textureMetaPath = Path.Combine(exportedProjectRoot, "Assets", "Texture2D", "AtlasTextureFixture.bmp.meta");
-        string spriteTextureGuid = Regex.Match(
-            File.ReadAllText(spriteYamlPath),
-            @"\bguid:\s*([0-9a-fA-F]{32})\b").Groups[1].Value;
         string textureMetaGuid = Regex.Match(
             File.ReadAllText(textureMetaPath),
             @"(?m)^guid: ([0-9a-fA-F]{32})$").Groups[1].Value;
-        if (spriteTextureGuid.Length != 32 || spriteTextureGuid != textureMetaGuid)
+        if (textureMetaGuid.Length != 32)
         {
-            throw new InvalidDataException("source Sprite texture PPtr does not match the exported Texture2D meta GUID");
+            throw new InvalidDataException("source Texture2D meta does not contain its generated GUID");
+        }
+        if (spriteExportMode == SpriteExportMode.Yaml)
+        {
+            string spriteYamlPath = Path.Combine(exportedProjectRoot, "Assets", "Sprite", "PackedSpriteFixture.asset");
+            string spriteTextureGuid = Regex.Match(
+                File.ReadAllText(spriteYamlPath),
+                @"\bguid:\s*([0-9a-fA-F]{32})\b").Groups[1].Value;
+            if (spriteTextureGuid.Length != 32 || spriteTextureGuid != textureMetaGuid)
+            {
+                throw new InvalidDataException("source Sprite texture PPtr does not match the exported Texture2D meta GUID");
+            }
         }
 
         using StreamWriter rows = new(rowsPath, false, new UTF8Encoding(false)) { NewLine = "\n" };
-        rows.WriteLine("# Source-generated Sprite, SpriteAtlas, and Texture2D through SpriteProcessor and ExportHandler.Export.");
+        rows.WriteLine($"# Source-generated SpriteAtlas project export with SpriteExportMode={spriteExportModeName}.");
         rows.WriteLine("UNITY_VERSION|2019.4.40f1");
-        rows.WriteLine("SETTINGS|ImageExportFormat=Bmp|PreferOriginalTextureExtension=false");
-        WriteInputRow(rows, inputPath, inputBytes);
+        rows.WriteLine($"MODE|{spriteExportModeName}");
+        rows.WriteLine($"INPUT|SpriteAtlasFixture.assets|{inputBytes.Length}|{Convert.ToHexString(SHA256.HashData(inputBytes))}");
+        bool fullOutput = spriteExportMode == SpriteExportMode.Yaml;
         foreach (string outputPath in Directory.EnumerateFiles(outputRoot, "*", SearchOption.AllDirectories)
             .OrderBy(path => Path.GetRelativePath(outputRoot, path), StringComparer.Ordinal))
         {
             string relativePath = Path.GetRelativePath(outputRoot, outputPath).Replace('\\', '/');
+            if (!fullOutput)
+            {
+                rows.WriteLine($"FILE|{relativePath}");
+                if (!relativePath.EndsWith(".meta", StringComparison.Ordinal)
+                    && Path.GetExtension(relativePath) is not (".asset" or ".unity" or ".json" or ".txt"))
+                {
+                    continue;
+                }
+            }
             byte[] outputBytes = File.ReadAllBytes(outputPath);
             if (relativePath.EndsWith(".meta", StringComparison.Ordinal))
             {
-                outputBytes = Encoding.UTF8.GetBytes(
-                    NormalizeTextureProjectMeta(new UTF8Encoding(false, true).GetString(outputBytes)));
+                string normalizedMeta = NormalizeTextureProjectMeta(new UTF8Encoding(false, true).GetString(outputBytes));
+                if (!fullOutput)
+                {
+                    normalizedMeta = Regex.Replace(
+                        normalizedMeta,
+                        "(?m)^([ \\t]*spriteID:[ \\t]*)[0-9a-fA-F]{32}$",
+                        "$1<SPRITE_ID>");
+                }
+                outputBytes = Encoding.UTF8.GetBytes(normalizedMeta);
             }
             else if (Path.GetExtension(relativePath) is ".unity" or ".asset" or ".json" or ".txt")
             {
                 outputBytes = Encoding.UTF8.GetBytes(
                     NormalizeSpriteAtlasProjectText(new UTF8Encoding(false, true).GetString(outputBytes)));
             }
-            rows.WriteLine($"SOURCE_OUTPUT|{relativePath}|{Convert.ToHexString(outputBytes)}");
+            rows.WriteLine(fullOutput
+                ? $"SOURCE_OUTPUT|{relativePath}|{Convert.ToHexString(outputBytes)}"
+                : relativePath.EndsWith(".meta", StringComparison.Ordinal)
+                    ? $"SOURCE_META|{relativePath}|{Convert.ToHexString(outputBytes)}"
+                    : $"SOURCE_TEXT|{relativePath}|{Convert.ToHexString(outputBytes)}");
         }
-        Console.WriteLine($"SPRITE_ATLAS_PROJECT|input={inputBytes.Length}|texture={imageBytes.Length}|files={Directory.GetFiles(outputRoot, "*", SearchOption.AllDirectories).Length}");
+        Console.WriteLine($"SPRITE_ATLAS_PROJECT|mode={spriteExportModeName}|input={inputBytes.Length}|texture={imageBytes.Length}|files={Directory.GetFiles(outputRoot, "*", SearchOption.AllDirectories).Length}");
         return 0;
     }
 

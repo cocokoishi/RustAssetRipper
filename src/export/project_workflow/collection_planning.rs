@@ -321,6 +321,14 @@ pub(super) fn build_project_pointer_map(
         .map_err(|_| invalid_project("could not allocate project export collection metadata"))?;
     let mut collection_count = 0usize;
     for entry in routed {
+        if entry.route == ObjectRoute::TextureSpriteSubAsset {
+            pointer_entries.push(ExportedAssetPointerEntry {
+                asset: identity_of(entry),
+                file_id: entry.file_id,
+                collection_index: entry.collection_index,
+            });
+            continue;
+        }
         if entry.route == ObjectRoute::Skipped {
             continue;
         }
