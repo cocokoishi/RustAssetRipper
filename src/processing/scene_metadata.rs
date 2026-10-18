@@ -1098,7 +1098,7 @@ pub(crate) mod tests {
         ] {
             let file = SerializedFile::parse(&bytes).unwrap();
             let object = file.decode_object_payload(0).unwrap();
-            assert_eq!(object.trailing_bytes, []);
+            assert!(object.trailing_bytes.is_empty());
             let paths = decode_build_settings_scene_paths(
                 &file,
                 0,
@@ -1197,7 +1197,7 @@ pub(crate) mod tests {
     fn decoded_root(bytes: &[u8]) -> SerializedValue {
         let file = SerializedFile::parse(bytes).unwrap();
         let object = file.decode_object_payload(0).unwrap();
-        assert_eq!(object.trailing_bytes, []);
+        assert!(object.trailing_bytes.is_empty());
         object.root
     }
 
@@ -1287,7 +1287,7 @@ pub(crate) mod tests {
         assert_eq!(file.metadata.objects[0].class_id, Some(142));
         let object = file.decode_object_payload(0).unwrap();
         assert_eq!(object.type_name, "AssetBundle");
-        assert_eq!(object.trailing_bytes, []);
+        assert!(object.trailing_bytes.is_empty());
         assert_eq!(
             extract_streamed_scene_bundle_metadata(
                 &object.root,

@@ -915,7 +915,7 @@ mod tests {
         assert_eq!(structure.nodes, [tree.nodes[0].clone()]);
         let payload = empty_structure_payload(&structure, 894, 895);
         assert_eq!(payload.consumed_bytes, 0);
-        assert_eq!(payload.trailing_bytes, []);
+        assert!(payload.trailing_bytes.is_empty());
         assert_eq!(payload.root, SerializedValue::Struct(Vec::new()));
     }
 }

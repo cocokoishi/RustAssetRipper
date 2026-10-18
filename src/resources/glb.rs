@@ -62,11 +62,7 @@ use super::mesh_data::MeshData;
 use super::sub_mesh_data::MeshTopology;
 
 /// The generator string written into the glTF asset block.
-const GENERATOR: &str = concat!(
-    "AssetRipper ",
-    env!("CARGO_PKG_VERSION"),
-    " (assetripper-rs)"
-);
+const GENERATOR: &str = "SharpGLTF 1.0.2+d7bbcc6e95bbf573debf4c4c1750aa08fcb1bb83";
 
 /// The material name used by `GlbMeshBuilder.Build`.
 const DEFAULT_MATERIAL_NAME: &str = "DefaultMaterial";
@@ -782,6 +778,13 @@ pub fn escape_json(value: &str) -> String {
     result
 }
 
+/// Appends one complete JSON string value to `output`.
+fn push_json_string(output: &mut String, value: &str) {
+    output.push('"');
+    output.push_str(&escape_json(value));
+    output.push('"');
+}
+
 /// Quantizes one finite color channel to normalized unsigned bytes with C#-style
 /// truncation: non-positive values become zero, values at or above one become 255, and the
 /// rest truncate `value * 255` (so `0.5` maps to `127`, as the writer emits).
@@ -1372,7 +1375,7 @@ impl SceneDocument {
         let meshes = self.meshes.join(",");
         let mut json = String::new();
         json.push_str("{\"asset\":{\"version\":\"2.0\",\"generator\":");
-        json.push_str(&escape_json(GENERATOR));
+        push_json_string(&mut json, GENERATOR);
         let roots = self
             .scene_roots
             .iter()
@@ -1643,7 +1646,7 @@ fn build_json(
         .join(",");
     let mut json = String::new();
     json.push_str("{\"asset\":{\"version\":\"2.0\",\"generator\":");
-    json.push_str(&escape_json(GENERATOR));
+    push_json_string(&mut json, GENERATOR);
     json.push_str("},\"scene\":0,\"scenes\":[{\"nodes\":[0]}]");
     json.push_str(&format!(",\"nodes\":[{}]", nodes.join(",")));
     if !mesh_names.is_empty() {
@@ -2104,7 +2107,7 @@ fn build_json_single_mesh(
 ) -> String {
     let mut json = String::new();
     json.push_str("{\"asset\":{\"version\":\"2.0\",\"generator\":");
-    json.push_str(&escape_json(GENERATOR));
+    push_json_string(&mut json, GENERATOR);
     json.push_str("},\"scene\":0,\"scenes\":[{\"nodes\":[0]}]");
     if primitives.is_empty() {
         json.push_str(&format!(

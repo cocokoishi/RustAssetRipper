@@ -1482,6 +1482,10 @@ mod tests {
         )
         .expect("the GLB JSON chunk is valid");
         assert_eq!(document["asset"]["version"], "2.0");
+        assert_eq!(
+            document["asset"]["generator"].as_str(),
+            Some(include_str!("../resources/glb_generator_fixture.txt").trim())
+        );
         assert_eq!(document["scene"], 0);
         assert_eq!(document["scenes"][0]["nodes"], serde_json::json!([0]));
         let nodes = document["nodes"].as_array().expect("the scene has nodes");

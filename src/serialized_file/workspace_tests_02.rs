@@ -247,7 +247,7 @@
             payload.root.unique_field("m_Name").unwrap(),
             Some(&SerializedValue::StringBytes(b"SceneNavMesh".to_vec()))
         );
-        assert_eq!(payload.trailing_bytes, []);
+        assert!(payload.trailing_bytes.is_empty());
         assert_eq!(
             filesystem
                 .read_all_bytes("/game/navmesh.unity", usize::MAX)

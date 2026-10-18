@@ -625,6 +625,10 @@
         let json_length = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
         assert_eq!(&bytes[16..20], b"JSON");
         assert_eq!(json_length % 4, 0, "JSON chunk is 4-byte aligned");
+        let json: serde_json::Value = serde_json::from_slice(&bytes[20..20 + json_length])
+            .expect("the mesh GLB JSON chunk is valid");
+        assert_eq!(GENERATOR, include_str!("glb_generator_fixture.txt").trim());
+        assert_eq!(json["asset"]["generator"].as_str(), Some(GENERATOR));
         let bin_header = 20 + json_length;
         assert_eq!(
             &bytes[bin_header + 4..bin_header + 8],
@@ -810,6 +814,12 @@
         let json_length = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
         assert_eq!(&bytes[16..20], b"JSON");
         let json = String::from_utf8(bytes[20..20 + json_length].to_vec()).unwrap();
+        let document: serde_json::Value = serde_json::from_str(&json)
+            .expect("the terrain and navmesh GLB JSON is valid");
+        assert_eq!(
+            document["asset"]["generator"].as_str(),
+            Some(include_str!("glb_generator_fixture.txt").trim())
+        );
         let offset = 20 + json_length;
         let mut bin = Vec::new();
         if offset + 8 <= bytes.len() {
