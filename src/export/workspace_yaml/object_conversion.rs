@@ -4997,6 +4997,57 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn unity_2022_3_texture2d_uses_editor_tree_fields_and_hash_schema() {
+        let version = FactoryUnityVersion::parse("2022.3.0f1").unwrap();
+        let (_, editor) = reference_class_layouts()
+            .tpk_trees(28, &version)
+            .unwrap()
+            .expect("Unity 2022.3 source TPK must provide the Texture2D layout");
+
+        assert!(should_use_scene_editor_type_tree(28, Some("2022.3.0f1")));
+        assert_eq!(editor.nodes[0].type_name.as_deref(), Some("Texture2D"));
+        for field in [
+            "m_ObjectHideFlags",
+            "m_CorrespondingSourceObject",
+            "m_PrefabInstance",
+            "m_PrefabAsset",
+            "m_ImageContentsHash",
+            "m_AlphaIsTransparency",
+            "m_TextureFormat",
+            "m_TextureDimension",
+        ] {
+            assert!(
+                editor
+                    .nodes
+                    .iter()
+                    .any(|node| node.name.as_deref() == Some(field)),
+                "Unity 2022.3 Texture2D editor tree must contain {field}"
+            );
+        }
+
+        let hints = UnityYamlObjectConversionHints::from_type_tree(
+            &editor,
+            SceneUnityVersion::parse("2022.3.0f1").unwrap(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            hints
+                .hash128_schemas
+                .get("m_ImageContentsHash")
+                .map(|schema| schema.serialized_version),
+            Some(2)
+        );
+        assert!(should_preserve_type_tree_field_names(
+            28,
+            &FactoryAssetKind::Generated("Texture2D_2022".to_owned()),
+            true,
+            false,
+            false,
+        ));
+    }
+
     /// Evidence for the fourth-world editor-route additions: every class added
     /// there must carry the editor base the reference output shows in its
     /// editor tree and lack all four base fields in the release tree, which is
