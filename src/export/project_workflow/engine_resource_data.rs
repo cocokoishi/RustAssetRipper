@@ -805,7 +805,7 @@ mod tests {
     #[test]
     fn known_unimplemented_resource_types_fail_before_project_writes() {
         let error = EngineResourceData::parse(Some(
-            r#"{"DefaultResources":{"900":{"$type":"Sprite","Name":"Custom"}},"ExtraResources":{}}"#,
+            r#"{"DefaultResources":{"900":{"$type":"MonoBehaviour","Name":"Custom"}},"ExtraResources":{}}"#,
         ))
         .expect_err("unsupported typed resources must not be silently discarded");
         assert!(error.to_string().contains(
