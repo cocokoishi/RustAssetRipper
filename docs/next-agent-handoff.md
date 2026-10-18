@@ -1,12 +1,13 @@
 # RustAssetRipper hand-off — 2026-10-17
 
-## Latest current checkpoint - 2026-10-17 (UnityRaw-to-WebData stream mount coverage)
+## Latest current checkpoint - 2026-10-17 (source-pinned UnityRaw-to-UnityFS stream mount)
 
-- Latest verified code revision: `302bcc7f7b03807004152a5b7bc2065afc9e752f` on `main`. GitHub Actions run 39096793988 completed successfully across all eight jobs.
-- `unityraw_routes_nested_webdata_through_the_common_stream_mount` exercises `mount_stream_container_tree` with a generated UnityRaw envelope containing UnityWebData. It compares the full mount report against the legacy `SchemeReader::read` path, uses a zero nested-byte budget, drops the source stream, and checks the exact nested resource bytes. Ubuntu passed 1,936 library tests and 215 CLI tests; Windows passed 1,938 library tests and 215 CLI tests; Ubuntu release-mode tests passed 1,936 library tests and 215 CLI tests.
-- `IO-STREAM-001` remains `实现中`. The parity report remains open at 409 rows: 380 verified, 29 non-verified, zero duplicate IDs, and zero malformed rows. This test verifies one generated UnityRaw-to-WebData streaming composition; it does not close the stream feature row.
-- CI release artifacts are now available: run 39096214403 published the Windows executable and a Linux tar archive preserving executable mode. The downloaded Windows binary returned `--help`; the Linux archive contained the executable `assetripper-rs`.
-- **Primary next gap:** run the frozen `raw_nested_unityfs` source fixture through `mount_stream_container_tree`, then compare the mount report and retained leaf bytes after dropping the source. This will pin another UnityRaw nested-container branch to AssetRipper behavior.
+- Latest verified code revision: `f8a9f52212d1eeac00f50bcada72ea9b83bbb6f2` on `main`. GitHub Actions run 39097586504 completed successfully across all eight jobs.
+- `source_unityraw_nested_unityfs_routes_through_the_common_stream_mount` replays the frozen `raw_nested_unityfs` fixture through `mount_stream_container_tree`, asserts the reference tree string, compares the complete report with the legacy `SchemeReader::read` mount, and verifies the file-backed `data/file.bin` bytes after dropping the source. The zero nested-byte budget passes.
+- Ubuntu passed 1,937 library tests and 215 CLI tests; Windows passed 1,939 library tests and 215 CLI tests; Ubuntu release-mode tests passed 1,937 library tests and 215 CLI tests. Both Clippy jobs, formatting, ledger audit, and public-repository hygiene passed.
+- `IO-STREAM-001` remains `实现中`. The parity report remains open at 409 rows: 380 verified, 29 non-verified, zero duplicate IDs, and zero malformed rows. The stream mount now has focused UnityRaw-to-WebData generated coverage and frozen UnityRaw-to-UnityFS coverage; other Raw/Web branches remain open.
+- CI release artifacts remain available from run 39096214403: Windows executable and a Linux tar archive preserving executable mode. The downloaded Windows binary returned `--help`; the Linux archive contained `assetripper-rs` with executable mode.
+- **Primary next gap:** run the frozen `web_nested_webdata` source fixture as a UnityWeb root through `mount_stream_container_tree`, then compare its tree/report and exact nested resource bytes after dropping the source.
 
 ## Previous checkpoint - 2026-10-17 (the primary-content export is verified end to end)
 
