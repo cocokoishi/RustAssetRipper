@@ -1017,9 +1017,12 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
                 });
             }
         }
+        let legacy_mesh_editor_header_backfill = class_id == 43
+            && legacy_mesh_editor_header_backfill_version(unity_version.major, unity_version.minor);
         if editor_manager_type_tree.is_none()
             && !document.root.stripped
-            && prefab_header_backfill_version(unity_version.major, unity_version.minor)
+            && (prefab_header_backfill_version(unity_version.major, unity_version.minor)
+                || legacy_mesh_editor_header_backfill)
         {
             let backfill = if class_id == 1 {
                 apply_game_object_header_backfill(
@@ -1036,6 +1039,8 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
                     object.object_index,
                     reference_graph,
                 )
+            } else if legacy_mesh_editor_header_backfill {
+                apply_legacy_mesh_editor_header_backfill(&mut document)
             } else {
                 apply_generic_header_backfill(&mut document, class_id)
             };
@@ -1915,6 +1920,13 @@ pub(super) fn prefab_header_backfill_version(major: u32, minor: u32) -> bool {
     matches!((major, minor), (2018, 4) | (2019, 4))
 }
 
+/// Unity 5.6 uses legacy Mesh editor header names. Keep this separate from the
+/// generic prefab-header versions so older classes do not receive unverified
+/// editor fields.
+pub(super) fn legacy_mesh_editor_header_backfill_version(major: u32, minor: u32) -> bool {
+    matches!((major, minor), (5, 6))
+}
+
 fn yaml_body_entries(
     document: &mut UnityYamlDocument,
 ) -> Result<
@@ -1997,6 +2009,11 @@ fn game_object_tag_name(source_root: &SerializedValue) -> Result<String, String>
 }
 
 const OBJECT_EDITOR_HEADER_FIELDS: [&str; 1] = ["m_ObjectHideFlags"];
+const LEGACY_MESH_EDITOR_HEADER_FIELDS: [&str; 3] = [
+    "m_ObjectHideFlags",
+    "m_PrefabParentObject",
+    "m_PrefabInternal",
+];
 const PREFAB_EDITOR_HEADER_FIELDS: [&str; 4] = [
     "m_ObjectHideFlags",
     "m_CorrespondingSourceObject",
@@ -2395,10 +2412,9 @@ impl ClassFieldDefault {
 /// warning message, the Light shadow metrics, and the ParentConstraint lock
 /// flag are editor defaults absent from the data; the Light baking output is
 /// a release-only struct the editor layout omits. The Mesh optimizer flag is
-/// an editor-only bool defaulting to true on 2018.4 (both the TPK and the
-/// file's own TypeTree lack it, so the data carries no such bytes); 2019.4
-/// renames it to an editor-only int defaulting to -1. The Camera axis mode
-/// is a 2019.4 editor-only int defaulting to 0.
+/// an editor-only bool set to true by `EditorFormatProcessor` on Unity 5.6 and
+/// 2018.4; 2019.4 renames it to an editor-only int set to -1. The Camera axis
+/// mode is a 2019.4 editor-only int defaulting to 0.
 const CLASS_EDITOR_FIELD_DELTAS: &[ClassEditorFieldDelta] = &[
     ClassEditorFieldDelta {
         class_id: 20,
@@ -2419,7 +2435,7 @@ const CLASS_EDITOR_FIELD_DELTAS: &[ClassEditorFieldDelta] = &[
                 after: "",
                 before: "m_StreamData",
                 value: ClassFieldDefault::Boolean(true),
-                versions: &[(2018, 4)],
+                versions: &[(5, 6), (2018, 4)],
             },
             ClassFieldInsert {
                 name: "m_MeshOptimizationFlags",
@@ -2615,6 +2631,16 @@ pub(super) fn apply_generic_header_backfill(
         &PREFAB_EDITOR_HEADER_FIELDS[..]
     };
     insert_editor_headers(entries, fields);
+    Ok(())
+}
+
+/// Completes a Unity 5.6 Mesh document with its legacy editor header fields.
+/// Newer prefab pointer names do not belong to this serialized layout.
+pub(super) fn apply_legacy_mesh_editor_header_backfill(
+    document: &mut UnityYamlDocument,
+) -> Result<(), String> {
+    let entries = yaml_body_entries(document)?;
+    insert_editor_headers(entries, &LEGACY_MESH_EDITOR_HEADER_FIELDS);
     Ok(())
 }
 

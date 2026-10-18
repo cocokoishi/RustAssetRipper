@@ -1,8 +1,9 @@
 use super::super::object_conversion::{
     apply_class_editor_field_backfill, apply_custom_data_label_backfill,
     apply_game_object_header_backfill, apply_generic_header_backfill,
-    apply_keyframe_tangent_mode_backfill, apply_navmesh_settings_backfill,
-    apply_renderer_gi_backfill, prefab_header_backfill_version,
+    apply_keyframe_tangent_mode_backfill, apply_legacy_mesh_editor_header_backfill,
+    apply_navmesh_settings_backfill, apply_renderer_gi_backfill,
+    legacy_mesh_editor_header_backfill_version, prefab_header_backfill_version,
 };
 use crate::export::unity_yaml::{
     UnityYamlDocument, UnityYamlMappingStyle, UnityYamlNode, UnityYamlScalar, UnityYamlWriteLimits,
@@ -61,6 +62,14 @@ fn backfill_versions_cover_2018_4_and_2019_4_only() {
     assert!(!prefab_header_backfill_version(2022, 3));
     assert!(!prefab_header_backfill_version(2018, 3));
     assert!(!prefab_header_backfill_version(6000, 0));
+}
+
+#[test]
+fn legacy_mesh_header_backfill_is_limited_to_unity_5_6() {
+    assert!(legacy_mesh_editor_header_backfill_version(5, 6));
+    assert!(!legacy_mesh_editor_header_backfill_version(5, 5));
+    assert!(!legacy_mesh_editor_header_backfill_version(5, 7));
+    assert!(!legacy_mesh_editor_header_backfill_version(2018, 4));
 }
 
 #[test]
@@ -422,6 +431,47 @@ fn mesh_optimizer_flag_slots_before_stream_data() {
         !output.contains("m_MeshOptimizationFlags"),
         "2018.4 keeps the bool optimizer name"
     );
+}
+
+#[test]
+fn mesh_unity_5_6_backfill_emits_legacy_headers_and_optimized_flag() {
+    let mut body = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    body.insert_field("serializedVersion", signed(8)).unwrap();
+    body.insert_field("m_Name", UnityYamlNode::string("probe"))
+        .unwrap();
+    body.insert_field("m_MeshMetrics", signed(0)).unwrap();
+    let mut stream = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    stream.insert_field("offset", signed(0)).unwrap();
+    body.insert_field("m_StreamData", stream).unwrap();
+    let mut document =
+        UnityYamlDocument::object(43, 52, "Mesh", body, false).expect("test Mesh document builds");
+
+    apply_legacy_mesh_editor_header_backfill(&mut document).expect("header backfill succeeds");
+    apply_class_editor_field_backfill(&mut document, 43, 5, 6);
+    apply_legacy_mesh_editor_header_backfill(&mut document).expect("second header pass succeeds");
+    apply_class_editor_field_backfill(&mut document, 43, 5, 6);
+
+    let output = render(&document);
+    key_order(
+        &output,
+        &[
+            "serializedVersion: 8",
+            "m_ObjectHideFlags: 0",
+            "m_PrefabParentObject: {fileID: 0}",
+            "m_PrefabInternal: {fileID: 0}",
+            "m_Name: probe",
+            "m_MeshMetrics",
+            "m_MeshOptimized: 1",
+            "m_StreamData",
+        ],
+    );
+    assert!(!output.contains("m_CorrespondingSourceObject"));
+    assert!(!output.contains("m_PrefabInstance"));
+    assert!(!output.contains("m_PrefabAsset"));
+    assert_eq!(output.matches("m_ObjectHideFlags").count(), 1);
+    assert_eq!(output.matches("m_PrefabParentObject").count(), 1);
+    assert_eq!(output.matches("m_PrefabInternal").count(), 1);
+    assert_eq!(output.matches("m_MeshOptimized").count(), 1);
 }
 
 #[test]
