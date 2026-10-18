@@ -7,7 +7,6 @@ mod object_document;
 mod paths;
 mod type_rules;
 
-pub(crate) use layout::pointer_target_class_ids_from_type_tree;
 pub(crate) use managed_reference_hints::add_managed_reference_pointer_target_hints;
 pub use model::{
     UnityYamlDictionaryRepresentation, UnityYamlEmptyArrayKind, UnityYamlGuidSchema,
