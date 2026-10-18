@@ -652,9 +652,14 @@
     }
 
     #[test]
-    fn object_workspace_replays_source_unknown_object_raw_fallbacks() {
+    fn object_workspace_replays_source_opaque_object_raw_fallbacks() {
         let fixture = crate::processing::asset_factory::PROBE_FIXTURE;
-        for case in ["unknown_class", "unknown_no_tree"] {
+        for (case, expected_raw_len) in [
+            ("unknown_class", 8),
+            ("unknown_no_tree", 8),
+            ("unreadable_version", 20),
+            ("unreadable_no_tree", 8),
+        ] {
             let hex = fixture
                 .lines()
                 .find_map(|line| line.strip_prefix(&format!("SF_HEX|{case}|")))
@@ -678,7 +683,17 @@
                     .find_map(|field| field.strip_prefix(&format!("{name}=")))
                     .unwrap_or_else(|| panic!("{case} source row has {name}"))
             };
-            assert_eq!(source_field("type"), "UnknownObject");
+            let (expected_kind, expected_outcome) = match source_field("type") {
+                "UnknownObject" => (
+                    crate::processing::asset_factory::FactoryAssetKind::Unknown,
+                    "UnknownObject raw fallback",
+                ),
+                "UnreadableObject" => (
+                    crate::processing::asset_factory::FactoryAssetKind::Unreadable,
+                    "UnreadableObject raw fallback",
+                ),
+                source_type => panic!("{case}: unexpected source fallback type {source_type}"),
+            };
             let expected_class_id = source_field("class")
                 .parse::<i32>()
                 .expect("source class ID is an integer");
@@ -707,13 +722,10 @@
             assert_eq!(objects.report().object_count, 1);
             assert_eq!(objects.report().decoded_objects, 0);
             assert_eq!(objects.report().undecoded_objects, 1);
-            assert_eq!(objects.report().total_undecoded_raw_bytes, 8);
+            assert_eq!(objects.report().total_undecoded_raw_bytes, expected_raw_len);
 
             let object = &objects.objects()[0];
-            assert_eq!(
-                object.factory.kind,
-                crate::processing::asset_factory::FactoryAssetKind::Unknown
-            );
+            assert_eq!(object.factory.kind, expected_kind);
             assert_eq!(object.factory.class_id, expected_class_id);
             assert_eq!(object.factory.class_name, expected_class_name);
             assert_eq!(object.factory.name, expected_name);
@@ -732,10 +744,10 @@
                         object_error.kind(),
                         crate::serialized_file::object::ObjectDecodeErrorKind::FactoryObjectOutcome {
                             class_id,
-                            outcome,
+                            outcome: actual_outcome,
                             diagnostic: None,
                             ..
-                        } if *class_id == expected_class_id && outcome == "UnknownObject raw fallback"
+                        } if *class_id == expected_class_id && actual_outcome == expected_outcome
                     )
             ));
             let file_bytes = filesystem
@@ -747,9 +759,17 @@
                 usize::try_from(object.raw_payload_range.end).expect("payload end fits usize");
             assert_eq!(
                 file_bytes.get(payload_start..payload_end),
-                Some([1, 2, 3, 4, 5, 6, 7, 8].as_slice()),
+                bytes.get(payload_start..payload_end),
                 "{case}: exact raw payload survives ObjectWorkspace"
             );
+            assert_eq!(payload_end - payload_start, expected_raw_len);
+            if case != "unreadable_version" {
+                assert_eq!(
+                    file_bytes.get(payload_start..payload_end),
+                    Some([1, 2, 3, 4, 5, 6, 7, 8].as_slice()),
+                    "{case}: fixture payload is retained byte-for-byte"
+                );
+            }
             assert!(
                 !fixture
                     .lines()
