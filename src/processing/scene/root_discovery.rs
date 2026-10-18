@@ -137,36 +137,14 @@ impl SceneGraph {
                                 }
                             }
                             Some(_) => {}
-                            None => {
-                                component_list_incomplete = true;
-                                push_scene_root_issue(
-                                    &mut discovery.issues,
-                                    limits.max_issues,
-                                    SceneRootDiscoveryIssue {
-                                        game_object_index,
-                                        transform_index: selected_transform,
-                                        kind: SceneRootDiscoveryIssueKind::UnresolvedComponent {
-                                            target: relationship.target.clone(),
-                                        },
-                                    },
-                                )?;
-                            }
+                            // The source's typed PPtrAccessList omits assets that do not
+                            // implement IComponent, just as it omits failed pointer lookups.
+                            None => {}
                         }
                     }
-                    target => {
-                        component_list_incomplete = true;
-                        push_scene_root_issue(
-                            &mut discovery.issues,
-                            limits.max_issues,
-                            SceneRootDiscoveryIssue {
-                                game_object_index,
-                                transform_index: selected_transform,
-                                kind: SceneRootDiscoveryIssueKind::UnresolvedComponent {
-                                    target: target.clone(),
-                                },
-                            },
-                        )?;
-                    }
+                    // `PPtrAccessList[index]` returns null when `TryGetAsset` fails.
+                    // Keep the original target in `relationships` for diagnostics.
+                    _ => {}
                 }
             }
             if transform_match_count > 1 {
@@ -368,7 +346,7 @@ impl SceneGraph {
             if game_object.class_id != Some(GAME_OBJECT_CLASS_ID) {
                 continue;
             }
-            let mut component_list_incomplete = component_issue_objects
+            let component_list_incomplete = component_issue_objects
                 .binary_search(&game_object_index)
                 .is_ok();
             if component_list_incomplete {
@@ -408,23 +386,9 @@ impl SceneGraph {
                         file_index,
                         object_index,
                     } => Some((*file_index, *object_index)),
-                    target => {
-                        component_list_incomplete = true;
-                        push_workspace_scene_root_issue(
-                            &mut discovery,
-                            limits.max_issues,
-                            WorkspaceSceneRootDiscoveryIssue {
-                                source_file_index,
-                                game_object_index,
-                                transform_file_index: selected_transform.map(|identity| identity.0),
-                                transform_index: selected_transform.map(|identity| identity.1),
-                                kind: WorkspaceSceneRootDiscoveryIssueKind::UnresolvedComponent {
-                                    target: target.clone(),
-                                },
-                            },
-                        )?;
-                        None
-                    }
+                    // `PPtrAccessList[index]` returns null when `TryGetAsset` fails.
+                    // The reference graph still retains this unresolved target.
+                    _ => None,
                 };
                 let Some((target_file_index, target_object_index)) = target_identity else {
                     continue;
@@ -441,22 +405,9 @@ impl SceneGraph {
                         }
                     }
                     Some(_) => {}
-                    None => {
-                        component_list_incomplete = true;
-                        push_workspace_scene_root_issue(
-                            &mut discovery,
-                            limits.max_issues,
-                            WorkspaceSceneRootDiscoveryIssue {
-                                source_file_index,
-                                game_object_index,
-                                transform_file_index: selected_transform.map(|identity| identity.0),
-                                transform_index: selected_transform.map(|identity| identity.1),
-                                kind: WorkspaceSceneRootDiscoveryIssueKind::UnresolvedComponent {
-                                    target: relationship.target.clone(),
-                                },
-                            },
-                        )?;
-                    }
+                    // A resolved target that is not materialized as an IComponent is
+                    // omitted by the source's typed component access list.
+                    None => {}
                 }
             }
             if transform_match_count > 1 {

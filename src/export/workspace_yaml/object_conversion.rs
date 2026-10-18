@@ -4495,7 +4495,7 @@ fn resolve_workspace_pointer(
             field_path: request.field_path.to_owned(),
             serialized_file_id: request.file_id,
             serialized_path_id: request.path_id,
-            expected_class_id: None,
+            expected_class_id: request.expected_class_id,
             resolution: resolution.clone(),
         }),
     };

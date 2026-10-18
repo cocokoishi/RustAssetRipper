@@ -68,7 +68,7 @@ fn discovers_transform_roots_and_game_objects_without_transforms() {
 }
 
 #[test]
-fn root_discovery_keeps_unresolved_component_and_parent_states_visible() {
+fn root_discovery_projects_unresolved_components_as_absent_and_keeps_parent_diagnostics() {
     let component_metadata = metadata(&[(10, 1), (20, 4)]);
     let component_roots = vec![
         (
@@ -89,23 +89,28 @@ fn root_discovery_keeps_unresolved_component_and_parent_states_visible() {
     let component_discovery = component_graph
         .discover_local_roots(SceneRootDiscoveryLimits::default())
         .unwrap();
-    assert!(component_discovery.roots().is_empty());
-    assert!(matches!(
-        component_discovery.issues()[0].kind,
-        SceneRootDiscoveryIssueKind::UnresolvedComponent {
-            target: SceneRelationshipTarget::MissingLocalObject { path_id: 99 }
-        }
-    ));
-    assert!(matches!(
-        component_graph.discover_local_roots(SceneRootDiscoveryLimits {
+    assert_eq!(
+        component_discovery.roots(),
+        [super::SceneRootCandidate {
+            game_object_index: 0,
+            transform_index: Some(1),
+            reason: SceneRootReason::NullFather,
+        }]
+    );
+    assert!(component_discovery.issues().is_empty());
+    assert!(component_discovery.is_complete());
+    assert!(component_graph.relationships().iter().any(|relationship| {
+        relationship.field_path == "m_Component[0].component"
+            && relationship.target == SceneRelationshipTarget::MissingLocalObject { path_id: 99 }
+    }));
+    assert!(component_graph
+        .discover_local_roots(SceneRootDiscoveryLimits {
             max_issues: 0,
             ..SceneRootDiscoveryLimits::default()
-        }),
-        Err(super::SceneRootDiscoveryError::IssueCountLimitExceeded {
-            requested: 1,
-            limit: 0,
         })
-    ));
+        .unwrap()
+        .issues()
+        .is_empty());
 
     let parent_metadata = metadata(&[(10, 1), (20, 4)]);
     let mut transform = transform_fields(false);

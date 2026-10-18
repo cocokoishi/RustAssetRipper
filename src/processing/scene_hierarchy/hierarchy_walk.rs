@@ -240,9 +240,7 @@ impl WorkspaceSceneHierarchies {
             walk.issue = Some(WorkspaceGetRootGameObjectIssue::MissingCollectionGraph);
             return Ok(walk);
         };
-        if !graph.source_graph_complete()
-            || !graph.source_prefab_processor_reference_scans_complete()
-        {
+        if !graph.is_prefab_processor_complete() {
             walk.issue = Some(WorkspaceGetRootGameObjectIssue::IncompleteCollectionGraph {
                 file_index: game_object.file_index,
             });
@@ -295,6 +293,8 @@ impl WorkspaceSceneHierarchies {
             match resolve_relationship_identity(self, graph, relationship) {
                 RelationshipIdentityResolution::Null => {}
                 RelationshipIdentityResolution::Resolved(component)
+                    if component.class_id.is_none() => {}
+                RelationshipIdentityResolution::Resolved(component)
                     if matches!(
                         component.class_id,
                         Some(TRANSFORM_CLASS_ID | RECT_TRANSFORM_CLASS_ID)
@@ -305,22 +305,10 @@ impl WorkspaceSceneHierarchies {
                 }
                 RelationshipIdentityResolution::Resolved(component)
                     if component.class_id.is_some() => {}
-                RelationshipIdentityResolution::Resolved(component) => {
-                    walk.issue = Some(WorkspaceGetRootGameObjectIssue::UnknownComponentClass {
-                        relationship_index,
-                        component,
-                    });
-                    return Ok(walk);
-                }
-                RelationshipIdentityResolution::Unresolved(target) => {
-                    walk.issue = Some(
-                        WorkspaceGetRootGameObjectIssue::UnresolvedComponentReference {
-                            relationship_index,
-                            target,
-                        },
-                    );
-                    return Ok(walk);
-                }
+                RelationshipIdentityResolution::Resolved(_) => {}
+                // A failed lookup through the source typed component list is null.
+                // Keep its target on the raw relationship for diagnostics/export.
+                RelationshipIdentityResolution::Unresolved(_) => {}
                 RelationshipIdentityResolution::Unavailable {
                     target_file_index,
                     target_object_index,
@@ -385,9 +373,7 @@ impl WorkspaceSceneHierarchies {
                 walk.issue = Some(WorkspaceGetRootGameObjectIssue::MissingCollectionGraph);
                 return Ok(walk);
             };
-            if !current_graph.source_graph_complete()
-                || !current_graph.source_prefab_processor_reference_scans_complete()
-            {
+            if !current_graph.is_prefab_processor_complete() {
                 walk.issue = Some(WorkspaceGetRootGameObjectIssue::IncompleteCollectionGraph {
                     file_index: current_transform.file_index,
                 });
@@ -592,11 +578,7 @@ fn note_incomplete_collection_graph(
     visited_graphs.insert(file_index);
     let root_discovery_complete = graph.roots().is_complete();
     let transform_audit_complete = graph.hierarchy_audit().is_complete();
-    if graph.source_graph_complete()
-        && graph.source_prefab_processor_reference_scans_complete()
-        && root_discovery_complete
-        && transform_audit_complete
-    {
+    if graph.is_prefab_processor_complete() && root_discovery_complete && transform_audit_complete {
         return Ok(());
     }
     push_hierarchy_walk_issue(
@@ -739,18 +721,9 @@ fn expand_game_object_components(
         }
         match resolve_relationship_identity(workspace, graph, relationship) {
             RelationshipIdentityResolution::Null => {}
+            RelationshipIdentityResolution::Resolved(component) if component.class_id.is_none() => {
+            }
             RelationshipIdentityResolution::Resolved(component) => {
-                if component.class_id.is_none() {
-                    push_hierarchy_walk_issue(
-                        walk,
-                        WorkspaceGameObjectHierarchyIssue::UnknownComponentClass {
-                            game_object,
-                            relationship_index,
-                            component,
-                        },
-                        limits,
-                    )?;
-                }
                 push_hierarchy_walk_entry(
                     walk,
                     WorkspaceGameObjectHierarchyEntry {
@@ -766,17 +739,9 @@ fn expand_game_object_components(
                     selected_transform = Some(component);
                 }
             }
-            RelationshipIdentityResolution::Unresolved(target) => {
-                push_hierarchy_walk_issue(
-                    walk,
-                    WorkspaceGameObjectHierarchyIssue::UnresolvedComponentReference {
-                        game_object,
-                        relationship_index,
-                        target,
-                    },
-                    limits,
-                )?;
-            }
+            // The source's typed component access list yields null when a PPtr
+            // cannot be loaded. The raw relationship remains in the graph.
+            RelationshipIdentityResolution::Unresolved(_) => {}
             RelationshipIdentityResolution::Unavailable {
                 target_file_index,
                 target_object_index,

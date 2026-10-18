@@ -15,7 +15,7 @@ use crate::processing::prefab_processing::{
 use crate::processing::scene_naming::SceneUnityVersion;
 use crate::serialized_file::metadata::{SerializedFileMetadata, SerializedType};
 use crate::serialized_file::object::{
-    ObjectDefaultValueLimits, ObjectEncodeLimits, SerializedValue,
+    default_value_for_type_tree_node, ObjectDefaultValueLimits, ObjectEncodeLimits, SerializedValue,
 };
 use crate::serialized_file::object_workspace::WorkspaceObject;
 use crate::serialized_file::workspace::SerializedFileWorkspace;
@@ -320,16 +320,7 @@ pub(super) fn workspace_generated_transform_assignment_to_unity_yaml_document(
                     .to_owned(),
             ));
         }
-        let metadata = &workspace
-            .files()
-            .get(transform.type_file_index)
-            .ok_or_else(|| {
-                invariant_error(format!(
-                    "generated Transform type file {} is absent from the workspace",
-                    transform.type_file_index
-                ))
-            })?
-            .metadata;
+        let metadata = transform.type_metadata.as_ref();
         generated_transform_payload_to_unity_yaml_document(
             &transform.payload,
             metadata,
@@ -640,15 +631,13 @@ pub(super) fn workspace_generated_component_yaml_overlay(
         })?;
     let element_node_index =
         game_object_component_element_node_index(type_tree).map_err(invariant_error)?;
-    let empty_element_template = file
-        .metadata
-        .default_value_for_type_tree_node(
-            object.object_index,
-            type_index,
-            element_node_index,
-            context.default_value_limits,
-        )
-        .map_err(|error| invariant_error(error.to_string()))?;
+    let empty_element_template = default_value_for_type_tree_node(
+        type_tree,
+        object.object_index,
+        element_node_index,
+        context.default_value_limits,
+    )
+    .map_err(|error| invariant_error(error.to_string()))?;
     let field_path = generated_component_pointer_field_path(
         &empty_element_template,
         overlay.generated_component.appended_index,
@@ -897,8 +886,11 @@ pub fn generated_transform_payload_to_unity_yaml_document(
         ));
     }
 
-    let hints = UnityYamlObjectConversionHints::from_type_tree(type_tree, unity_version, limits)
-        .map_err(UnityYamlWorkspaceExportError::Conversion)?;
+    let mut hints =
+        UnityYamlObjectConversionHints::from_type_tree(type_tree, unity_version, limits)
+            .map_err(UnityYamlWorkspaceExportError::Conversion)?;
+    hints.field_name_aliases.clear();
+    hints.preserve_type_tree_field_names = true;
     let target_asset = ExportAssetIdentity {
         collection: ExportAssetCollectionIdentity::SerializedFile {
             file_index: constructor_pointer.target.file_index,

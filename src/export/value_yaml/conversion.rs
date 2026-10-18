@@ -300,6 +300,12 @@ where
             }
         }
         SerializedValue::PPtr { file_id, path_id } => {
+            let expected_class_id = if field_path.contains('[') {
+                let canonical_path = canonical_array_path(field_path, limits.max_field_path_bytes)?;
+                hints.pointer_target_class_ids.get(&canonical_path).copied()
+            } else {
+                hints.pointer_target_class_ids.get(field_path).copied()
+            };
             let resolution = if *path_id == 0 {
                 ProjectPointerResolution::Null
             } else {
@@ -308,6 +314,7 @@ where
                     field_path,
                     file_id: *file_id,
                     path_id: *path_id,
+                    expected_class_id,
                 })
             };
             project_pointer_to_unity_yaml(&resolution, unity_version, missing_reference_guid)

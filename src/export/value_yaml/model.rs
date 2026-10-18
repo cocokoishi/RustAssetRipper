@@ -64,6 +64,9 @@ pub struct UnityYamlObjectConversionHints {
     pub keyed_pair_element_paths: HashSet<String>,
     pub hash128_schemas: HashMap<String, UnityYamlHash128Schema>,
     pub guid_schemas: HashMap<String, UnityYamlGuidSchema>,
+    /// Known target class IDs for TypeTree PPtr types whose source `GetClassID` mapping is
+    /// reproduced by the YAML converter.
+    pub pointer_target_class_ids: HashMap<String, i32>,
     pub property_name_schemas: HashMap<String, UnityYamlPropertyNameSchema>,
     pub scene_object_identifier_schemas: HashMap<String, UnityYamlSceneObjectIdentifierSchema>,
     pub field_name_aliases: HashMap<String, String>,
@@ -134,6 +137,7 @@ pub struct UnityYamlPPtrRequest<'a> {
     pub field_path: &'a str,
     pub file_id: i32,
     pub path_id: i64,
+    pub expected_class_id: Option<i32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -5,8 +5,9 @@
 //! caller-reported `IsRoot` facts. Live interface checks, pointer
 //! resolution, generated `SceneAsset` allocation, and `SetMainAsset` plumbing stay
 //! caller-side; repeated `SceneRoots` assignments overwrite, so callers keep the last.
-//! The root facts arrive post-resolution, so this filter never invents roots from
-//! unresolved links: the caller reports only whether each father pointer is null.
+//! The source `PPtrAccessList` projects failed component lookups as null while the
+//! original relationships remain available to diagnostics. Root discovery follows
+//! that typed view and does not erase the serialized pointer evidence.
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};

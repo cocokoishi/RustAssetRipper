@@ -40,7 +40,7 @@ fn fetch_hierarchy_preserves_component_and_child_order_and_uses_last_transform()
 }
 
 #[test]
-fn fetch_hierarchy_reports_cycles_and_unresolved_component_edges() {
+fn fetch_hierarchy_projects_unresolved_components_as_absent_and_reports_cycles() {
     let mut workspace = workspace_hierarchy_fixture(true);
     workspace.non_scene_collections[0].relationships[0].target =
         SceneRelationshipTarget::MissingLocalObject { path_id: 4 };
@@ -49,14 +49,10 @@ fn fetch_hierarchy_reports_cycles_and_unresolved_component_edges() {
         .fetch_game_object_hierarchy(root, WorkspaceGameObjectHierarchyWalkLimits::default())
         .unwrap();
     assert_eq!(walk.entries().len(), 5);
-    assert_eq!(walk.issues().len(), 2);
-    assert!(walk.issues().iter().any(|issue| matches!(
+    assert_eq!(walk.issues().len(), 1);
+    assert!(!walk.issues().iter().any(|issue| matches!(
         issue,
-        WorkspaceGameObjectHierarchyIssue::UnresolvedComponentReference {
-            game_object,
-            relationship_index: 0,
-            target: SceneRelationshipTarget::MissingLocalObject { path_id: 4 },
-        } if *game_object == root
+        WorkspaceGameObjectHierarchyIssue::UnresolvedComponentReference { .. }
     )));
     assert!(walk.issues().iter().any(|issue| matches!(
         issue,

@@ -285,6 +285,106 @@ fn project_export_matches_source_for_a_no_tree_generated_prefab_hierarchy() {
 }
 
 #[test]
+fn project_export_matches_source_when_a_no_tree_component_target_is_unresolved() {
+    let fixture = include_str!("../../../processing/scene_unresolved_source_fixture.txt");
+    let hex = fixture
+        .lines()
+        .find_map(|line| line.strip_prefix("INPUT_HEX|"))
+        .expect("source-authored unresolved-component fixture has a hex payload");
+    assert_eq!(hex.len() % 2, 0, "source fixture hex has an odd length");
+    let bytes = hex
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16)
+                .expect("source fixture contains ASCII hexadecimal bytes")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(bytes.len(), 280);
+
+    let (filesystem, workspace) =
+        load_workspace_named_bytes_with_source_factory("UnresolvedComponent.unity", &bytes);
+    let serialized_file = workspace.files().first().expect("one source file");
+    assert_eq!(serialized_file.metadata.objects.len(), 1);
+    assert!(serialized_file
+        .metadata
+        .types
+        .iter()
+        .all(|serialized_type| serialized_type
+            .type_tree
+            .as_ref()
+            .is_none_or(|tree| tree.nodes.is_empty())));
+    let objects =
+        ObjectWorkspace::load_from_vfs(&filesystem, &workspace, ObjectWorkspaceLimits::default())
+            .unwrap();
+    assert!(objects.report().is_complete(), "{:?}", objects.report());
+    assert_eq!(objects.objects().len(), 1);
+    assert!(objects.objects()[0].payload.is_ok());
+    let reference_graph = workspace
+        .reference_graph(MultiFileReferenceGraphLimits::default())
+        .unwrap();
+    assert!(!reference_graph.is_complete());
+    assert!(reference_graph.references().iter().any(|reference| {
+        reference.source_path_id == 10
+            && reference.field_path == "m_Component[0].component"
+            && matches!(
+                reference.resolution,
+                MultiFilePPtrResolution::MissingDependency {
+                    external_index: 0,
+                    path_id: 99,
+                }
+            )
+    }));
+
+    let root_catalog = RootResourceFileCatalog::default();
+    let provider = PlatformResourceProvider::new(None, None);
+    let settings = ExportSettingsFile::from(ExportDefaults::default());
+    let output_root =
+        crate::test_support::unique_test_directory("project-unresolved-component-prefab-e2e");
+    let report = export_workspace_yaml_project_with_settings(
+        &output_root,
+        false,
+        &filesystem,
+        &root_catalog,
+        &provider,
+        &workspace,
+        &objects,
+        &reference_graph,
+        &settings,
+        WorkspaceProjectExportLimits::default(),
+    )
+    .unwrap();
+
+    let prefab_path = output_root.join("Assets/GameObject/UnresolvedComponentRoot.prefab");
+    let prefab_meta_path =
+        output_root.join("Assets/GameObject/UnresolvedComponentRoot.prefab.meta");
+    let prefab_yaml = std::fs::read_to_string(&prefab_path).unwrap();
+    let source_yaml = include_str!("../no_tree_unresolved_component_source_prefab.yml");
+    assert_eq!(
+        normalize_generated_prefab_ids(&prefab_yaml),
+        normalize_generated_prefab_ids(source_yaml)
+    );
+    assert!(!output_root
+        .join("Assets/GameObject/UnresolvedComponentRoot.asset")
+        .exists());
+    let prefab_meta = std::fs::read_to_string(prefab_meta_path).unwrap();
+    let source_meta = include_str!("../no_tree_unresolved_component_source_prefab.meta.yml");
+    let normalize_meta = |text: &str| {
+        text.lines()
+            .filter(|line| !line.starts_with("guid: ") && !line.starts_with("timeCreated: "))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_eq!(normalize_meta(&prefab_meta), normalize_meta(source_meta));
+    assert_eq!(report.asset_file_count, 1);
+    assert_eq!(report.meta_file_count, 1);
+    assert_eq!(report.collection_count, 1);
+    assert_eq!(report.exported_object_count, 2);
+
+    std::fs::remove_dir_all(output_root).unwrap();
+}
+
+#[test]
 fn project_export_routes_an_existing_modern_prefab_instance_collection() {
     let bytes = make_existing_prefab_instance_file();
     if let Ok(path) = std::env::var("ASSET_RIPPER_REFERENCE_PREFAB_FIXTURE") {
@@ -417,4 +517,25 @@ fn yaml_document_file_id(yaml: &str, class_id: i32) -> String {
         .and_then(|tail| tail.split_whitespace().next())
         .expect("the expected Unity YAML document exists")
         .to_owned()
+}
+
+fn normalize_generated_prefab_ids(yaml: &str) -> String {
+    let game_object_id = yaml_document_file_id(yaml, 1);
+    let transform_id = yaml_document_file_id(yaml, 4);
+    yaml.replace(
+        &format!("--- !u!1 &{game_object_id}"),
+        "--- !u!1 &<GAME_OBJECT_ID>",
+    )
+    .replace(
+        &format!("--- !u!4 &{transform_id}"),
+        "--- !u!4 &<TRANSFORM_ID>",
+    )
+    .replace(
+        &format!("{{fileID: {game_object_id}}}"),
+        "{fileID: <GAME_OBJECT_ID>}",
+    )
+    .replace(
+        &format!("{{fileID: {transform_id}}}"),
+        "{fileID: <TRANSFORM_ID>}",
+    )
 }

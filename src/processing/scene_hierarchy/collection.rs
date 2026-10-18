@@ -310,8 +310,10 @@ impl WorkspaceSceneCollectionHierarchy {
     }
 
     pub fn is_prefab_processor_complete(&self) -> bool {
-        self.source_graph_complete
-            && self.source_prefab_processor_reference_scans_complete
+        // PrefabProcessor queries typed PPtr accessors. Failed target lookup is
+        // presented as null there, while the raw reference graph remains
+        // incomplete and separately observable.
+        self.source_prefab_processor_reference_scans_complete
             && self.graph_issues.is_empty()
             && self.roots.is_complete()
             && self.hierarchy_audit.is_complete()

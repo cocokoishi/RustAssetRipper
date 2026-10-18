@@ -18,6 +18,7 @@ use super::type_rules::{
 };
 pub(super) const TRANSFER_USING_FLOW_MAPPING_STYLE: u32 = 0x0020_0000;
 pub(super) const TRANSFER_IGNORE_IN_META_FILES: u32 = 0x0008_0000;
+const COMPONENT_CLASS_ID: i32 = 2;
 
 impl UnityYamlObjectConversionHints {
     /// Build YAML representation hints from the same TypeTree flags and array shapes used to
@@ -920,6 +921,27 @@ impl<'a> UnityYamlTypeTreeLayout<'a> {
         }
 
         if node_type == "TypelessData" || node_type == "string" || node_type.starts_with("PPtr<") {
+            if node_type == "PPtr<Component>" {
+                if let Some(previous) = hints.pointer_target_class_ids.get(field_path) {
+                    if *previous != COMPONENT_CLASS_ID {
+                        return Err(UnityYamlObjectConversionError::InvalidTypeTree {
+                            node_index,
+                            reason: "ambiguous PPtr target classes share one field path",
+                        });
+                    }
+                } else {
+                    hints.pointer_target_class_ids.try_reserve(1).map_err(|_| {
+                        UnityYamlObjectConversionError::AllocationFailed {
+                            resource: "Unity YAML PPtr target-class hints",
+                            requested: hints.pointer_target_class_ids.len().saturating_add(1),
+                        }
+                    })?;
+                    hints.pointer_target_class_ids.insert(
+                        try_copy_string(field_path, "Unity YAML PPtr target-class path")?,
+                        COMPONENT_CLASS_ID,
+                    );
+                }
+            }
             if node_type == "TypelessData" {
                 // `TypelessData` members expand into a byte count plus a `_typelessdata`
                 // payload in project YAML, even though the tree carries one `Bytes`

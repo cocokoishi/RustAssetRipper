@@ -27,18 +27,23 @@ use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::io;
+use std::sync::Arc;
 
 use crate::io::filesystem::VirtualFileSystem;
 use crate::serialized_file::collection_workspace::{
     WorkspaceAssetCollections, WorkspaceCollectionLimits,
 };
 use crate::serialized_file::file::SerializedFile;
+use crate::serialized_file::metadata::{SerializedFileMetadata, SerializedType};
 use crate::serialized_file::object::{ObjectDefaultValueLimits, ObjectEncodeLimits};
 use crate::serialized_file::object_workspace::ObjectWorkspace;
 use crate::serialized_file::reference_graph::MultiFileReferenceGraph;
 use crate::serialized_file::workspace::SerializedFileWorkspace;
 
 use crate::processing::asset_bundle::get_asset_bundle_name;
+use crate::processing::asset_factory::{
+    reference_class_layouts, ClassLayoutSource, FactoryUnityVersion,
+};
 use crate::processing::prefab_processing::{
     animator_controller_source_dependency_inventory,
     materialize_planned_generated_transform_payload, plan_workspace_prefab_processing,
@@ -404,15 +409,17 @@ pub struct MaterializedSceneHierarchyAsset {
     pub incomplete: bool,
 }
 
-/// A generated Transform materialized from a real class-ID-4 TypeTree.
+/// A generated Transform materialized from a workspace or source TPK class-ID-4 TypeTree.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MaterializedGeneratedTransform {
     pub asset: WorkspaceProcessedAssetIdentity,
     pub game_object: WorkspaceSceneObjectIdentity,
     /// `ProcessedAssetCollection.Name` that owns the generated asset.
     pub collection_name: String,
-    /// Workspace file supplying the class-ID-4 TypeTree used to materialize this payload.
+    /// Workspace file supplying the source version and, when present, the class-ID-4 type.
     pub type_file_index: usize,
+    /// Minimal metadata containing the exact class-ID-4 TypeTree used to encode this payload.
+    pub type_metadata: Arc<SerializedFileMetadata>,
     pub payload: WorkspaceGeneratedTransformPayload,
 }
 
@@ -1322,6 +1329,9 @@ fn materialize_generated_transforms(
     if !processed_assets.is_complete() {
         return Ok((graph, generated));
     }
+    let mut workspace_type_metadata = HashMap::<(usize, usize), Arc<SerializedFileMetadata>>::new();
+    let mut reference_type_metadata =
+        HashMap::<usize, Result<Option<Arc<SerializedFileMetadata>>, String>>::new();
     let mut requested = 0usize;
     for addition in processed_assets.component_additions() {
         if addition.component_class_id != TRANSFORM_CLASS_ID {
@@ -1368,26 +1378,59 @@ fn materialize_generated_transforms(
         else {
             continue;
         };
-        let Some((type_file_index, type_index)) =
+        let (type_file_index, type_metadata) = if let Some((type_file_index, type_index)) =
             select_generated_transform_type(workspace, game_object.file_index)
-        else {
-            push_diagnostic(
-                diagnostics,
-                limits,
-                WorkspaceSceneProcessingDiagnostic::GeneratedTransformTypeUnavailable {
-                    game_object,
-                    message: "no workspace SerializedFile exposes a class-ID-4 type entry"
-                        .to_owned(),
-                },
-            );
-            continue;
+        {
+            let cache_key = (type_file_index, type_index);
+            let metadata = workspace_type_metadata.entry(cache_key).or_insert_with(|| {
+                let source_metadata = &workspace.files()[type_file_index].metadata;
+                let serialized_type = source_metadata.types[type_index].clone();
+                Arc::new(minimal_generated_type_metadata(
+                    source_metadata,
+                    serialized_type,
+                ))
+            });
+            (type_file_index, Arc::clone(metadata))
+        } else {
+            let source_file_index = game_object.file_index;
+            let reference_metadata = reference_type_metadata
+                .entry(source_file_index)
+                .or_insert_with(|| {
+                    reference_generated_transform_metadata(workspace, source_file_index)
+                        .map(|metadata| metadata.map(Arc::new))
+                });
+            match reference_metadata {
+                Ok(Some(metadata)) => (source_file_index, Arc::clone(metadata)),
+                Ok(None) => {
+                    push_diagnostic(
+                            diagnostics,
+                            limits,
+                            WorkspaceSceneProcessingDiagnostic::GeneratedTransformTypeUnavailable {
+                                game_object,
+                                message: "neither the workspace nor the source TPK exposes a class-ID-4 TypeTree"
+                                    .to_owned(),
+                            },
+                        );
+                    continue;
+                }
+                Err(message) => {
+                    push_diagnostic(
+                        diagnostics,
+                        limits,
+                        WorkspaceSceneProcessingDiagnostic::GeneratedTransformTypeUnavailable {
+                            game_object,
+                            message: message.clone(),
+                        },
+                    );
+                    continue;
+                }
+            }
         };
-        let metadata = &workspace.files()[type_file_index].metadata;
         match materialize_planned_generated_transform_payload(
             processed_assets,
             addition.component_asset,
-            metadata,
-            type_index,
+            &type_metadata,
+            0,
             ObjectDefaultValueLimits::default(),
             ObjectEncodeLimits::default(),
         ) {
@@ -1407,6 +1450,7 @@ fn materialize_generated_transforms(
                     game_object,
                     collection_name,
                     type_file_index,
+                    type_metadata,
                     payload,
                 });
             }
@@ -1459,7 +1503,6 @@ fn select_generated_transform_type(
 ) -> Option<(usize, usize)> {
     let order = std::iter::once(preferred_file_index)
         .chain((0..workspace.files().len()).filter(|index| *index != preferred_file_index));
-    let mut fallback = None;
     for file_index in order {
         let metadata = &workspace.files()[file_index].metadata;
         for (type_index, serialized_type) in metadata.types.iter().enumerate() {
@@ -1469,10 +1512,69 @@ fn select_generated_transform_type(
             if serialized_type.type_tree.is_some() {
                 return Some((file_index, type_index));
             }
-            fallback.get_or_insert((file_index, type_index));
         }
     }
-    fallback
+    None
+}
+
+fn minimal_generated_type_metadata(
+    source: &SerializedFileMetadata,
+    serialized_type: SerializedType,
+) -> SerializedFileMetadata {
+    let mut prefix = source.prefix.clone();
+    prefix.has_type_tree = true;
+    SerializedFileMetadata {
+        prefix,
+        types: vec![serialized_type],
+        long_file_id: None,
+        objects: Vec::new(),
+        script_types: Vec::new(),
+        externals: Vec::new(),
+        reference_types: Vec::new(),
+        user_information: None,
+        trailing_metadata: Vec::new(),
+        consumed_bytes: 0,
+    }
+}
+
+fn reference_generated_transform_metadata(
+    workspace: &SerializedFileWorkspace,
+    file_index: usize,
+) -> Result<Option<SerializedFileMetadata>, String> {
+    let file = workspace
+        .files()
+        .get(file_index)
+        .ok_or_else(|| format!("workspace file {file_index} is unavailable"))?;
+    let version = file
+        .metadata
+        .prefix
+        .unity_version_text
+        .as_deref()
+        .and_then(FactoryUnityVersion::parse)
+        .unwrap_or_else(FactoryUnityVersion::stripped);
+    let Some((_, editor_tree)) = reference_class_layouts()
+        .tpk_trees(TRANSFORM_CLASS_ID, &version)
+        .map_err(|error| format!("source Transform TPK lookup failed: {error}"))?
+    else {
+        return Ok(None);
+    };
+    // PrefabProcessor creates these generated assets in its editor-side processed collection;
+    // its emitted YAML uses the editor TypeTree even when the source file payload is release-shaped.
+    let type_tree = editor_tree;
+    let serialized_type = SerializedType {
+        raw_type_id: TRANSFORM_CLASS_ID,
+        type_id_for_hash: TRANSFORM_CLASS_ID,
+        is_stripped_type: false,
+        script_type_index: -1,
+        script_id: None,
+        old_type_hash: None,
+        type_tree: Some((*type_tree).clone()),
+        type_dependencies: Vec::new(),
+    };
+    Ok(Some(minimal_generated_type_metadata(
+        &file.metadata,
+        serialized_type,
+    )))
 }
 
 fn materialize_scene_hierarchies(

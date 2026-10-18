@@ -1157,7 +1157,7 @@
     }
 
     #[test]
-    fn workspace_scene_processing_keeps_unresolved_no_type_tree_components_indeterminate() {
+    fn workspace_scene_processing_projects_unresolved_no_type_tree_components_as_absent() {
         let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
         let fixture = include_str!("processing/scene_unresolved_source_fixture.txt");
         let input_hex = fixture
@@ -1202,13 +1202,15 @@
         assert!(summary.contains(
             "Scene graph: 1 GameObjects, 0 Transforms, 1 relationships, 0 decode issues, complete=false"
         ));
-        assert!(summary.contains("Workspace root candidates: 0, root issues: 1"));
-        assert!(
-            summary.contains("Generated Prefab Transforms planned for non-scene GameObjects: 0")
-        );
+        assert!(summary.contains("Workspace root candidates: 1, root issues: 0"));
+        assert!(summary.contains("Generated Prefab Transforms planned for non-scene GameObjects: 1"));
         assert!(summary.contains(
-            "hierarchy file 0: 1 GameObjects, 0 Transforms, 0 component candidates, 0 roots, 1 root issues, 1 relationships, complete=false"
+            "hierarchy file 0: 1 GameObjects, 0 Transforms, 0 component candidates, 1 roots, 0 root issues, 1 relationships, complete=false"
         ));
+        assert!(summary.contains(
+            "1 generated hierarchies, 1 virtual Transform entries in planned hierarchies"
+        ));
+        assert!(summary.contains("complete=true, stopped=false"));
     }
 
     #[test]
