@@ -9031,3 +9031,37 @@ These results do not pass the first-phase gate. The reference .NET solution buil
 - What remains unverified on this path: the movie/video streamed ranges (same helper, one more
   descriptor field), the hierarchy GLB for prefab members through the driver, the script producer
   (blocked on the decompiler decision) and the class-89/117/187/188 image classes.
+
+## 2026-10-17 - Primary-content VideoClip resource ranges
+
+- **Gap and reference behavior.** The frozen
+  `AssetRipper.Export.PrimaryContent/BinaryAssetContentExtractor.cs` admits a `VideoClip` only when
+  `VideoClipExtensions.CheckIntegrity` passes, then writes `GetContent()` bytes with the extension
+  from `m_OriginalPath`. That check uses `StreamedResourceExtensions.CheckIntegrity`: an empty path
+  returns true before range checks; a missing resource, zero size, invalid range, or range beyond
+  the resource returns false and the extractor stack reaches JSON; a valid resource range carries
+  its exact bytes to the binary producer.
+- **Rust behavior.** `src/main_cli_primary_content.rs` now decodes class-329 `m_ExternalResources`,
+  resolves it through the same collection/resource resolver used by the texture path, and supplies
+  both the integrity answer and bytes to the primary-content pipeline. `VideoClipView` preserves
+  the source empty-path and signed-range prechecks. Missing resources, zero-length ranges, and
+  invalid/out-of-bounds ranges decline instead of failing the collection. The binary planner writes
+  the resolved bytes with the original-path extension. The shared reader also classifies all source
+  invalid-range cases as a decline.
+- **End-to-end evidence.**
+  `web::routes::tests::the_primary_content_export_reads_video_clip_resource_ranges` drives
+  `/Export/PrimaryContent` with a production-layout synthetic class-329 `VideoClip` fixture. It
+  asserts exact `.mp4` bytes for a resolved range, then asserts JSON fallback for a missing resource,
+  a zero-length range, and a range extending beyond the resource. No private input was used.
+- **Actions.** Run `39086269070` for commit `3074805658e60b0976b3e1c13ed06d1d6e48a98d` completed
+  successfully. Ubuntu debug and release suites each passed 1,935 library and 212 binary tests;
+  Windows passed 1,937 library and 212 binary tests. The route regression passed on both platforms.
+  Both Clippy jobs, Windows release build, changed-line formatting, ledger audit, and public
+  repository hygiene also passed. Local changed-file `rustfmt --check` and `git diff --check` passed;
+  Cargo build/test commands were left to Actions.
+- **Status remains open.** `PRODUCT-PRIMARY-CONTENT-001` and
+  `PRODUCT-PRIMARY-CONTENT-EXTRACTORS-001` remain `已实现但未验证`: prefab hierarchy GLB membership
+  and output verification,
+  the script producer, terrain heatmap, and the other image classes still need implementation or
+  production-route evidence. The live ledger remains 409 rows with 29 non-verified entries, zero
+  duplicate IDs, and zero malformed rows.

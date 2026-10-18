@@ -1,37 +1,26 @@
 # RustAssetRipper hand-off — 2026-10-17
 
-## Latest current checkpoint - 2026-10-17 (a streamed texture's pixels are resolved on the primary-content path)
+## Latest current checkpoint - 2026-10-17 (primary-content texture and VideoClip streams)
 
-- **The primary-content driver now resolves class-28 streamed resources.** `read_texture_stream`
-  (`src/main_cli_primary_content.rs`) answers `ImageTextureExtensions.CheckAssetIntegrity`'s stream
-  branch with the ported `StreamedResourceExtensions.CheckIntegrity`: an empty path is intact without
-  any lookup, a missing resource, a zero-length range and a range outside its file are not (so the
-  object reaches the JSON fallback the reference writes for it), and a resolved bounded read carries
-  its bytes. Those bytes are threaded into `plan_resource_export`'s `stream_content`, which
-  `Texture2DView` already accepted, so a 2019.4 texture whose pixels live in a `.resS` exports as a
-  PNG instead of being reported. The lookup is the same `resolve_and_read_streamed_resource_info`
-  the Unity-project pipeline uses.
-- **The old presence-based gate is gone.** `texture2d_stream_is_set` (field present -> `Some(false)`)
-  became `texture2d_stream_data`, which reads and validates the descriptor and reports one it cannot
-  read, and the driver's unit test now pins absent / present-but-unset / `_C28` alias / unreadable.
-  `UndecidableObject.reason` is an owned `String`, so a resource failure can carry the resource path
-  and the underlying error instead of being flattened to one line.
-- **Both branches are pinned end to end** by
-  `the_primary_content_export_reads_a_streamed_texture_from_its_resource` (`src/web/routes.rs`), on a
-  new `make_streamed_reference_texture_file` fixture (the release 2019.4 tree with empty `image data`
-  and a descriptor pointing three bytes into `streamed.resS`): the PNG's pixels are the resource's
-  own bytes at that offset, and the same texture loaded without its resource writes the JSON
-  fallback and no PNG. The fixture was refactored into a parameterized core, and
-  `make_reference_texture_file`'s bytes are unchanged (the texture-decode and asset-page regressions
-  pass).
-- Verified by GitHub Actions (locally this unit ran only `cargo check`, `clippy -D warnings`,
-  `rustfmt` and the two focused regressions, because the new fixture and the driver cannot be
-  validated by inspection alone): the `Rust CI` run for this commit must be green before the unit
-  counts.
-- **Next:** the movie/video streamed ranges (same helper, one more field), the `EXP-GLB-*` hierarchy
-  path through the driver (needs a scene-collection fixture), then `RES-TEXTURE-001` /
-  `EXPORT-UNITY-001`, `PRODUCT-CONFIG-001`'s data-set subsystem, and finally the 22-sample local
-  replay with the `docs/acceptance-corpus.md` refresh.
+- `read_primary_content_stream` in `src/main_cli_primary_content.rs` now resolves both class-28
+  `m_StreamData` and class-329 `m_ExternalResources`. The reference's shared integrity rules are
+  preserved: an empty path passes before range checks but yields no content; missing resources,
+  zero-length ranges, and invalid/out-of-bounds ranges decline to JSON; resolved ranges pass their
+  exact bytes to the texture or binary producer.
+- `the_primary_content_export_reads_a_streamed_texture_from_its_resource` verifies streamed PNG
+  pixels and the missing-resource fallback. The new
+  `the_primary_content_export_reads_video_clip_resource_ranges` verifies exact `.mp4` bytes and JSON
+  fallback for missing, zero-length, and out-of-range video resources.
+- Actions run `39086269070` passed on commit `3074805658e60b0976b3e1c13ed06d1d6e48a98d`: Ubuntu
+  debug/release suites each passed 1,935 library and 212 binary tests; Windows passed 1,937 library
+  and 212 binary tests. Both Clippy jobs, Windows release build, changed-line formatting, ledger
+  audit, and public-repository hygiene passed. Cargo build/tests were not run locally.
+- The live parity report remains open: 409 rows, 380 verified, 29 non-verified, zero duplicate IDs,
+  and zero malformed rows. The primary-content rows remain unverified because prefab hierarchy GLB
+  output verification, the script producer, terrain heatmap, and other image classes remain open.
+- **Next:** verify prefab hierarchy GLB output through `/Export/PrimaryContent` with a committed
+  serialized hierarchy fixture. The exporter and conversion pieces exist, but the production driver
+  still lacks an end-to-end hierarchy fixture and semantic output comparison.
 
 ## Previous checkpoint - 2026-10-17 (the primary-content export is verified end to end)
 
