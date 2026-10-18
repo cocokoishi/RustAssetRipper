@@ -1,25 +1,22 @@
 //! `AssetRipper.Configuration`: the named configuration data the settings pages edit.
 //!
 //! The baseline keeps two keyed stores on the configuration object: `SingletonData`, one text per
-//! key, and `ListData`, a list of texts per key. The settings pages read and write them, and the
-//! import/export settings themselves live in the singleton store in the baseline - the port models
-//! those three records directly instead, so what is left here is the user-editable part.
+//! key, and `ListData`, a list of texts per key. The settings pages read and write them. The three
+//! Rust settings records also have linked typed singleton entries so both settings pages stay in
+//! sync.
 //!
 //! **The two stores are not persisted.** `CoreConfiguration.ResetToDefaultValues` clears them, and
 //! nothing in `SerializedSettings` carries them, so they are in-memory configuration for the session
 //! rather than part of the settings file. That is why this module has no loader and no writer.
 //!
-//! **Ordering is deterministic here and is not in the baseline.** The baseline iterates
-//! `Dictionary.Keys`, whose order is an implementation detail of the runtime and not reproducible;
-//! the port uses an ordered map so a page renders the same way twice. The set of keys is what the
-//! baseline's behaviour determines, and that is what is preserved.
-
-use std::collections::BTreeMap;
+//! Keys retain insertion order. The frozen .NET 10 runtime exposes the `Dictionary` insertion order
+//! on the configuration page, and the stores add default entries and user-created keys in that
+//! order.
 
 /// `SingletonDataStorage`: one text per key.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SingletonData {
-    entries: BTreeMap<String, String>,
+    entries: Vec<(String, String)>,
 }
 
 impl SingletonData {
@@ -28,14 +25,17 @@ impl SingletonData {
         Self::default()
     }
 
-    /// The keys, in a deterministic order.
+    /// The keys in insertion order.
     pub fn keys(&self) -> impl Iterator<Item = &String> {
-        self.entries.keys()
+        self.entries.iter().map(|(key, _)| key)
     }
 
     /// The text stored for `key`, when the key exists.
     pub fn get(&self, key: &str) -> Option<&String> {
-        self.entries.get(key)
+        self.entries
+            .iter()
+            .find(|(candidate, _)| candidate == key)
+            .map(|(_, value)| value)
     }
 
     /// The number of stored keys.
@@ -53,7 +53,18 @@ impl SingletonData {
     /// The baseline's `GetOrAdd` adds a `StringDataInstance`, whose value is the empty string, so
     /// the key appears with no data - which is what the page shows as "nothing loaded for this key".
     pub fn get_or_add(&mut self, key: &str) -> &mut String {
-        self.entries.entry(key.to_owned()).or_default()
+        let index = match self
+            .entries
+            .iter()
+            .position(|(candidate, _)| candidate == key)
+        {
+            Some(index) => index,
+            None => {
+                self.entries.push((key.to_owned(), String::new()));
+                self.entries.len() - 1
+            }
+        };
+        &mut self.entries[index].1
     }
 
     /// `DataInstance.Clear`: resets the value to empty, **keeping the key**.
@@ -61,8 +72,12 @@ impl SingletonData {
     /// The page's Remove button calls this rather than removing the entry, so a removed key stays
     /// listed with no data. Removing it would change what the page shows.
     pub fn clear(&mut self, key: &str) -> bool {
-        match self.entries.get_mut(key) {
-            Some(value) => {
+        match self
+            .entries
+            .iter_mut()
+            .find(|(candidate, _)| candidate == key)
+        {
+            Some((_, value)) => {
                 value.clear();
                 true
             }
@@ -72,7 +87,7 @@ impl SingletonData {
 
     /// `DataStorage.Clear`: resets every value, keeping every key.
     pub fn clear_all(&mut self) {
-        for value in self.entries.values_mut() {
+        for (_, value) in &mut self.entries {
             value.clear();
         }
     }
@@ -81,7 +96,7 @@ impl SingletonData {
 /// `ListDataStorage`: a list of texts per key.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ListData {
-    entries: BTreeMap<String, Vec<String>>,
+    entries: Vec<(String, Vec<String>)>,
 }
 
 impl ListData {
@@ -90,14 +105,17 @@ impl ListData {
         Self::default()
     }
 
-    /// The keys, in a deterministic order.
+    /// The keys in insertion order.
     pub fn keys(&self) -> impl Iterator<Item = &String> {
-        self.entries.keys()
+        self.entries.iter().map(|(key, _)| key)
     }
 
     /// The list stored for `key`, when the key exists.
     pub fn get(&self, key: &str) -> Option<&Vec<String>> {
-        self.entries.get(key)
+        self.entries
+            .iter()
+            .find(|(candidate, _)| candidate == key)
+            .map(|(_, values)| values)
     }
 
     /// The number of stored keys.
@@ -112,7 +130,18 @@ impl ListData {
 
     /// The list for `key`, adding an empty list when the key is absent.
     pub fn get_or_add(&mut self, key: &str) -> &mut Vec<String> {
-        self.entries.entry(key.to_owned()).or_default()
+        let index = match self
+            .entries
+            .iter()
+            .position(|(candidate, _)| candidate == key)
+        {
+            Some(index) => index,
+            None => {
+                self.entries.push((key.to_owned(), Vec::new()));
+                self.entries.len() - 1
+            }
+        };
+        &mut self.entries[index].1
     }
 
     /// Appends the values to `key`'s list, adding the key when it is absent.
@@ -124,13 +153,13 @@ impl ListData {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        let list = self.entries.entry(key.to_owned()).or_default();
+        let list = self.get_or_add(key);
         list.extend(values.into_iter().map(Into::into));
     }
 
     /// Whether `index` addresses an element, mirroring `DataExtensions.ContainsIndex`.
     pub fn contains_index(&self, key: &str, index: i64) -> bool {
-        match self.entries.get(key) {
+        match self.get(key) {
             Some(list) => usize::try_from(index).is_ok_and(|index| index < list.len()),
             None => false,
         }
@@ -138,7 +167,11 @@ impl ListData {
 
     /// `DataSet.RemoveAt`: removes the element at `index`, keeping the key.
     pub fn remove_at(&mut self, key: &str, index: i64) -> bool {
-        let Some(list) = self.entries.get_mut(key) else {
+        let Some((_, list)) = self
+            .entries
+            .iter_mut()
+            .find(|(candidate, _)| candidate == key)
+        else {
             return false;
         };
         let Ok(index) = usize::try_from(index) else {
@@ -153,7 +186,11 @@ impl ListData {
 
     /// `StringAccessor[index] = value`: replaces the element at `index`.
     pub fn replace_at(&mut self, key: &str, index: i64, content: String) -> bool {
-        let Some(list) = self.entries.get_mut(key) else {
+        let Some((_, list)) = self
+            .entries
+            .iter_mut()
+            .find(|(candidate, _)| candidate == key)
+        else {
             return false;
         };
         let Ok(index) = usize::try_from(index) else {
@@ -170,7 +207,7 @@ impl ListData {
 
     /// `DataStorage.Clear`: empties every list, keeping every key.
     pub fn clear_all(&mut self) {
-        for list in self.entries.values_mut() {
+        for (_, list) in &mut self.entries {
             list.clear();
         }
     }
@@ -258,15 +295,28 @@ mod tests {
         assert_eq!(data.keys().count(), 1);
     }
 
-    /// The keys iterate in a deterministic order, unlike the baseline's dictionary.
+    /// The stores retain the insertion order exposed by the source dictionary.
     #[test]
-    fn the_keys_are_ordered_deterministically() {
+    fn the_keys_keep_insertion_order() {
         let mut data = SingletonData::new();
         for key in ["zeta", "alpha", "mu"] {
             data.get_or_add(key);
         }
         let keys: Vec<&String> = data.keys().collect();
-        assert_eq!(keys, vec!["alpha", "mu", "zeta"]);
+        assert_eq!(keys, vec!["zeta", "alpha", "mu"]);
+        data.get_or_add("alpha").push_str("updated");
+        assert_eq!(
+            data.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["zeta", "alpha", "mu"]
+        );
+
+        let mut lists = ListData::new();
+        lists.add_range("second", ["2"]);
+        lists.add_range("first", ["1"]);
+        assert_eq!(
+            lists.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["second", "first"]
+        );
     }
 
     impl SingletonData {

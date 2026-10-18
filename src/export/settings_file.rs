@@ -242,133 +242,157 @@ pub fn write_settings_file(settings: &SerializedSettingsFile) -> Result<String, 
     write_section(
         &mut output,
         "Import",
-        &[
-            (
-                "ScriptContentLevel",
-                JsonScalar::Integer(settings.import.script_content_level.discriminant()),
-            ),
-            (
-                "StreamingAssetsMode",
-                JsonScalar::Integer(settings.import.streaming_assets_mode.discriminant()),
-            ),
-            (
-                "DefaultVersion",
-                JsonScalar::Text(settings.import.default_version.as_str()),
-            ),
-            (
-                "TargetVersion",
-                JsonScalar::Text(settings.import.target_version.as_str()),
-            ),
-        ],
+        &import_settings_members(&settings.import),
         false,
     )?;
     write_section(
         &mut output,
         "Processing",
-        &[
-            (
-                "EnablePrefabOutlining",
-                JsonScalar::Boolean(settings.processing.enable_prefab_outlining),
-            ),
-            (
-                "EnableStaticMeshSeparation",
-                JsonScalar::Boolean(settings.processing.enable_static_mesh_separation),
-            ),
-            (
-                "EnableAssetDeduplication",
-                JsonScalar::Boolean(settings.processing.enable_asset_deduplication),
-            ),
-            (
-                "RemoveNullableAttributes",
-                JsonScalar::Boolean(settings.processing.remove_nullable_attributes),
-            ),
-            (
-                "PublicizeAssemblies",
-                JsonScalar::Boolean(settings.processing.publicize_assemblies),
-            ),
-            (
-                "BundledAssetsExportMode",
-                JsonScalar::Integer(
-                    settings
-                        .processing
-                        .bundled_assets_export_mode
-                        .discriminant(),
-                ),
-            ),
-        ],
+        &processing_settings_members(&settings.processing),
         false,
     )?;
     write_section(
         &mut output,
         "Export",
-        &[
-            (
-                "AudioExportFormat",
-                JsonScalar::Integer(settings.export.audio_export_format.discriminant()),
-            ),
-            (
-                "ImageExportFormat",
-                JsonScalar::Integer(settings.export.image_export_format.discriminant()),
-            ),
-            (
-                "LightmapTextureExportFormat",
-                JsonScalar::Integer(
-                    settings
-                        .export
-                        .lightmap_texture_export_format
-                        .discriminant(),
-                ),
-            ),
-            (
-                "ScriptExportMode",
-                JsonScalar::Integer(settings.export.script_export_mode.discriminant()),
-            ),
-            (
-                "ScriptLanguageVersion",
-                JsonScalar::Integer(settings.export.script_language_version.discriminant()),
-            ),
-            (
-                "ScriptTypesFullyQualified",
-                JsonScalar::Boolean(settings.export.script_types_fully_qualified),
-            ),
-            (
-                "ShaderExportMode",
-                JsonScalar::Integer(settings.export.shader_export_mode.discriminant()),
-            ),
-            (
-                "SpriteExportMode",
-                JsonScalar::Integer(settings.export.sprite_export_mode.discriminant()),
-            ),
-            (
-                "TextExportMode",
-                JsonScalar::Integer(settings.export.text_export_mode.discriminant()),
-            ),
-            (
-                "ExportUnreadableAssets",
-                JsonScalar::Boolean(settings.export.export_unreadable_assets),
-            ),
-            (
-                "PreferOriginalTextureExtension",
-                JsonScalar::Boolean(settings.export.prefer_original_texture_extension),
-            ),
-            (
-                "SaveSettingsToDisk",
-                JsonScalar::Boolean(settings.export.save_settings_to_disk),
-            ),
-            (
-                "LanguageCode",
-                settings
-                    .export
-                    .language_code
-                    .as_deref()
-                    .map(JsonScalar::Text)
-                    .unwrap_or(JsonScalar::Null),
-            ),
-        ],
+        &export_settings_members(&settings.export),
         true,
     )?;
     output.push('}');
     Ok(output)
+}
+
+/// Serialize one `JsonDataInstance<ImportSettings>.Text` value from the configuration page.
+pub fn write_import_settings_text(
+    settings: &ImportSettingsFile,
+) -> Result<String, SettingsFileError> {
+    write_record(&import_settings_members(settings))
+}
+
+/// Serialize one `JsonDataInstance<ProcessingSettings>.Text` value from the configuration page.
+pub fn write_processing_settings_text(
+    settings: &ProcessingSettingsFile,
+) -> Result<String, SettingsFileError> {
+    write_record(&processing_settings_members(settings))
+}
+
+/// Serialize one `JsonDataInstance<ExportSettings>.Text` value from the configuration page.
+pub fn write_export_settings_text(
+    settings: &ExportSettingsFile,
+) -> Result<String, SettingsFileError> {
+    write_record(&export_settings_members(settings))
+}
+
+fn import_settings_members(settings: &ImportSettingsFile) -> [(&'static str, JsonScalar<'_>); 4] {
+    [
+        (
+            "ScriptContentLevel",
+            JsonScalar::Integer(settings.script_content_level.discriminant()),
+        ),
+        (
+            "StreamingAssetsMode",
+            JsonScalar::Integer(settings.streaming_assets_mode.discriminant()),
+        ),
+        (
+            "DefaultVersion",
+            JsonScalar::Text(settings.default_version.as_str()),
+        ),
+        (
+            "TargetVersion",
+            JsonScalar::Text(settings.target_version.as_str()),
+        ),
+    ]
+}
+
+fn processing_settings_members(
+    settings: &ProcessingSettingsFile,
+) -> [(&'static str, JsonScalar<'_>); 6] {
+    [
+        (
+            "EnablePrefabOutlining",
+            JsonScalar::Boolean(settings.enable_prefab_outlining),
+        ),
+        (
+            "EnableStaticMeshSeparation",
+            JsonScalar::Boolean(settings.enable_static_mesh_separation),
+        ),
+        (
+            "EnableAssetDeduplication",
+            JsonScalar::Boolean(settings.enable_asset_deduplication),
+        ),
+        (
+            "RemoveNullableAttributes",
+            JsonScalar::Boolean(settings.remove_nullable_attributes),
+        ),
+        (
+            "PublicizeAssemblies",
+            JsonScalar::Boolean(settings.publicize_assemblies),
+        ),
+        (
+            "BundledAssetsExportMode",
+            JsonScalar::Integer(settings.bundled_assets_export_mode.discriminant()),
+        ),
+    ]
+}
+
+fn export_settings_members(settings: &ExportSettingsFile) -> [(&'static str, JsonScalar<'_>); 13] {
+    [
+        (
+            "AudioExportFormat",
+            JsonScalar::Integer(settings.audio_export_format.discriminant()),
+        ),
+        (
+            "ImageExportFormat",
+            JsonScalar::Integer(settings.image_export_format.discriminant()),
+        ),
+        (
+            "LightmapTextureExportFormat",
+            JsonScalar::Integer(settings.lightmap_texture_export_format.discriminant()),
+        ),
+        (
+            "ScriptExportMode",
+            JsonScalar::Integer(settings.script_export_mode.discriminant()),
+        ),
+        (
+            "ScriptLanguageVersion",
+            JsonScalar::Integer(settings.script_language_version.discriminant()),
+        ),
+        (
+            "ScriptTypesFullyQualified",
+            JsonScalar::Boolean(settings.script_types_fully_qualified),
+        ),
+        (
+            "ShaderExportMode",
+            JsonScalar::Integer(settings.shader_export_mode.discriminant()),
+        ),
+        (
+            "SpriteExportMode",
+            JsonScalar::Integer(settings.sprite_export_mode.discriminant()),
+        ),
+        (
+            "TextExportMode",
+            JsonScalar::Integer(settings.text_export_mode.discriminant()),
+        ),
+        (
+            "ExportUnreadableAssets",
+            JsonScalar::Boolean(settings.export_unreadable_assets),
+        ),
+        (
+            "PreferOriginalTextureExtension",
+            JsonScalar::Boolean(settings.prefer_original_texture_extension),
+        ),
+        (
+            "SaveSettingsToDisk",
+            JsonScalar::Boolean(settings.save_settings_to_disk),
+        ),
+        (
+            "LanguageCode",
+            settings
+                .language_code
+                .as_deref()
+                .map(JsonScalar::Text)
+                .unwrap_or(JsonScalar::Null),
+        ),
+    ]
 }
 
 /// One scalar member value for the fixed settings schema.
@@ -377,6 +401,14 @@ enum JsonScalar<'a> {
     Boolean(bool),
     Text(&'a str),
     Null,
+}
+
+fn write_record(members: &[(&str, JsonScalar<'_>)]) -> Result<String, SettingsFileError> {
+    let mut output = String::new();
+    output.push_str("{\r\n");
+    write_members(&mut output, members, "  ")?;
+    output.push('}');
+    Ok(output)
 }
 
 fn write_section(
@@ -388,38 +420,45 @@ fn write_section(
     output.push_str("  \"");
     output.push_str(name);
     output.push_str("\": {\r\n");
-    for (index, (member, value)) in members.iter().enumerate() {
-        output.push_str("    \"");
-        output.push_str(member);
-        output.push_str("\": ");
-        match value {
-            JsonScalar::Integer(number) => {
-                output.push_str(&number.to_string());
-            }
-            JsonScalar::Boolean(flag) => {
-                output.push_str(if *flag { "true" } else { "false" });
-            }
-            JsonScalar::Text(text) => {
-                push_json_string(output, text).map_err(|_| {
-                    SettingsFileError::AllocationFailed {
-                        resource: "settings file text",
-                    }
-                })?;
-            }
-            JsonScalar::Null => {
-                output.push_str("null");
-            }
-        }
-        if index + 1 < members.len() {
-            output.push(',');
-        }
-        output.push_str("\r\n");
-    }
+    write_members(output, members, "    ")?;
     output.push_str("  }");
     if !is_last {
         output.push(',');
     }
     output.push_str("\r\n");
+    Ok(())
+}
+
+fn write_members(
+    output: &mut String,
+    members: &[(&str, JsonScalar<'_>)],
+    indentation: &str,
+) -> Result<(), SettingsFileError> {
+    for (index, (member, value)) in members.iter().enumerate() {
+        output.push_str(indentation);
+        output.push('\"');
+        output.push_str(member);
+        output.push_str("\": ");
+        write_scalar(output, value)?;
+        if index + 1 < members.len() {
+            output.push(',');
+        }
+        output.push_str("\r\n");
+    }
+    Ok(())
+}
+
+fn write_scalar(output: &mut String, value: &JsonScalar<'_>) -> Result<(), SettingsFileError> {
+    match value {
+        JsonScalar::Integer(number) => output.push_str(&number.to_string()),
+        JsonScalar::Boolean(flag) => output.push_str(if *flag { "true" } else { "false" }),
+        JsonScalar::Text(text) => {
+            push_json_string(output, text).map_err(|_| SettingsFileError::AllocationFailed {
+                resource: "settings file text",
+            })?
+        }
+        JsonScalar::Null => output.push_str("null"),
+    }
     Ok(())
 }
 
@@ -611,6 +650,67 @@ pub fn parse_settings_file(
         processing,
         export,
     })
+}
+
+/// Deserialize one `JsonDataInstance<ImportSettings>.Text` value.
+///
+/// Invalid input is returned to the caller so the configuration layer can apply the source
+/// serializer's `CreateNew` fallback. An empty string directly creates the default record, as
+/// `JsonDataSerializer.Deserialize` does.
+pub fn parse_import_settings_text(
+    text: &str,
+    limits: SettingsFileLimits,
+) -> Result<ImportSettingsFile, SettingsFileError> {
+    if text.is_empty() {
+        return Ok(ImportSettingsFile::from_defaults(ImportDefaults::default()));
+    }
+    let value = parse_settings_record(text, limits)?;
+    map_import(as_object(&value, "$")?, limits)
+}
+
+/// Deserialize one `JsonDataInstance<ProcessingSettings>.Text` value.
+pub fn parse_processing_settings_text(
+    text: &str,
+    limits: SettingsFileLimits,
+) -> Result<ProcessingSettingsFile, SettingsFileError> {
+    if text.is_empty() {
+        return Ok(ProcessingSettingsFile::from(ProcessingDefaults::default()));
+    }
+    let value = parse_settings_record(text, limits)?;
+    map_processing(as_object(&value, "$")?, limits)
+}
+
+/// Deserialize one `JsonDataInstance<ExportSettings>.Text` value.
+pub fn parse_export_settings_text(
+    text: &str,
+    limits: SettingsFileLimits,
+) -> Result<ExportSettingsFile, SettingsFileError> {
+    if text.is_empty() {
+        return Ok(ExportSettingsFile::from(ExportDefaults::default()));
+    }
+    let value = parse_settings_record(text, limits)?;
+    map_export(as_object(&value, "$")?, limits)
+}
+
+fn parse_settings_record(
+    text: &str,
+    limits: SettingsFileLimits,
+) -> Result<JsonValue, SettingsFileError> {
+    let text = strip_leading_bom(text);
+    if text.len() > limits.max_file_bytes {
+        return Err(SettingsFileError::InputTooLong {
+            byte_count: text.len(),
+            limit: limits.max_file_bytes,
+        });
+    }
+    parse_json(
+        text,
+        JsonLimits {
+            max_string_bytes: limits.max_string_bytes,
+            max_nesting_depth: limits.max_nesting_depth,
+        },
+    )
+    .map_err(map_json_error)
 }
 
 /// Strip one leading UTF-8 BOM, mirroring the `File.ReadAllText` decoding the source
@@ -881,9 +981,11 @@ fn lookup<'a>(
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_settings_file, settings_log_messages, write_settings_file, ExportSettingsFile,
-        ImportSettingsFile, ProcessingSettingsFile, SerializedSettingsFile, SettingsFileError,
-        SettingsFileLimits, VersionText, DEFAULT_UNITY_VERSION_TEXT,
+        parse_export_settings_text, parse_import_settings_text, parse_processing_settings_text,
+        parse_settings_file, settings_log_messages, write_export_settings_text,
+        write_import_settings_text, write_processing_settings_text, write_settings_file,
+        ExportSettingsFile, ImportSettingsFile, ProcessingSettingsFile, SerializedSettingsFile,
+        SettingsFileError, SettingsFileLimits, VersionText, DEFAULT_UNITY_VERSION_TEXT,
     };
     use crate::export::settings::{
         AudioExportFormat, BundledAssetsExportMode, ExportDefaults, ImageExportFormat,
@@ -896,6 +998,10 @@ mod tests {
     // (`Temp/opencode/settingprobe2`, SDK 10.0.401): CRLF newlines, no BOM, no trailing
     // newline. Literals carry `\r\n` explicitly so `eol=lf` checkouts cannot corrupt them.
     const DEFAULTS_JSON: &str = "{\r\n  \"Import\": {\r\n    \"ScriptContentLevel\": 2,\r\n    \"StreamingAssetsMode\": 1,\r\n    \"DefaultVersion\": \"0.0.0a0\",\r\n    \"TargetVersion\": \"0.0.0a0\"\r\n  },\r\n  \"Processing\": {\r\n    \"EnablePrefabOutlining\": false,\r\n    \"EnableStaticMeshSeparation\": true,\r\n    \"EnableAssetDeduplication\": false,\r\n    \"RemoveNullableAttributes\": false,\r\n    \"PublicizeAssemblies\": false,\r\n    \"BundledAssetsExportMode\": 2\r\n  },\r\n  \"Export\": {\r\n    \"AudioExportFormat\": 2,\r\n    \"ImageExportFormat\": 4,\r\n    \"LightmapTextureExportFormat\": 2,\r\n    \"ScriptExportMode\": 1,\r\n    \"ScriptLanguageVersion\": -1,\r\n    \"ScriptTypesFullyQualified\": false,\r\n    \"ShaderExportMode\": 0,\r\n    \"SpriteExportMode\": 0,\r\n    \"TextExportMode\": 2,\r\n    \"ExportUnreadableAssets\": false,\r\n    \"PreferOriginalTextureExtension\": true,\r\n    \"SaveSettingsToDisk\": false,\r\n    \"LanguageCode\": null\r\n  }\r\n}";
+
+    const IMPORT_DATA_TEXT: &str = "{\r\n  \"ScriptContentLevel\": 2,\r\n  \"StreamingAssetsMode\": 1,\r\n  \"DefaultVersion\": \"0.0.0a0\",\r\n  \"TargetVersion\": \"0.0.0a0\"\r\n}";
+    const PROCESSING_DATA_TEXT: &str = "{\r\n  \"EnablePrefabOutlining\": false,\r\n  \"EnableStaticMeshSeparation\": true,\r\n  \"EnableAssetDeduplication\": false,\r\n  \"RemoveNullableAttributes\": false,\r\n  \"PublicizeAssemblies\": false,\r\n  \"BundledAssetsExportMode\": 2\r\n}";
+    const EXPORT_DATA_TEXT: &str = "{\r\n  \"AudioExportFormat\": 2,\r\n  \"ImageExportFormat\": 4,\r\n  \"LightmapTextureExportFormat\": 2,\r\n  \"ScriptExportMode\": 1,\r\n  \"ScriptLanguageVersion\": -1,\r\n  \"ScriptTypesFullyQualified\": false,\r\n  \"ShaderExportMode\": 0,\r\n  \"SpriteExportMode\": 0,\r\n  \"TextExportMode\": 2,\r\n  \"ExportUnreadableAssets\": false,\r\n  \"PreferOriginalTextureExtension\": true,\r\n  \"SaveSettingsToDisk\": false,\r\n  \"LanguageCode\": null\r\n}";
 
     const MODIFIED_JSON: &str = "{\r\n  \"Import\": {\r\n    \"ScriptContentLevel\": 3,\r\n    \"StreamingAssetsMode\": 0,\r\n    \"DefaultVersion\": \"2019.4.40f1\",\r\n    \"TargetVersion\": \"2021.3.5f1\"\r\n  },\r\n  \"Processing\": {\r\n    \"EnablePrefabOutlining\": true,\r\n    \"EnableStaticMeshSeparation\": false,\r\n    \"EnableAssetDeduplication\": true,\r\n    \"RemoveNullableAttributes\": true,\r\n    \"PublicizeAssemblies\": true,\r\n    \"BundledAssetsExportMode\": 1\r\n  },\r\n  \"Export\": {\r\n    \"AudioExportFormat\": 3,\r\n    \"ImageExportFormat\": 0,\r\n    \"LightmapTextureExportFormat\": 0,\r\n    \"ScriptExportMode\": 0,\r\n    \"ScriptLanguageVersion\": 1,\r\n    \"ScriptTypesFullyQualified\": true,\r\n    \"ShaderExportMode\": 2,\r\n    \"SpriteExportMode\": 1,\r\n    \"TextExportMode\": 0,\r\n    \"ExportUnreadableAssets\": true,\r\n    \"PreferOriginalTextureExtension\": false,\r\n    \"SaveSettingsToDisk\": true,\r\n    \"LanguageCode\": \"ja\"\r\n  }\r\n}";
 
@@ -944,6 +1050,40 @@ mod tests {
         );
         assert_eq!(DEFAULT_UNITY_VERSION_TEXT, "0.0.0a0");
         assert_eq!(write_settings_file(&settings).unwrap(), DEFAULTS_JSON);
+    }
+
+    #[test]
+    fn typed_configuration_data_text_matches_the_source_page_defaults() {
+        let settings = SerializedSettingsFile::from_defaults(
+            ImportDefaults::default(),
+            ProcessingDefaults::default(),
+            ExportDefaults::default(),
+        );
+        assert_eq!(
+            write_import_settings_text(&settings.import).unwrap(),
+            IMPORT_DATA_TEXT
+        );
+        assert_eq!(
+            write_processing_settings_text(&settings.processing).unwrap(),
+            PROCESSING_DATA_TEXT
+        );
+        assert_eq!(
+            write_export_settings_text(&settings.export).unwrap(),
+            EXPORT_DATA_TEXT
+        );
+        assert_eq!(
+            parse_import_settings_text(IMPORT_DATA_TEXT, SettingsFileLimits::default()).unwrap(),
+            settings.import
+        );
+        assert_eq!(
+            parse_processing_settings_text(PROCESSING_DATA_TEXT, SettingsFileLimits::default())
+                .unwrap(),
+            settings.processing
+        );
+        assert_eq!(
+            parse_export_settings_text(EXPORT_DATA_TEXT, SettingsFileLimits::default()).unwrap(),
+            settings.export
+        );
     }
 
     #[test]

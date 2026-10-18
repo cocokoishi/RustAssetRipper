@@ -117,6 +117,9 @@ fn localization(state: &mut WebState, request: &Request) -> Response {
         state.set_language(Some(code));
         let current = state.language().to_owned();
         state.settings_mut().export.language_code = Some(current);
+        if let Err(error) = state.refresh_configuration_singletons() {
+            state.log_error(&error.to_string());
+        }
         if let Err(error) = state.maybe_save_settings() {
             state.log_error(&error);
         }
@@ -128,6 +131,9 @@ fn localization(state: &mut WebState, request: &Request) -> Response {
 fn settings_update(state: &mut WebState, request: &Request) -> Response {
     let form = super::http::parse_form(request.body());
     apply_form(state.settings_mut(), &form);
+    if let Err(error) = state.refresh_configuration_singletons() {
+        state.log_error(&error.to_string());
+    }
     if let Err(error) = state.apply_settings_persistence() {
         state.log_error(&error);
     }
@@ -315,7 +321,9 @@ fn singleton_add(state: &mut WebState, request: &Request) -> Response {
         return Response::bad_request("");
     };
     if let Some(content) = request.form_value("Content") {
-        *state.singleton_data().get_or_add(&key) = content;
+        if let Err(error) = state.set_singleton_data(&key, &content) {
+            state.log_error(&error.to_string());
+        }
     }
     configuration_files_redirect()
 }
@@ -326,7 +334,9 @@ fn singleton_remove(state: &mut WebState, request: &Request) -> Response {
         return Response::bad_request("");
     };
     // `DataInstance.Clear` resets the value; the key stays listed.
-    state.singleton_data().clear(&key);
+    if let Err(error) = state.clear_singleton_data(&key) {
+        state.log_error(&error.to_string());
+    }
     configuration_files_redirect()
 }
 
@@ -3184,6 +3194,29 @@ mod tests {
         let mut state = state();
         let page = dispatch(&mut state, &request("GET", "/ConfigurationFiles"));
         assert_eq!(page.status(), 200);
+        let initial_body = String::from_utf8_lossy(page.body()).into_owned();
+        let import_position = initial_body
+            .find("ImportSettings")
+            .expect("source key exists");
+        let processing_position = initial_body
+            .find("ProcessingSettings")
+            .expect("source key exists");
+        let export_position = initial_body
+            .find("ExportSettings")
+            .expect("source key exists");
+        let engine_position = initial_body
+            .find("EngineResourceData")
+            .expect("source key exists");
+        assert!(
+            import_position < processing_position
+                && processing_position < export_position
+                && export_position < engine_position,
+            "configuration singleton tabs preserve source insertion order"
+        );
+        assert!(initial_body.contains("&quot;ScriptContentLevel&quot;: 2"));
+        assert!(initial_body.contains("&quot;BundledAssetsExportMode&quot;: 2"));
+        assert!(initial_body.contains("&quot;LanguageCode&quot;: null"));
+        assert!(initial_body.contains("No data has been loaded for this key"));
 
         // A singleton set, then a form with no content, which is the dialog path and changes nothing.
         assert_eq!(
@@ -3265,6 +3298,47 @@ mod tests {
         assert!(body.contains("README"), "{body}");
         assert!(body.contains("Fib"), "{body}");
         assert!(body.contains('9'), "{body}");
+
+        // Typed configuration entries deserialize into the same live settings records used by
+        // the import and export workflows; clearing one creates a fresh source-default record.
+        dispatch(
+            &mut state,
+            &request_with_body(
+                "/ConfigurationFiles/Singleton/Add",
+                r#"Key=ImportSettings&Content={"ScriptContentLevel":0,"StreamingAssetsMode":0,"DefaultVersion":"2019.4.40f1","TargetVersion":"2022.3.22f1"}"#,
+            ),
+        );
+        assert_eq!(
+            state.settings().import.script_content_level,
+            assetripper::export::settings::ScriptContentLevel::Level0
+        );
+        assert_eq!(
+            state.settings().import.default_version.as_str(),
+            "2019.4.40f1"
+        );
+        dispatch(
+            &mut state,
+            &request_with_body("/ConfigurationFiles/Singleton/Remove", "Key=ImportSettings"),
+        );
+        assert_eq!(
+            state.settings().import.script_content_level,
+            assetripper::export::settings::ScriptContentLevel::Level2
+        );
+    }
+
+    #[test]
+    fn settings_form_updates_the_configuration_file_text() {
+        let mut state = state();
+        let response = dispatch(
+            &mut state,
+            &request_with_body("/Settings/Update", "ImageExportFormat=0"),
+        );
+        assert_eq!(response.status(), 302);
+        assert!(state
+            .singletons()
+            .get("ExportSettings")
+            .expect("export settings stay registered")
+            .contains(r#""ImageExportFormat": 0"#));
     }
 
     fn request_with_body(target: &str, body: &str) -> Request {

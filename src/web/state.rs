@@ -14,7 +14,10 @@ use std::path::{Path, PathBuf};
 
 use assetripper::export::settings::{ExportDefaults, ImportDefaults, ProcessingDefaults};
 use assetripper::export::settings_file::{
-    decide_settings_persistence, SerializedSettingsFile, SettingsPersistenceAction,
+    decide_settings_persistence, parse_export_settings_text, parse_import_settings_text,
+    parse_processing_settings_text, write_export_settings_text, write_import_settings_text,
+    write_processing_settings_text, SerializedSettingsFile, SettingsFileError, SettingsFileLimits,
+    SettingsPersistenceAction,
 };
 use assetripper::localization::{decide_load_language, LoadLanguageOutcome};
 use assetripper::product::{
@@ -74,8 +77,8 @@ pub struct WebState {
     scene_definitions: Option<WorkspaceSceneDefinitions>,
     /// `CoreConfiguration.SingletonData`: the named configuration texts the settings page edits.
     ///
-    /// In-memory for the session: the baseline clears them on reset and does not carry them in the
-    /// settings file, so neither does the port.
+    /// In-memory for the session and not carried in the settings file. `GameFileLoader.Reset`
+    /// drops only the loaded game, so these entries survive that user-facing reset.
     singleton_data: SingletonData,
     /// `CoreConfiguration.ListData`: the named configuration lists the settings page edits.
     list_data: ListData,
@@ -154,7 +157,7 @@ impl WebState {
                 LoadLanguageOutcome::Switched { code } => code,
                 LoadLanguageOutcome::Unchanged => FALLBACK_LANGUAGE.to_owned(),
             };
-        Ok(Self {
+        let mut state = Self {
             messages,
             settings,
             executable_directory,
@@ -167,7 +170,9 @@ impl WebState {
             list_data: ListData::new(),
             log: Vec::new(),
             static_content: Vec::new(),
-        })
+        };
+        state.refresh_configuration_singletons()?;
+        Ok(state)
     }
 
     /// The message tables.
@@ -196,6 +201,94 @@ impl WebState {
     /// The settings record for a form handler to update.
     pub fn settings_mut(&mut self) -> &mut SerializedSettingsFile {
         &mut self.settings
+    }
+
+    /// Keep the configuration-files page's typed settings entries in sync with the settings
+    /// records used by import, processing, and export.
+    pub fn refresh_configuration_singletons(&mut self) -> Result<(), SettingsFileError> {
+        let import = write_import_settings_text(&self.settings.import)?;
+        let processing = write_processing_settings_text(&self.settings.processing)?;
+        let export = write_export_settings_text(&self.settings.export)?;
+        *self.singleton_data.get_or_add("ImportSettings") = import;
+        *self.singleton_data.get_or_add("ProcessingSettings") = processing;
+        *self.singleton_data.get_or_add("ExportSettings") = export;
+        // The baseline registers EngineResourceData as a typed singleton whose initial Text is
+        // empty. Its payload format and exporter behavior remain a separate open parity item.
+        self.singleton_data.get_or_add("EngineResourceData");
+        Ok(())
+    }
+
+    /// Apply a submitted configuration-file singleton. The three settings records use the
+    /// baseline's typed JSON serializer: malformed text creates a fresh default record, while
+    /// ordinary string entries retain their submitted text.
+    pub fn set_singleton_data(
+        &mut self,
+        key: &str,
+        content: &str,
+    ) -> Result<(), SettingsFileError> {
+        let limits = SettingsFileLimits::default();
+        match key {
+            "ImportSettings" => {
+                self.settings.import =
+                    parse_import_settings_text(content, limits).unwrap_or_else(|_| {
+                        assetripper::export::settings_file::ImportSettingsFile::from_defaults(
+                            ImportDefaults::default(),
+                        )
+                    });
+            }
+            "ProcessingSettings" => {
+                self.settings.processing = parse_processing_settings_text(content, limits)
+                    .unwrap_or_else(|_| {
+                        assetripper::export::settings_file::ProcessingSettingsFile::from(
+                            ProcessingDefaults::default(),
+                        )
+                    });
+            }
+            "ExportSettings" => {
+                self.settings.export =
+                    parse_export_settings_text(content, limits).unwrap_or_else(|_| {
+                        assetripper::export::settings_file::ExportSettingsFile::from(
+                            ExportDefaults::default(),
+                        )
+                    });
+            }
+            _ => {
+                *self.singleton_data.get_or_add(key) = content.to_owned();
+                return Ok(());
+            }
+        }
+        self.refresh_configuration_singletons()
+    }
+
+    /// Clear one configuration singleton. Typed settings entries reset to their source defaults;
+    /// ordinary strings become empty while retaining their key.
+    pub fn clear_singleton_data(&mut self, key: &str) -> Result<bool, SettingsFileError> {
+        match key {
+            "ImportSettings" => {
+                self.settings.import =
+                    assetripper::export::settings_file::ImportSettingsFile::from_defaults(
+                        ImportDefaults::default(),
+                    );
+                self.refresh_configuration_singletons()?;
+                Ok(true)
+            }
+            "ProcessingSettings" => {
+                self.settings.processing =
+                    assetripper::export::settings_file::ProcessingSettingsFile::from(
+                        ProcessingDefaults::default(),
+                    );
+                self.refresh_configuration_singletons()?;
+                Ok(true)
+            }
+            "ExportSettings" => {
+                self.settings.export = assetripper::export::settings_file::ExportSettingsFile::from(
+                    ExportDefaults::default(),
+                );
+                self.refresh_configuration_singletons()?;
+                Ok(true)
+            }
+            _ => Ok(self.singleton_data.clear(key)),
+        }
     }
 
     /// Register the `--local-web-file` overrides as URL path to content.
@@ -933,8 +1026,6 @@ impl WebState {
         let had_data = self.loaded.take().is_some();
         self.tree = None;
         self.scene_definitions = None;
-        self.singleton_data = SingletonData::new();
-        self.list_data = ListData::new();
         if had_data {
             self.log.push("Data was reset.".to_owned());
         }
@@ -1110,7 +1201,9 @@ fn parse_scene_unity_version(
 mod tests {
     use super::super::localization::{Messages, FALLBACK_LANGUAGE};
     use super::{ExportDecision, SerializedSettingsFile, WebState};
-    use assetripper::export::settings::{ExportDefaults, ImportDefaults, ProcessingDefaults};
+    use assetripper::export::settings::{
+        ExportDefaults, ImportDefaults, ProcessingDefaults, ScriptContentLevel, StreamingAssetsMode,
+    };
     use std::path::PathBuf;
 
     fn state(headless: bool) -> WebState {
@@ -1139,6 +1232,73 @@ mod tests {
     }
 
     #[test]
+    fn configuration_files_start_with_the_source_singletons_in_insertion_order() {
+        let state = state(false);
+        assert_eq!(
+            state
+                .singletons()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            [
+                "ImportSettings",
+                "ProcessingSettings",
+                "ExportSettings",
+                "EngineResourceData"
+            ]
+        );
+        assert_eq!(
+            state.singletons().get("EngineResourceData"),
+            Some(&String::new())
+        );
+        assert!(state.lists().is_empty());
+    }
+
+    #[test]
+    fn typed_configuration_singletons_update_and_reset_the_live_settings() {
+        let mut state = state(false);
+        state
+            .set_singleton_data(
+                "ImportSettings",
+                r#"{"ScriptContentLevel":0,"StreamingAssetsMode":0,"DefaultVersion":"2019.4.40f1","TargetVersion":"2022.3.22f1"}"#,
+            )
+            .expect("valid typed setting parses");
+        assert_eq!(
+            state.settings().import.script_content_level,
+            ScriptContentLevel::Level0
+        );
+        assert_eq!(
+            state.settings().import.streaming_assets_mode,
+            StreamingAssetsMode::Ignore
+        );
+        assert_eq!(
+            state.settings().import.default_version.as_str(),
+            "2019.4.40f1"
+        );
+        assert_eq!(
+            state.settings().import.target_version.as_str(),
+            "2022.3.22f1"
+        );
+        assert!(state
+            .singletons()
+            .get("ImportSettings")
+            .expect("setting stays registered")
+            .contains(r#""ScriptContentLevel": 0"#));
+
+        state
+            .clear_singleton_data("ImportSettings")
+            .expect("typed setting resets");
+        assert_eq!(
+            state.settings().import.script_content_level,
+            ScriptContentLevel::Level2
+        );
+        assert_eq!(
+            state.settings().import.streaming_assets_mode,
+            StreamingAssetsMode::Extract
+        );
+    }
+
+    #[test]
     fn language_switching_follows_the_load_language_rules() {
         let mut state = state(false);
         assert!(!state.set_language(None));
@@ -1155,8 +1315,12 @@ mod tests {
     #[test]
     fn reset_reports_whether_data_was_present() {
         let mut state = state(false);
+        state.list_data().add_range("Keep", ["value"]);
+        let singleton_data = state.singletons().clone();
         assert!(!state.reset());
         assert!(state.take_log().is_empty());
+        assert_eq!(state.singletons(), &singleton_data);
+        assert_eq!(state.lists().get("Keep"), Some(&vec!["value".to_owned()]));
     }
 
     #[test]
