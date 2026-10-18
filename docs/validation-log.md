@@ -1,5 +1,26 @@
 # Validation log
 
+## 2026-10-17 - Prefab hierarchy GLB JSON serialization
+
+- **Mismatch and reference:** `AssetRipper.Export.Modules.Models/GlbWriter.cs` passes the source
+  `SceneBuilder` through `ToGltf2().WriteGLB`. The pinned
+  `AssetRipper.SharpGLTF.Toolkit` 1.0.2 runtime writes `asset.generator` as a quoted JSON string.
+  Rust had appended escaped generator contents without the JSON quotes, so its GLB JSON chunks
+  were invalid. The mesh, terrain, navmesh, and scene writers now append a complete JSON string;
+  the exact source runtime value is pinned in `src/resources/glb_generator_fixture.txt`.
+- **Regression evidence:** `glb_container_is_well_formed` parses mesh GLB JSON;
+  `decode_glb` parses terrain/navmesh JSON; `the_primary_content_export_writes_one_prefab_hierarchy_glb`
+  drives the synthetic Prefab SerializedFile through `/Export/PrimaryContent`, writes exactly one
+  `Root.glb`, and checks the parsed generator and hierarchy node semantics. The route fixture has
+  no MeshFilter or vertex data, so positive geometry attachment through that route remains open.
+- **Actions:** run `39089666411` on commit `c315864e19ef0d94c8bed5f35d981bbba709976e` passed all eight
+  jobs: Ubuntu/Windows workspace tests and release builds, Ubuntu release-mode tests, Linux/Windows
+  Clippy, changed-line formatting, ledger/repository audit, and public-repository hygiene. Cargo
+  build/tests were left to Actions.
+- The parity report remains at 409 rows, 380 verified and 29 non-verified, with no duplicate IDs or
+  malformed rows; no feature status advanced. `EXP-GLB-SCENE-001` and primary-content rows stay open
+  because this fixture exercises hierarchy membership without mesh geometry.
+
 ## 2026-10-16 - The geometry facts read a production mesh payload, and the fixture was already there
 
 - Outcome: `attached_mesh_facts` is verified against a real production-layout class-43 mesh payload,

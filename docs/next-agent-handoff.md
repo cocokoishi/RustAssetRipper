@@ -1,26 +1,27 @@
 # RustAssetRipper hand-off — 2026-10-17
 
-## Latest current checkpoint - 2026-10-17 (primary-content texture and VideoClip streams)
+## Latest current checkpoint - 2026-10-17 (Prefab hierarchy GLB route and valid JSON)
 
-- `read_primary_content_stream` in `src/main_cli_primary_content.rs` now resolves both class-28
-  `m_StreamData` and class-329 `m_ExternalResources`. The reference's shared integrity rules are
-  preserved: an empty path passes before range checks but yields no content; missing resources,
-  zero-length ranges, and invalid/out-of-bounds ranges decline to JSON; resolved ranges pass their
-  exact bytes to the texture or binary producer.
-- `the_primary_content_export_reads_a_streamed_texture_from_its_resource` verifies streamed PNG
-  pixels and the missing-resource fallback. The new
-  `the_primary_content_export_reads_video_clip_resource_ranges` verifies exact `.mp4` bytes and JSON
-  fallback for missing, zero-length, and out-of-range video resources.
-- Actions run `39086269070` passed on commit `3074805658e60b0976b3e1c13ed06d1d6e48a98d`: Ubuntu
-  debug/release suites each passed 1,935 library and 212 binary tests; Windows passed 1,937 library
-  and 212 binary tests. Both Clippy jobs, Windows release build, changed-line formatting, ledger
-  audit, and public-repository hygiene passed. Cargo build/tests were not run locally.
+- The GLB writers now emit the `asset.generator` value as a complete JSON string. The frozen
+  `GlbWriter.TryWrite` calls `SceneBuilder.ToGltf2().WriteGLB`; the pinned
+  `AssetRipper.SharpGLTF.Toolkit` 1.0.2 runtime reports the generator string recorded in
+  `src/resources/glb_generator_fixture.txt`. Mesh, terrain, navmesh, and scene outputs are parsed
+  as JSON in regression coverage.
+- `the_primary_content_export_writes_one_prefab_hierarchy_glb` drives a committed synthetic Prefab
+  SerializedFile through `/Export/PrimaryContent`, verifies exactly one `Root.glb`, and checks its
+  JSON, generator, root node, and hierarchy-only shape. This fixture has no MeshFilter or mesh
+  vertex data, so it does not verify positive geometry attachment through the driver.
+- Actions run `39089666411` passed on commit `c315864e19ef0d94c8bed5f35d981bbba709976e`. All eight
+  jobs passed: Ubuntu and Windows workspace tests/release builds, Ubuntu release-mode tests, both
+  Clippy jobs, changed-line formatting, ledger/repository audit, and public-repository hygiene. No
+  local Cargo build or test was run for this unit.
 - The live parity report remains open: 409 rows, 380 verified, 29 non-verified, zero duplicate IDs,
-  and zero malformed rows. The primary-content rows remain unverified because prefab hierarchy GLB
-  output verification, the script producer, terrain heatmap, and other image classes remain open.
-- **Next:** verify prefab hierarchy GLB output through `/Export/PrimaryContent` with a committed
-  serialized hierarchy fixture. The exporter and conversion pieces exist, but the production driver
-  still lacks an end-to-end hierarchy fixture and semantic output comparison.
+  and zero malformed rows. `EXP-GLB-SCENE-001`, `EXP-GLB-001`, and the primary-content rows remain
+  unverified; script production, terrain heatmap, non-Texture2D image classes, and positive mesh
+  geometry through the primary-content driver remain open.
+- **Next:** exercise a positive MeshFilter/Renderer/Mesh geometry path end to end through
+  `/Export/PrimaryContent`, using a synthetic SerializedFile fixture and comparing GLB node,
+  POSITION, and index semantics against the frozen runtime.
 
 ## Previous checkpoint - 2026-10-17 (the primary-content export is verified end to end)
 
