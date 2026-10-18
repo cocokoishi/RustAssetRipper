@@ -309,6 +309,16 @@ impl WorkspaceSceneCollectionHierarchy {
             && self.hierarchy_audit.is_complete()
     }
 
+    /// True when typed Scene membership inputs are complete even if an individual PPtr target
+    /// is unavailable. Source `PPtrAccessList` accessors project failed component lookups as null;
+    /// the raw unresolved relationship remains available through `is_complete` and the graph.
+    /// Reference scan completeness is checked separately by the membership builder.
+    pub fn is_scene_membership_graph_complete(&self) -> bool {
+        self.graph_issues.is_empty()
+            && self.roots.is_complete()
+            && self.hierarchy_audit.is_complete()
+    }
+
     pub fn is_prefab_processor_complete(&self) -> bool {
         // PrefabProcessor queries typed PPtr accessors. Failed target lookup is
         // presented as null there, while the raw reference graph remains

@@ -110,9 +110,9 @@ fn generic_backfill_inserts_universal_headers_only() {
     body.insert_field("m_Enabled", signed(1)).unwrap();
     let mut document = UnityYamlDocument::object(33, 43, "MeshFilter", body, false)
         .expect("test component document builds");
-    apply_generic_header_backfill(&mut document).expect("backfill succeeds");
+    apply_generic_header_backfill(&mut document, 33).expect("backfill succeeds");
     // A second pass is a no-op: insertion skips fields already present.
-    apply_generic_header_backfill(&mut document).expect("backfill is idempotent");
+    apply_generic_header_backfill(&mut document, 33).expect("backfill is idempotent");
     let output = render(&document);
     key_order(
         &output,
@@ -130,6 +130,27 @@ fn generic_backfill_inserts_universal_headers_only() {
         1,
         "headers are not duplicated"
     );
+}
+
+#[test]
+fn occlusion_settings_backfill_adds_only_the_object_hide_flag() {
+    let mut body = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    body.insert_field("serializedVersion", signed(2)).unwrap();
+    body.insert_field("m_SceneGUID", UnityYamlNode::plain_string("zero"))
+        .unwrap();
+    let mut document = UnityYamlDocument::object(29, 11, "OcclusionCullingSettings", body, false)
+        .expect("test Scene manager document builds");
+
+    apply_generic_header_backfill(&mut document, 29).expect("backfill succeeds");
+
+    let output = render(&document);
+    key_order(
+        &output,
+        &["serializedVersion", "m_ObjectHideFlags", "m_SceneGUID"],
+    );
+    assert!(!output.contains("m_CorrespondingSourceObject"));
+    assert!(!output.contains("m_PrefabInstance"));
+    assert!(!output.contains("m_PrefabAsset"));
 }
 
 fn keyframe_without_tangent_mode() -> UnityYamlNode {

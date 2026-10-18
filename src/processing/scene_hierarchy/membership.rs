@@ -345,7 +345,7 @@ impl WorkspaceSceneHierarchyScene {
 
         for collection in &self.collections {
             let file_index = collection.collection_file_index();
-            if !collection.source_graph_complete() {
+            if !collection.is_scene_membership_graph_complete() {
                 push_membership_issue(
                     &mut membership.issues,
                     WorkspaceSceneHierarchyMembershipIssue::IncompleteCollectionGraph {

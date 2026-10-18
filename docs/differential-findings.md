@@ -3370,3 +3370,16 @@ vertex-data code at all**, so that is the work: not a re-run, but a new case.
 every one of them reported tests passing, which reads like verification. Passing tests against
 self-chosen inputs are not a reference comparison, and the difference is exactly the kind that stays
 invisible until a real sample disagrees.
+
+
+## DIFF-SCENE-OWNED-NO-TREE-MISSING-TRANSFORM-001 - Scene-owned missing Transform export
+
+| Field | Detail |
+|---|---|
+| Status | Resolved for this source-generated Unity 2019.4.40f1 no-TypeTree Scene export slice. PROC-SCENE-001, OBJ-REF-001, and SER-TT-ABSENT-001 remain in progress. |
+| Input and source behavior | Probe mode notree-scene-owned-missing-transform authors a 368-byte SerializedFile with no embedded TypeTrees: one GameObject whose component PPtr targets an unavailable external Transform, plus class-29 OcclusionCullingSettings so AssetRipper recognizes a Scene. AssetRipper treats the failed typed component lookup as absent, adds a generated Transform, retains the missing raw PPtr, and exports the Scene. |
+| Frozen source path | AssetRipper.Export.UnityProjects/YamlWalker.cs calls asset.WalkEditor. The generated OcclusionCullingSettings_2017 class exposes m_ObjectHideFlags as its editor hide field; the selected Unity 2019.4 TPK editor tree carries m_ObjectHideFlags and the Scene fields, with no prefab PPtr headers. |
+| Rust mismatch and fix | The scene-membership gate used raw reference-graph completeness and rejected the Scene even though root/hierarchy audits and reference scanning were complete. After allowing the typed-missing-component case through, generic YAML backfill added a second object-hide field and three prefab PPtr headers, while the global field alias emitted m_HideFlags beside the generated m_ObjectHideFlags field. Membership now uses the completed scene-specific audits while preserving raw reference issues; generated class 29 preserves TypeTree field names and receives only its source-backed object-hide header. |
+| Regression evidence | project_export_matches_source_for_a_scene_owned_no_tree_missing_transform compares the complete normalized Scene YAML and metadata. It normalizes only the generated Transform document/fileID and metadata GUID/timeCreated. It also verifies the missing dependency remains in the reference graph, one generated Transform is planned, and the export contains the Scene and generated document. The source YAML/meta fixtures are committed under src/export/project_workflow. |
+| Validation | Focused end-to-end regression passed 1/1; prefab_header_backfill tests passed 13/13; the existing global YAML field-alias regression passed 1/1. The CI result for the pushed revision is recorded in the handoff. |
+| Independent tools and limits | UABEA application was not run: the available command-line operations are bundle import/export, while this probe is a bare SerializedFile. Unity Editor import/runtime remains unrun because the workstation has no valid license. Other Scene manager classes, versions, component sets, hierarchy arrangements, and general Scene/Prefab export remain open. No private input or output was used. |

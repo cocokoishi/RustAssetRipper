@@ -169,10 +169,20 @@ fn should_preserve_type_tree_field_names(
 ) -> bool {
     let generated = matches!(factory_kind, FactoryAssetKind::Generated(_));
     let generated_game_object_or_transform = matches!(class_id, 1 | 4) && generated;
+    // The generated OcclusionCullingSettings_2017 class exposes the original
+    // m_ObjectHideFlags field name through WalkEditor. The older recovered
+    // TypeTree still names it that way, while the broad legacy YAML alias maps
+    // it to m_HideFlags.
+    let generated_occlusion_settings = class_id == 29
+        && matches!(
+            factory_kind,
+            FactoryAssetKind::Generated(name) if name == "OcclusionCullingSettings_2017"
+        );
     let generated_controller_member =
         matches!(class_id, 91 | 114 | 206 | 1101 | 1102 | 1107 | 1109) && generated;
 
     generated_game_object_or_transform
+        || generated_occlusion_settings
         || generated_controller_member
         || (animation_clip_editor_format && class_id == 74)
         || editor_type_tree_used
@@ -1027,7 +1037,7 @@ impl<'workspace, 'graph, 'provider> WorkspaceYamlExportContext<'workspace, 'grap
                     reference_graph,
                 )
             } else {
-                apply_generic_header_backfill(&mut document)
+                apply_generic_header_backfill(&mut document, class_id)
             };
             backfill.map_err(|message| scene_editor_format_error(source, class_id, message))?;
             // MonoBehaviour curves and fields serialize through managed layouts
@@ -1986,24 +1996,32 @@ fn game_object_tag_name(source_root: &SerializedValue) -> Result<String, String>
     })
 }
 
-/// Inserts the four universal editor headers into a converted document body
-/// when the source payload lacks them. Every non-stripped reference document
-/// carries this set; insertion skips fields the conversion already wrote.
-pub(super) fn insert_editor_headers(entries: &mut Vec<(UnityYamlNode, UnityYamlNode)>) {
+const OBJECT_EDITOR_HEADER_FIELDS: [&str; 1] = ["m_ObjectHideFlags"];
+const PREFAB_EDITOR_HEADER_FIELDS: [&str; 4] = [
+    "m_ObjectHideFlags",
+    "m_CorrespondingSourceObject",
+    "m_PrefabInstance",
+    "m_PrefabAsset",
+];
+
+/// Inserts the editor header fields selected by the source class layout when
+/// the decoded payload lacks them. Insertion preserves source order and skips
+/// fields the conversion already wrote.
+pub(super) fn insert_editor_headers(
+    entries: &mut Vec<(UnityYamlNode, UnityYamlNode)>,
+    fields: &[&str],
+) {
     let mut insert_at = match yaml_field_index(entries, "serializedVersion") {
         Some(index) => index + 1,
         None => 0,
     };
-    for (name, value) in [
-        (
-            "m_ObjectHideFlags",
-            UnityYamlNode::scalar(UnityYamlScalar::Unsigned(0)),
-        ),
-        ("m_CorrespondingSourceObject", yaml_null_pptr_node()),
-        ("m_PrefabInstance", yaml_null_pptr_node()),
-        ("m_PrefabAsset", yaml_null_pptr_node()),
-    ] {
+    for &name in fields {
         if yaml_field_index(entries, name).is_none() {
+            let value = if name == "m_ObjectHideFlags" {
+                UnityYamlNode::scalar(UnityYamlScalar::Unsigned(0))
+            } else {
+                yaml_null_pptr_node()
+            };
             entries.insert(insert_at, (yaml_plain_node(name), value));
             insert_at += 1;
         }
@@ -2580,14 +2598,23 @@ fn backfill_tangent_mode_in_node(node: &mut UnityYamlNode) {
     }
 }
 
-/// Completes any converted document with the universal editor headers when no
-/// editor TypeTree was applied. Class-specific completions (tag replacement,
-/// static marking, root order, euler hints) stay with their own backfills.
+/// Completes a converted document with the editor header fields exposed by its
+/// source class when no editor TypeTree was applied. Class-specific completions
+/// (tag replacement, static marking, root order, euler hints) stay separate.
 pub(super) fn apply_generic_header_backfill(
     document: &mut UnityYamlDocument,
+    class_id: i32,
 ) -> Result<(), String> {
     let entries = yaml_body_entries(document)?;
-    insert_editor_headers(entries);
+    let fields = if class_id == 29 {
+        // The source OcclusionCullingSettings editor tree carries only the
+        // Object hide flag; this class is not an EditorExtension and has no
+        // prefab PPtr headers.
+        &OBJECT_EDITOR_HEADER_FIELDS[..]
+    } else {
+        &PREFAB_EDITOR_HEADER_FIELDS[..]
+    };
+    insert_editor_headers(entries, fields);
     Ok(())
 }
 
@@ -2639,7 +2666,7 @@ pub(super) fn apply_game_object_header_backfill(
     use crate::export::unity_yaml::{UnityYamlNode, UnityYamlScalar};
 
     let entries = yaml_body_entries(document)?;
-    insert_editor_headers(entries);
+    insert_editor_headers(entries, &PREFAB_EDITOR_HEADER_FIELDS);
     if let Some(index) = yaml_field_index(entries, "m_Tag") {
         entries.remove(index);
         entries.insert(
@@ -2725,7 +2752,7 @@ pub(super) fn apply_transform_header_backfill(
     use crate::export::unity_yaml::{UnityYamlMappingStyle, UnityYamlNode, UnityYamlScalar};
 
     let entries = yaml_body_entries(document)?;
-    insert_editor_headers(entries);
+    insert_editor_headers(entries, &PREFAB_EDITOR_HEADER_FIELDS);
     if yaml_field_index(entries, "m_RootOrder").is_none() {
         if let Ok(root_order) = calculate_scene_transform_root_order(
             source_root,

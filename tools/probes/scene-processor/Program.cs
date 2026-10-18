@@ -9,6 +9,7 @@
 // Mode notree-unresolved-component <input> <rows>: author a no-TypeTree GameObject with one
 //   missing external Transform PPtr and record the real processor output.
 // Mode notree-loaded-component-export <input-dir> <rows> <output>: author a no-TypeTree GameObject and Transform in separate loaded files.
+// Mode notree-scene-owned-missing-transform <input> <rows> <output>: author a Scene-owned GameObject with a missing external Transform.
 using System.Collections;
 using System.Reflection;
 using AssetRipper.Checksum;
@@ -44,7 +45,7 @@ using System.Security.Cryptography;
 
 if (args.Length == 0)
 {
-	Console.Error.WriteLine("usage: tpk <version> <classId...> | naming <version> <name...> | process <rows> <file...> | blend-shape <rows> | notree-unresolved-component <input> <rows> | notree-unresolved-component-export <input> <rows> <output> | notree-loaded-component-export <input-dir> <rows> <output> | legacy-export <input> <rows> <output> | raw-fallback-export <input> <rows> <output>");
+	Console.Error.WriteLine("usage: tpk <version> <classId...> | naming <version> <name...> | process <rows> <file...> | blend-shape <rows> | notree-unresolved-component <input> <rows> | notree-unresolved-component-export <input> <rows> <output> | notree-loaded-component-export <input-dir> <rows> <output> | notree-scene-owned-missing-transform <input> <rows> <output> | legacy-export <input> <rows> <output> | raw-fallback-export <input> <rows> <output>");
 	return 2;
 }
 
@@ -95,12 +96,17 @@ try
 		ExportNoTreeLoadedComponent(args[1], args[2], args[3]);
 		return 0;
 	}
+	if (args[0] == "notree-scene-owned-missing-transform" && args.Length == 4)
+	{
+		ExportNoTreeSceneOwnedMissingTransform(args[1], args[2], args[3]);
+		return 0;
+	}
 	if (args[0] == "raw-fallback-export" && args.Length == 4)
 	{
 		ExportRawFallback(args[1], args[2], args[3]);
 		return 0;
 	}
-	Console.Error.WriteLine("usage: tpk <version> <classId...> | naming <version> <name...> | process <rows> <file...> | legacy-export <input> <rows> <output> | notree-prefab-export <input> <rows> <output> | notree-unresolved-component-export <input> <rows> <output> | notree-loaded-component-export <input-dir> <rows> <output> | raw-fallback-export <input> <rows> <output>");
+	Console.Error.WriteLine("usage: tpk <version> <classId...> | naming <version> <name...> | process <rows> <file...> | legacy-export <input> <rows> <output> | notree-prefab-export <input> <rows> <output> | notree-unresolved-component-export <input> <rows> <output> | notree-loaded-component-export <input-dir> <rows> <output> | notree-scene-owned-missing-transform <input> <rows> <output> | raw-fallback-export <input> <rows> <output>");
 	return 2;
 }
 catch (Exception ex)
@@ -632,6 +638,70 @@ static void ExportNoTreeUnresolvedComponent(string inputPath, string rowsPath, s
 	}
 }
 
+static void ExportNoTreeSceneOwnedMissingTransform(string inputPath, string rowsPath, string outputRoot)
+{
+	string inputFullPath = Path.GetFullPath(inputPath);
+	string rowsFullPath = Path.GetFullPath(rowsPath);
+	string outputFullPath = Path.GetFullPath(outputRoot);
+	if (File.Exists(inputFullPath) || Directory.Exists(inputFullPath))
+	{
+		throw new IOException($"refusing to overwrite probe input {inputFullPath}");
+	}
+	if (File.Exists(rowsFullPath) || Directory.Exists(rowsFullPath))
+	{
+		throw new IOException($"refusing to overwrite probe rows {rowsFullPath}");
+	}
+	if (Directory.Exists(outputFullPath) && Directory.EnumerateFileSystemEntries(outputFullPath).Any())
+	{
+		throw new IOException($"refusing to export into non-empty output {outputFullPath}");
+	}
+
+	Directory.CreateDirectory(Path.GetDirectoryName(inputFullPath)!);
+	Directory.CreateDirectory(Path.GetDirectoryName(rowsFullPath)!);
+	Directory.CreateDirectory(outputFullPath);
+	byte[] inputBytes = BuildNoTreeSceneOwnedMissingTransformFile();
+	File.WriteAllBytes(inputFullPath, inputBytes);
+
+	Logger.Add(new ConsoleLogger());
+	FullConfiguration settings = new();
+	ExportHandler handler = new(settings);
+	GameData gameData = handler.LoadAndProcess([inputFullPath], LocalFileSystem.Instance);
+	handler.Export(gameData, outputFullPath, LocalFileSystem.Instance);
+
+	string[] exportedFiles = Directory.GetFiles(outputFullPath, "*", SearchOption.AllDirectories)
+		.OrderBy(path => Path.GetRelativePath(outputFullPath, path), StringComparer.Ordinal)
+		.ToArray();
+	using StreamWriter rows = new(rowsFullPath, false, new System.Text.UTF8Encoding(false)) { NewLine = "\n" };
+	rows.WriteLine("# Frozen source project export for a Scene-owned no-TypeTree GameObject with a missing Transform.");
+	rows.WriteLine($"INPUT|{Path.GetFileName(inputFullPath)}|{inputBytes.Length}|{Convert.ToHexString(SHA256.HashData(inputBytes))}");
+	rows.WriteLine($"INPUT_HEX|{Convert.ToHexString(inputBytes)}");
+	rows.WriteLine($"VERSION|{gameData.ProjectVersion}");
+	foreach (AssetCollection collection in gameData.GameBundle.FetchAssetCollections())
+	{
+		rows.WriteLine($"COLL|{collection.Name}|scene={collection.IsScene}|sceneName={collection.Scene?.Name ?? "<null>"}");
+	}
+	foreach (IUnityObjectBase asset in gameData.GameBundle.FetchAssets())
+	{
+		string assetName = asset is INamed named ? named.Name.ToString() : "<unnamed>";
+		rows.WriteLine($"OBJECT|{asset.GetType().Name}|{asset.ClassID}|{asset.PathID}|{assetName}");
+		if (asset is IGameObject gameObject)
+		{
+			rows.WriteLine($"GAMEOBJECT|{asset.PathID}|{FormatAssets(gameObject.Components)}");
+		}
+	}
+	foreach (string file in exportedFiles)
+	{
+		string relativePath = Path.GetRelativePath(outputFullPath, file).Replace('\\', '/');
+		byte[] content = File.ReadAllBytes(file);
+		rows.WriteLine($"FILE|{relativePath}|{content.Length}|{Convert.ToHexString(SHA256.HashData(content))}");
+		if (Path.GetExtension(file).Equals(".unity", StringComparison.OrdinalIgnoreCase)
+			|| file.EndsWith(".unity.meta", StringComparison.OrdinalIgnoreCase))
+		{
+			rows.WriteLine($"CONTENT|{relativePath}|{Convert.ToBase64String(content)}");
+		}
+	}
+}
+
 static void ExportNoTreeLoadedComponent(string inputDirectory, string rowsPath, string outputRoot)
 {
 	string inputFullPath = Path.GetFullPath(inputDirectory);
@@ -772,6 +842,80 @@ static byte[] BuildNoTreeUnresolvedComponentFile()
 		},
 	}.Build();
 	file.FilePath = "UnresolvedComponent.unity";
+	return file.ToByteArray();
+}
+
+static byte[] BuildNoTreeSceneOwnedMissingTransformFile()
+{
+	UnityVersion version = UnityVersion.Parse("2019.4.40f1");
+	SerializedFile template = new SerializedFileBuilder
+	{
+		Generation = FormatVersion.Unknown_10,
+		Version = version,
+		Platform = BuildTarget.NoTarget,
+		EndianType = EndianType.LittleEndian,
+		HasTypeTree = false,
+	}.Build();
+	template.FilePath = "SceneOwnedMissingTransform.unity";
+	GameAssetFactory factory = new(new BaseManager(_ => { }));
+	GameBundle bundle = new();
+	SerializedAssetCollection collection = bundle.AddCollectionFromSerializedFile(template, factory);
+	IUnityObjectBase gameObjectAsset = AssetFactory.CreateSerialized(new AssetInfo(collection, 10, 1), version)
+		?? throw new InvalidDataException("source factory did not create the Scene-owned GameObject");
+	if (gameObjectAsset is not IGameObject gameObject)
+	{
+		throw new InvalidDataException($"source factory returned {gameObjectAsset.GetType().Name}, expected IGameObject");
+	}
+	gameObject.Name = new Utf8String("SceneOwnedMissingTransformRoot");
+	gameObject.Layer = 3;
+	gameObject.IsActive_Boolean = true;
+
+	SerializedFile externalTemplate = new SerializedFileBuilder
+	{
+		Generation = FormatVersion.Unknown_10,
+		Version = version,
+		Platform = BuildTarget.NoTarget,
+		EndianType = EndianType.LittleEndian,
+		HasTypeTree = false,
+	}.Build();
+	externalTemplate.FilePath = "missing_component.assets";
+	SerializedAssetCollection externalCollection = bundle.AddCollectionFromSerializedFile(externalTemplate, factory);
+	collection.AddDependency(externalCollection);
+	ITransform missingTransform = (ITransform)(AssetFactory.CreateSerialized(new AssetInfo(externalCollection, 99, 4), version)
+		?? throw new InvalidDataException("source factory did not create the missing external Transform"));
+	gameObject.AddComponent(ClassIDType.Transform, missingTransform);
+
+	IUnityObjectBase levelManager = AssetFactory.CreateSerialized(new AssetInfo(collection, 11, 29), version)
+		?? throw new InvalidDataException("source factory did not create OcclusionCullingSettings");
+	byte[] gameObjectPayload = WriteAsset(gameObjectAsset, true);
+	byte[] levelManagerPayload = WriteAsset(levelManager, true);
+	SerializedType gameObjectType = new() { RawTypeID = 1 };
+	SerializedType levelManagerType = new() { RawTypeID = 29 };
+	SerializedFile file = new SerializedFileBuilder
+	{
+		Generation = FormatVersion.Unknown_10,
+		Version = version,
+		Platform = BuildTarget.NoTarget,
+		EndianType = EndianType.LittleEndian,
+		HasTypeTree = false,
+		Types = { gameObjectType, levelManagerType },
+		Dependencies =
+		{
+			new FileIdentifier
+			{
+				AssetPath = "missing_component.assets",
+				PathNameOrigin = "missing_component.assets",
+				PathName = "missing_component.assets",
+				Type = AssetType.Serialized,
+			},
+		},
+		Objects =
+		{
+			new ObjectInfo(gameObjectType) { FileID = 10, TypeID = 1, ObjectData = gameObjectPayload },
+			new ObjectInfo(levelManagerType) { FileID = 11, TypeID = 29, ObjectData = levelManagerPayload },
+		},
+	}.Build();
+	file.FilePath = "SceneOwnedMissingTransform.unity";
 	return file.ToByteArray();
 }
 

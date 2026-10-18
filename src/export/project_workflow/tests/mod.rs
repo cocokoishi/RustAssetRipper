@@ -53,3 +53,4 @@ mod managed_schema_export;
 mod metadata_and_routing;
 mod prefab_export;
 mod reference_project;
+mod scene_export;
