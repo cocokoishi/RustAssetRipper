@@ -320,7 +320,7 @@ fn convert_system_or_unity_bytes(buffer: &mut [u8; 16]) {
 
 /// MD5 message digest as specified by RFC 1321 (constants and shifts from the reference
 /// implementation; test vectors from section A.5).
-fn md5(message: &[u8]) -> [u8; 16] {
+pub(crate) fn md5(message: &[u8]) -> [u8; 16] {
     const SHIFTS: [u32; 64] = [
         7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, //
         5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, //

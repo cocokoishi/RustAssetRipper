@@ -13,6 +13,8 @@ fn validate_workspace_project_export<'inputs, 'provider, 'graph>(
         source_reference_assembly_maps(has_mono_scripts, inputs.managed_assemblies)?;
     let settings_facts =
         ProjectExportSettings::from_export_settings(inputs.settings, project_version);
+    let engine_resource_data = EngineResourceData::parse(inputs.engine_resource_data_text)?;
+    let engine_asset_source = engine_asset_source(engine_resource_data.is_some());
     if inputs.objects.report().object_count > inputs.limits.max_objects {
         return Err(invalid_project(format!(
             "project export has {} objects, exceeding the limit {}",
@@ -220,6 +222,8 @@ fn validate_workspace_project_export<'inputs, 'provider, 'graph>(
         has_mono_scripts,
         reference_assembly_maps,
         settings_facts,
+        engine_resource_data,
+        engine_asset_source,
         opaque_objects,
         scene_processing,
         processed_animation_roots,
@@ -293,6 +297,40 @@ pub fn export_workspace_yaml_project_with_serialized_settings(
     managed_assemblies: Option<&ManagedAssemblyCatalog>,
     limits: WorkspaceProjectExportLimits,
 ) -> Result<WorkspaceProjectExportReport, Box<dyn Error>> {
+    export_workspace_yaml_project_with_serialized_settings_and_engine_resource_data(
+        output_root,
+        delete_existing,
+        filesystem,
+        root_catalog,
+        resource_provider,
+        workspace,
+        objects,
+        reference_graph,
+        full_settings,
+        None,
+        assembly_manager_is_set,
+        managed_assemblies,
+        limits,
+    )
+}
+
+/// Project export with persisted settings and the nullable `EngineResourceData` singleton.
+#[allow(clippy::too_many_arguments)]
+pub fn export_workspace_yaml_project_with_serialized_settings_and_engine_resource_data(
+    output_root: &Path,
+    delete_existing: bool,
+    filesystem: &VirtualFileSystem,
+    root_catalog: &RootResourceFileCatalog,
+    resource_provider: &PlatformResourceProvider<'_>,
+    workspace: &SerializedFileWorkspace,
+    objects: &ObjectWorkspace,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+    full_settings: &SerializedSettingsFile,
+    engine_resource_data_text: Option<&str>,
+    assembly_manager_is_set: bool,
+    managed_assemblies: Option<&ManagedAssemblyCatalog>,
+    limits: WorkspaceProjectExportLimits,
+) -> Result<WorkspaceProjectExportReport, Box<dyn Error>> {
     let context = validate_workspace_project_export(WorkspaceProjectExportInputs {
         output_root,
         delete_existing,
@@ -303,6 +341,7 @@ pub fn export_workspace_yaml_project_with_serialized_settings(
         objects,
         reference_graph,
         settings: &full_settings.export,
+        engine_resource_data_text,
         streaming_assets_mode: full_settings.import.streaming_assets_mode,
         assembly_manager_is_set,
         managed_assemblies,
@@ -315,6 +354,8 @@ pub fn export_workspace_yaml_project_with_serialized_settings(
         has_mono_scripts,
         reference_assembly_maps,
         settings_facts,
+        engine_resource_data,
+        engine_asset_source,
         opaque_objects,
         scene_processing,
         processed_animation_roots,
@@ -341,6 +382,7 @@ pub fn export_workspace_yaml_project_with_serialized_settings(
         objects,
         reference_graph,
         settings,
+        engine_resource_data_text: _,
         streaming_assets_mode,
         assembly_manager_is_set,
         managed_assemblies,
@@ -359,6 +401,8 @@ pub fn export_workspace_yaml_project_with_serialized_settings(
         project_version,
         editor_version_text,
         settings_facts,
+        engine_resource_data: engine_resource_data.as_ref(),
+        engine_asset_source,
         assembly_manager_is_set,
         managed_assemblies,
         reference_assembly_maps: reference_assembly_maps.as_ref(),

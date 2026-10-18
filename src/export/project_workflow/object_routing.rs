@@ -45,12 +45,6 @@ const PREDEFINED_ENGINE_MESHES_BAND_6000_0_29F1: &str =
 const PREDEFINED_ENGINE_MESHES_BAND_2018_3_0B6: &str =
     include_str!("predefined_meshes_band_2018_3_0b6.tsv");
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct PredefinedEngineAssetTarget {
-    file_id: i64,
-    guid: [u8; 16],
-}
-
 /// Selects the `EngineAssetsTpk` band key for an export Unity version.
 ///
 /// This mirrors the frozen `EngineAssetsExporter.CreateFromTpkBlob` selection over the
@@ -1052,6 +1046,7 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
     let project_version = context.project_version;
     let editor_version_text = context.editor_version_text;
     let settings_facts = context.settings_facts;
+    let use_embedded_engine_data = context.engine_asset_source == EngineAssetSource::EmbeddedData;
     let assembly_manager_is_set = context.assembly_manager_is_set;
     let managed_assemblies = context.managed_assemblies;
     let reference_assembly_maps = context.reference_assembly_maps;
@@ -1115,6 +1110,11 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
             let class_id = object.factory.class_id;
             let source_engine_guid = engine_resource_collection_guid(&file.file_name);
             let payload = object.payload.as_ref().ok();
+            let text_asset_script = if source_engine_guid.is_none() && class_id == 49 {
+                payload.map(text_asset_script_bytes).transpose()?.flatten()
+            } else {
+                None
+            };
             if payload.is_some() && !opaque_objects.contains(&(file_index, object_index)) {
                 validate_decoded_object(object, object_info.path_id, reference_graph)?;
             }
@@ -1127,21 +1127,23 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
             } else {
                 None
             };
-            let predefined_engine_shader =
-                if source_engine_guid.is_none() && class_id == SHADER_CLASS_ID {
-                    shader_view
-                        .as_ref()
-                        .map(|view| {
-                            predefined_engine_shader_target(
-                                view,
-                                file.metadata.prefix.unity_version_text.as_deref(),
-                            )
-                        })
-                        .transpose()?
-                        .flatten()
-                } else {
-                    None
-                };
+            let predefined_engine_shader = if use_embedded_engine_data
+                && source_engine_guid.is_none()
+                && class_id == SHADER_CLASS_ID
+            {
+                shader_view
+                    .as_ref()
+                    .map(|view| {
+                        predefined_engine_shader_target(
+                            view,
+                            file.metadata.prefix.unity_version_text.as_deref(),
+                        )
+                    })
+                    .transpose()?
+                    .flatten()
+            } else {
+                None
+            };
             let material_view = if source_engine_guid.is_none() && class_id == 21 {
                 payload
                     .map(|payload| crate::resources::material::MaterialView::from_value(&payload.root))
@@ -1155,21 +1157,26 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
             } else {
                 None
             };
-            let predefined_engine_material = if let Some(material) = material_view.as_ref() {
-                let resolved_shader_name =
-                    resolved_material_shader_name(material, object, objects, reference_graph)?;
-                match (material.name.as_deref(), resolved_shader_name) {
-                    (Some(name), Some(shader_name)) => predefined_engine_material_target(
-                        name,
-                        shader_name.as_deref(),
-                        file.metadata.prefix.unity_version_text.as_deref(),
-                    )?,
-                    _ => None,
+            let predefined_engine_material = if use_embedded_engine_data {
+                if let Some(material) = material_view.as_ref() {
+                    let resolved_shader_name =
+                        resolved_material_shader_name(material, object, objects, reference_graph)?;
+                    match (material.name.as_deref(), resolved_shader_name) {
+                        (Some(name), Some(shader_name)) => predefined_engine_material_target(
+                            name,
+                            shader_name.as_deref(),
+                            file.metadata.prefix.unity_version_text.as_deref(),
+                        )?,
+                        _ => None,
+                    }
+                } else {
+                    None
                 }
             } else {
                 None
             };
-            let predefined_engine_sprite = if source_engine_guid.is_none()
+            let predefined_engine_sprite = if use_embedded_engine_data
+                && source_engine_guid.is_none()
                 && class_id == crate::resources::sprite::SPRITE_CLASS_ID
             {
                 if let Some(payload) = payload {
@@ -1216,7 +1223,8 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
             } else {
                 None
             };
-            let predefined_engine_texture = if source_engine_guid.is_none()
+            let predefined_engine_texture = if use_embedded_engine_data
+                && source_engine_guid.is_none()
                 && class_id == crate::export::res_wiring::TEXTURE2D_CLASS_ID
             {
                 if let Some(payload) = payload {
@@ -1237,7 +1245,8 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
             } else {
                 None
             };
-            let predefined_engine_mesh = if source_engine_guid.is_none()
+            let predefined_engine_mesh = if use_embedded_engine_data
+                && source_engine_guid.is_none()
                 && class_id == crate::export::res_wiring::MESH_CLASS_ID
             {
                 if let Some(payload) = payload {
@@ -1262,11 +1271,27 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
             } else {
                 None
             };
+            let predefined_engine_text_asset = if context.engine_asset_source
+                == EngineAssetSource::StoredResourceData
+                && source_engine_guid.is_none()
+                && class_id == 49
+            {
+                let name = payload.and_then(|payload| predefined_engine_object_name(&payload.root));
+                match (name.as_deref(), text_asset_script.as_deref()) {
+                    (Some(name), Some(bytes)) => context
+                        .engine_resource_data
+                        .and_then(|data| data.text_asset_target(name, bytes)),
+                    _ => None,
+                }
+            } else {
+                None
+            };
             let predefined_engine_target = predefined_engine_shader
                 .or(predefined_engine_material)
                 .or(predefined_engine_sprite)
                 .or(predefined_engine_texture)
-                .or(predefined_engine_mesh);
+                .or(predefined_engine_mesh)
+                .or(predefined_engine_text_asset);
             let engine_guid =
                 source_engine_guid.or_else(|| predefined_engine_target.map(|target| target.guid));
             let sprite_subasset = if class_id == crate::resources::sprite::SPRITE_CLASS_ID
@@ -1395,11 +1420,6 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                     crate::export::collection_claims::ShaderTextState::DecompiledSource
                 }
                 Some(_) => crate::export::collection_claims::ShaderTextState::CompiledOrEmpty,
-            };
-            let text_asset_script = if source_engine_guid.is_none() && class_id == 49 {
-                payload.map(text_asset_script_bytes).transpose()?.flatten()
-            } else {
-                None
             };
             let font_data = if source_engine_guid.is_none() && class_id == 128 {
                 payload

@@ -213,7 +213,8 @@ impl WebState {
         *self.singleton_data.get_or_add("ProcessingSettings") = processing;
         *self.singleton_data.get_or_add("ExportSettings") = export;
         // The baseline registers EngineResourceData as a typed singleton whose initial Text is
-        // empty. Its payload format and exporter behavior remain a separate open parity item.
+        // empty. Project export consumes its resource dictionaries; the currently wired typed
+        // cache key is TextAsset, while other known resource kinds remain an open parity item.
         self.singleton_data.get_or_add("EngineResourceData");
         Ok(())
     }
@@ -1138,6 +1139,9 @@ impl WebState {
             Path::new(path),
             delete_existing,
             &self.settings,
+            self.singleton_data
+                .get("EngineResourceData")
+                .map(String::as_str),
             &mut status,
         )
         .map_err(|error| error.to_string())?;
@@ -1199,8 +1203,8 @@ fn parse_scene_unity_version(
 }
 
 /// Applies the nullable JSON serializer behavior for EngineResourceData values whose resource
-/// dictionaries are empty. Non-empty resource dictionaries need the typed Mining object model and
-/// are left untouched until that model is available to the exporter.
+/// dictionaries are empty. Non-empty dictionaries remain as submitted so project export can
+/// decode their typed cache entries.
 fn normalize_empty_engine_resource_data_json(content: &str) -> Option<String> {
     use serde_json::{Map, Value};
 
@@ -1335,6 +1339,63 @@ mod tests {
             state.singletons().get("EngineResourceData"),
             Some(&String::new())
         );
+    }
+
+    #[test]
+    fn project_export_uses_stored_textasset_engine_resource_data() {
+        let fixture = include_str!("../processing/asset_factory_fixture.txt");
+        let hex = fixture
+            .lines()
+            .find_map(|line| line.strip_prefix("SF_HEX|textasset_notree|"))
+            .expect("source fixture includes a no-TypeTree TextAsset");
+        let source_bytes = hex
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                u8::from_str_radix(std::str::from_utf8(pair).expect("hex is ASCII"), 16)
+                    .expect("fixture hex is valid")
+            })
+            .collect::<Vec<_>>();
+        let directory = test_directory("engine-resource-textasset");
+        let source_path = directory.join("textasset.assets");
+        std::fs::write(&source_path, &source_bytes).expect("write generated fixture");
+        let source_path_text = source_path.to_string_lossy().into_owned();
+
+        let mut state = state(true);
+        state
+            .load(&[source_path_text])
+            .expect("load source-generated TextAsset");
+
+        let embedded_output = directory.join("project-embedded");
+        let embedded_output_text = embedded_output.to_string_lossy().into_owned();
+        state
+            .export_unity_project(&embedded_output_text, false)
+            .expect("the default embedded TPK cache exports the TextAsset");
+        assert_eq!(
+            std::fs::read(embedded_output.join("Assets/TextAsset/Hero.txt"))
+                .expect("embedded cache leaves a nonmatching TextAsset exportable"),
+            b"print(1)"
+        );
+
+        state
+            .set_singleton_data(
+                "EngineResourceData",
+                r#"{"DefaultResources":{"777":{"$type":"TextAsset","Name":"Hero","Length":7,"Hash":130469715505528193672212848297838865176}},"ExtraResources":{}}"#,
+            )
+            .expect("store source-shaped custom TextAsset resource data");
+        let custom_output = directory.join("project-custom");
+        let custom_output_text = custom_output.to_string_lossy().into_owned();
+        state
+            .export_unity_project(&custom_output_text, false)
+            .expect("the custom cache redirects a matching TextAsset");
+        assert!(
+            !custom_output.join("Assets/TextAsset/Hero.txt").exists(),
+            "a TextAsset matched by name, byte length and UInt128 MD5 is redirected"
+        );
+        assert!(!custom_output
+            .join("Assets/TextAsset/Hero.txt.meta")
+            .exists());
+        assert_eq!(std::fs::read(&source_path).unwrap(), source_bytes);
     }
 
     #[test]

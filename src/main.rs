@@ -18,7 +18,9 @@ use assetripper::export::pointer_map::{
     ProjectExportPointerMap, UnityProjectAssetType,
 };
 use assetripper::export::project_workflow::{
-    export_workspace_yaml_project_with_serialized_settings, WorkspaceProjectExportLimits,
+    export_workspace_yaml_project_with_serialized_settings,
+    export_workspace_yaml_project_with_serialized_settings_and_engine_resource_data,
+    WorkspaceProjectExportLimits,
 };
 use assetripper::export::scene_collection::{
     ExportAssetCollectionIdentity, ExportAssetIdentity, SceneExportIdAssignment,

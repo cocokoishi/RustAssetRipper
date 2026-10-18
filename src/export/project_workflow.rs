@@ -100,6 +100,7 @@ use super::project_exporter::{
 };
 use super::project_plan::plan_scene_export_paths;
 use super::reference_assemblies::ReferenceAssemblyMaps;
+use super::registration::{engine_asset_source, EngineAssetSource};
 use super::resource_extensions::text_export_extension;
 use super::scene_collection::{
     plan_workspace_scene_export_ids_with_processed_assets, ExportAssetCollectionIdentity,
@@ -246,6 +247,12 @@ enum ObjectRoute {
     Unreadable,
     /// A non-exportable collection: the baseline writes nothing.
     Skipped,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PredefinedEngineAssetTarget {
+    file_id: i64,
+    guid: [u8; 16],
 }
 
 /// A routed object with its resolved plan inputs.
@@ -448,6 +455,7 @@ struct WorkspaceProjectExportInputs<'inputs, 'provider, 'graph> {
     objects: &'inputs ObjectWorkspace,
     reference_graph: &'inputs MultiFileReferenceGraph<'graph>,
     settings: &'inputs ExportSettingsFile,
+    engine_resource_data_text: Option<&'inputs str>,
     streaming_assets_mode: StreamingAssetsMode,
     assembly_manager_is_set: bool,
     managed_assemblies: Option<&'inputs ManagedAssemblyCatalog>,
@@ -461,6 +469,8 @@ struct WorkspaceProjectExportContext<'inputs, 'provider, 'graph> {
     has_mono_scripts: bool,
     reference_assembly_maps: Option<ReferenceAssemblyMaps>,
     settings_facts: ProjectExportSettings,
+    engine_resource_data: Option<EngineResourceData>,
+    engine_asset_source: EngineAssetSource,
     opaque_objects: HashSet<(usize, usize)>,
     scene_processing: WorkspaceSceneProcessing,
     processed_animation_roots: HashMap<(usize, usize), SerializedValue>,
@@ -500,6 +510,8 @@ struct ProjectRoutingContext<'context, 'provider, 'graph> {
     project_version: SceneUnityVersion,
     editor_version_text: &'context str,
     settings_facts: ProjectExportSettings,
+    engine_resource_data: Option<&'context EngineResourceData>,
+    engine_asset_source: EngineAssetSource,
     assembly_manager_is_set: bool,
     managed_assemblies: Option<&'context ManagedAssemblyCatalog>,
     reference_assembly_maps: Option<&'context ReferenceAssemblyMaps>,
@@ -533,6 +545,7 @@ mod animator_controller;
 mod asset_support;
 mod audio_asset;
 mod collection_planning;
+mod engine_resource_data;
 mod entrypoints;
 mod export;
 mod font_asset;
@@ -563,6 +576,7 @@ use self::collection_planning::{
     GeneratedCollectionPreparationContext, PreparedGeneratedCollections, ProjectPointerPlan,
     ProjectPointerPlanningContext,
 };
+use self::engine_resource_data::EngineResourceData;
 use self::font_asset::*;
 use self::importer_metadata::*;
 use self::lighting_asset::*;
@@ -587,6 +601,7 @@ pub use self::entrypoints::{
 pub use self::export::{
     export_workspace_yaml_project_with_assembly_catalog,
     export_workspace_yaml_project_with_serialized_settings,
+    export_workspace_yaml_project_with_serialized_settings_and_engine_resource_data,
 };
 /// The decoded display-name helper, shared with the web tree pages.
 pub use self::workspace_identity::object_asset_name;

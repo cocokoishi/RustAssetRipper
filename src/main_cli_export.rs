@@ -1394,6 +1394,7 @@ pub(super) fn export_loaded_game<W: io::Write>(
     output_root: &Path,
     delete_existing: bool,
     full_settings: &assetripper::export::settings_file::SerializedSettingsFile,
+    engine_resource_data_text: Option<&str>,
     status_output: &mut W,
 ) -> Result<(), Box<dyn Error>> {
     // The graph borrows the loaded workspace, so it is rebuilt per export rather than
@@ -1408,7 +1409,7 @@ pub(super) fn export_loaded_game<W: io::Write>(
     if let Some(source) = &game.original_streaming_assets {
         provider = provider.with_streaming_assets_filesystem(source);
     }
-    let report = export_workspace_yaml_project_with_serialized_settings(
+    let report = export_workspace_yaml_project_with_serialized_settings_and_engine_resource_data(
         output_root,
         delete_existing,
         &game.filesystem,
@@ -1418,6 +1419,7 @@ pub(super) fn export_loaded_game<W: io::Write>(
         &game.objects,
         &reference_graph,
         full_settings,
+        engine_resource_data_text,
         game.mono_manager_initialized,
         game.mono_manager_initialized
             .then_some(&game.managed_assemblies),
@@ -1514,6 +1516,7 @@ pub(super) fn export_project_to_with_serialized_settings<W: io::Write>(
         output_root,
         delete_existing,
         full_settings,
+        None,
         status_output,
     )
 }

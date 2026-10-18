@@ -35,6 +35,7 @@ dependencies = [
  "ogg",
  "phf",
  "rustix",
+ "serde",
  "ruzstd 0.9.0",
  "serde_json",
  "texture2ddecoder",
