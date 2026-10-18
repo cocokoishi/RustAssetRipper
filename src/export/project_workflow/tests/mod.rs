@@ -26,6 +26,29 @@ use crate::serialized_file::reference_graph::{
 };
 use crate::serialized_file::workspace::{SerializedFileWorkspace, SerializedFileWorkspaceLimits};
 
+fn load_workspace_named_files_with_source_factory(
+    files: &[(&str, &[u8])],
+) -> (VirtualFileSystem, SerializedFileWorkspace) {
+    let mut filesystem = VirtualFileSystem::new();
+    filesystem.create_directory(Some("/game")).unwrap();
+    let mut inputs = Vec::with_capacity(files.len());
+    for &(file_name, bytes) in files {
+        let virtual_path = format!("/game/{file_name}");
+        filesystem.write_all_bytes(&virtual_path, bytes).unwrap();
+        inputs.push(DependencyFilePath {
+            file_name: file_name.to_owned(),
+            virtual_path,
+        });
+    }
+    let workspace = SerializedFileWorkspace::load_from_vfs(
+        &filesystem,
+        &inputs,
+        SerializedFileWorkspaceLimits::default(),
+    )
+    .unwrap();
+    (filesystem, workspace)
+}
+
 mod managed_schema_export;
 mod metadata_and_routing;
 mod prefab_export;

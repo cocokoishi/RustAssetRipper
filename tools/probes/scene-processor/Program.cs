@@ -8,6 +8,7 @@
 //   generated Transform objects). Writes only the rows file; reads only inputs.
 // Mode notree-unresolved-component <input> <rows>: author a no-TypeTree GameObject with one
 //   missing external Transform PPtr and record the real processor output.
+// Mode notree-loaded-component-export <input-dir> <rows> <output>: author a no-TypeTree GameObject and Transform in separate loaded files.
 using System.Collections;
 using System.Reflection;
 using AssetRipper.Checksum;
@@ -43,7 +44,7 @@ using System.Security.Cryptography;
 
 if (args.Length == 0)
 {
-	Console.Error.WriteLine("usage: tpk <version> <classId...> | naming <version> <name...> | process <rows> <file...> | blend-shape <rows> | notree-unresolved-component <input> <rows> | notree-unresolved-component-export <input> <rows> <output> | legacy-export <input> <rows> <output> | raw-fallback-export <input> <rows> <output>");
+	Console.Error.WriteLine("usage: tpk <version> <classId...> | naming <version> <name...> | process <rows> <file...> | blend-shape <rows> | notree-unresolved-component <input> <rows> | notree-unresolved-component-export <input> <rows> <output> | notree-loaded-component-export <input-dir> <rows> <output> | legacy-export <input> <rows> <output> | raw-fallback-export <input> <rows> <output>");
 	return 2;
 }
 
@@ -89,12 +90,17 @@ try
 		ExportNoTreeUnresolvedComponent(args[1], args[2], args[3]);
 		return 0;
 	}
+	if (args[0] == "notree-loaded-component-export" && args.Length == 4)
+	{
+		ExportNoTreeLoadedComponent(args[1], args[2], args[3]);
+		return 0;
+	}
 	if (args[0] == "raw-fallback-export" && args.Length == 4)
 	{
 		ExportRawFallback(args[1], args[2], args[3]);
 		return 0;
 	}
-	Console.Error.WriteLine("usage: tpk <version> <classId...> | naming <version> <name...> | process <rows> <file...> | legacy-export <input> <rows> <output> | notree-prefab-export <input> <rows> <output> | notree-unresolved-component-export <input> <rows> <output> | raw-fallback-export <input> <rows> <output>");
+	Console.Error.WriteLine("usage: tpk <version> <classId...> | naming <version> <name...> | process <rows> <file...> | legacy-export <input> <rows> <output> | notree-prefab-export <input> <rows> <output> | notree-unresolved-component-export <input> <rows> <output> | notree-loaded-component-export <input-dir> <rows> <output> | raw-fallback-export <input> <rows> <output>");
 	return 2;
 }
 catch (Exception ex)
@@ -626,6 +632,74 @@ static void ExportNoTreeUnresolvedComponent(string inputPath, string rowsPath, s
 	}
 }
 
+static void ExportNoTreeLoadedComponent(string inputDirectory, string rowsPath, string outputRoot)
+{
+	string inputFullPath = Path.GetFullPath(inputDirectory);
+	string rowsFullPath = Path.GetFullPath(rowsPath);
+	string outputFullPath = Path.GetFullPath(outputRoot);
+	if (Directory.Exists(inputFullPath) && Directory.EnumerateFileSystemEntries(inputFullPath).Any())
+	{
+		throw new IOException($"refusing to overwrite non-empty probe input {inputFullPath}");
+	}
+	if (File.Exists(rowsFullPath) || Directory.Exists(rowsFullPath))
+	{
+		throw new IOException($"refusing to overwrite probe rows {rowsFullPath}");
+	}
+	if (Directory.Exists(outputFullPath) && Directory.EnumerateFileSystemEntries(outputFullPath).Any())
+	{
+		throw new IOException($"refusing to export into non-empty output {outputFullPath}");
+	}
+
+	Directory.CreateDirectory(inputFullPath);
+	Directory.CreateDirectory(Path.GetDirectoryName(rowsFullPath)!);
+	Directory.CreateDirectory(outputFullPath);
+	(string FileName, byte[] Bytes)[] inputs = BuildNoTreeLoadedComponentFiles();
+	string[] inputPaths = inputs.Select(input =>
+	{
+		string path = Path.Combine(inputFullPath, input.FileName);
+		File.WriteAllBytes(path, input.Bytes);
+		return path;
+	}).ToArray();
+
+	Logger.Add(new ConsoleLogger());
+	FullConfiguration settings = new();
+	ExportHandler handler = new(settings);
+	GameData gameData = handler.LoadAndProcess(inputPaths, LocalFileSystem.Instance);
+	handler.Export(gameData, outputFullPath, LocalFileSystem.Instance);
+
+	string[] exportedFiles = Directory.GetFiles(outputFullPath, "*", SearchOption.AllDirectories)
+		.OrderBy(path => Path.GetRelativePath(outputFullPath, path), StringComparer.Ordinal)
+		.ToArray();
+	using StreamWriter rows = new(rowsFullPath, false, new System.Text.UTF8Encoding(false)) { NewLine = "\n" };
+	rows.WriteLine("# Frozen source project export for a loaded cross-file no-TypeTree component.");
+	foreach ((string fileName, byte[] bytes) in inputs)
+	{
+		rows.WriteLine($"INPUT|{fileName}|{bytes.Length}|{Convert.ToHexString(SHA256.HashData(bytes))}");
+		rows.WriteLine($"INPUT_HEX|{fileName}|{Convert.ToHexString(bytes)}");
+	}
+	rows.WriteLine($"VERSION|{gameData.ProjectVersion}");
+	foreach (IUnityObjectBase asset in gameData.GameBundle.FetchAssets())
+	{
+		string assetName = asset is INamed named ? named.Name.ToString() : "<unnamed>";
+		rows.WriteLine($"OBJECT|{asset.GetType().Name}|{asset.ClassID}|{asset.PathID}|{assetName}");
+		if (asset is IGameObject gameObject)
+		{
+			rows.WriteLine($"GAMEOBJECT|{asset.PathID}|{FormatAssets(gameObject.Components)}");
+		}
+	}
+	foreach (string file in exportedFiles)
+	{
+		string relativePath = Path.GetRelativePath(outputFullPath, file).Replace('\\', '/');
+		byte[] content = File.ReadAllBytes(file);
+		rows.WriteLine($"FILE|{relativePath}|{content.Length}|{Convert.ToHexString(SHA256.HashData(content))}");
+		if (Path.GetExtension(file).Equals(".prefab", StringComparison.OrdinalIgnoreCase)
+			|| file.EndsWith(".prefab.meta", StringComparison.OrdinalIgnoreCase))
+		{
+			rows.WriteLine($"CONTENT|{relativePath}|{Convert.ToBase64String(content)}");
+		}
+	}
+}
+
 static byte[] BuildNoTreeUnresolvedComponentFile()
 {
 	UnityVersion version = UnityVersion.Parse("2019.4.40f1");
@@ -699,6 +773,98 @@ static byte[] BuildNoTreeUnresolvedComponentFile()
 	}.Build();
 	file.FilePath = "UnresolvedComponent.unity";
 	return file.ToByteArray();
+}
+
+static (string FileName, byte[] Bytes)[] BuildNoTreeLoadedComponentFiles()
+{
+	UnityVersion version = UnityVersion.Parse("2019.4.40f1");
+	SerializedFile gameObjectTemplate = new SerializedFileBuilder
+	{
+		Generation = FormatVersion.Unknown_10,
+		Version = version,
+		Platform = BuildTarget.NoTarget,
+		EndianType = EndianType.LittleEndian,
+		HasTypeTree = false,
+	}.Build();
+	gameObjectTemplate.FilePath = "LoadedComponent.unity";
+	SerializedFile transformTemplate = new SerializedFileBuilder
+	{
+		Generation = FormatVersion.Unknown_10,
+		Version = version,
+		Platform = BuildTarget.NoTarget,
+		EndianType = EndianType.LittleEndian,
+		HasTypeTree = false,
+	}.Build();
+	transformTemplate.FilePath = "LoadedComponent.assets";
+
+	GameAssetFactory factory = new(new BaseManager(_ => { }));
+	GameBundle bundle = new();
+	SerializedAssetCollection gameObjectCollection = bundle.AddCollectionFromSerializedFile(gameObjectTemplate, factory);
+	SerializedAssetCollection transformCollection = bundle.AddCollectionFromSerializedFile(transformTemplate, factory);
+	gameObjectCollection.AddDependency(transformCollection);
+	transformCollection.AddDependency(gameObjectCollection);
+
+	IGameObject gameObject = (IGameObject)(AssetFactory.CreateSerialized(new AssetInfo(gameObjectCollection, 10, 1), version)
+		?? throw new InvalidDataException("source factory did not create the loaded-component GameObject"));
+	ITransform transform = (ITransform)(AssetFactory.CreateSerialized(new AssetInfo(transformCollection, 99, 4), version)
+		?? throw new InvalidDataException("source factory did not create the loaded external Transform"));
+	gameObject.Name = new Utf8String("LoadedComponentRoot");
+	gameObject.Layer = 3;
+	gameObject.IsActive_Boolean = true;
+	transform.InitializeDefault();
+	transform.GameObject_C4P = gameObject;
+	gameObject.AddComponent(ClassIDType.Transform, transform);
+
+	byte[] gameObjectPayload = WriteAsset((IUnityObjectBase)gameObject, true);
+	byte[] transformPayload = WriteAsset((IUnityObjectBase)transform, true);
+	SerializedType gameObjectType = new() { RawTypeID = 1 };
+	SerializedType transformType = new() { RawTypeID = 4 };
+	SerializedFile gameObjectFile = new SerializedFileBuilder
+	{
+		Generation = FormatVersion.Unknown_10,
+		Version = version,
+		Platform = BuildTarget.NoTarget,
+		EndianType = EndianType.LittleEndian,
+		HasTypeTree = false,
+		Types = { gameObjectType },
+		Dependencies =
+		{
+			new FileIdentifier
+			{
+				AssetPath = "LoadedComponent.assets",
+				PathNameOrigin = "LoadedComponent.assets",
+				PathName = "LoadedComponent.assets",
+				Type = AssetType.Serialized,
+			},
+		},
+		Objects = { new ObjectInfo(gameObjectType) { FileID = 10, TypeID = 1, ObjectData = gameObjectPayload } },
+	}.Build();
+	gameObjectFile.FilePath = "LoadedComponent.unity";
+	SerializedFile transformFile = new SerializedFileBuilder
+	{
+		Generation = FormatVersion.Unknown_10,
+		Version = version,
+		Platform = BuildTarget.NoTarget,
+		EndianType = EndianType.LittleEndian,
+		HasTypeTree = false,
+		Types = { transformType },
+		Dependencies =
+		{
+			new FileIdentifier
+			{
+				AssetPath = "LoadedComponent.unity",
+				PathNameOrigin = "LoadedComponent.unity",
+				PathName = "LoadedComponent.unity",
+				Type = AssetType.Serialized,
+			},
+		},
+		Objects = { new ObjectInfo(transformType) { FileID = 99, TypeID = 4, ObjectData = transformPayload } },
+	}.Build();
+	transformFile.FilePath = "LoadedComponent.assets";
+	return [
+		("LoadedComponent.unity", gameObjectFile.ToByteArray()),
+		("LoadedComponent.assets", transformFile.ToByteArray()),
+	];
 }
 
 static byte[] WriteAsset(IUnityObjectBase asset, bool editor)

@@ -385,6 +385,138 @@ fn project_export_matches_source_when_a_no_tree_component_target_is_unresolved()
 }
 
 #[test]
+fn project_export_matches_source_for_a_loaded_no_tree_cross_file_component() {
+    let fixture = include_str!("../../../processing/scene_loaded_component_source_fixture.txt");
+    let fixture_bytes = |file_name: &str| {
+        let input_prefix = format!("INPUT|{file_name}|");
+        let input = fixture
+            .lines()
+            .find_map(|line| line.strip_prefix(&input_prefix))
+            .unwrap_or_else(|| panic!("fixture includes input record for {file_name}"));
+        let expected_length = input
+            .split('|')
+            .next()
+            .expect("input record has a byte length")
+            .parse::<usize>()
+            .expect("input byte length is numeric");
+        let hex_prefix = format!("INPUT_HEX|{file_name}|");
+        let hex = fixture
+            .lines()
+            .find_map(|line| line.strip_prefix(&hex_prefix))
+            .unwrap_or_else(|| panic!("fixture includes hexadecimal bytes for {file_name}"));
+        assert_eq!(hex.len() % 2, 0, "fixture hex has an odd length");
+        let bytes = hex
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16)
+                    .expect("fixture contains ASCII hexadecimal bytes")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(bytes.len(), expected_length, "{file_name} byte length");
+        bytes
+    };
+    let game_object_bytes = fixture_bytes("LoadedComponent.unity");
+    let transform_bytes = fixture_bytes("LoadedComponent.assets");
+    let (filesystem, workspace) = load_workspace_named_files_with_source_factory(&[
+        ("LoadedComponent.unity", &game_object_bytes),
+        ("LoadedComponent.assets", &transform_bytes),
+    ]);
+    assert_eq!(workspace.files().len(), 2);
+    assert!(workspace
+        .files()
+        .iter()
+        .all(|file| file
+            .metadata
+            .types
+            .iter()
+            .all(|serialized_type| serialized_type
+                .type_tree
+                .as_ref()
+                .is_none_or(|tree| tree.nodes.is_empty()))));
+
+    let objects =
+        ObjectWorkspace::load_from_vfs(&filesystem, &workspace, ObjectWorkspaceLimits::default())
+            .unwrap();
+    assert!(objects.report().is_complete(), "{:?}", objects.report());
+    assert_eq!(objects.objects().len(), 2);
+    assert!(objects
+        .objects()
+        .iter()
+        .all(|object| object.payload.is_ok()));
+    let reference_graph = workspace
+        .reference_graph(MultiFileReferenceGraphLimits::default())
+        .unwrap();
+    assert!(reference_graph.is_complete(), "{:?}", reference_graph);
+    let component_reference = reference_graph
+        .references()
+        .iter()
+        .find(|reference| {
+            reference.source_path_id == 10 && reference.field_path == "m_Component[0].component"
+        })
+        .expect("GameObject component PPtr is present in the joined reference graph");
+    assert_eq!(component_reference.file_id, 1);
+    assert_eq!(component_reference.path_id, 99);
+    let (target_file_index, target_object_index) = match component_reference.resolution {
+        MultiFilePPtrResolution::Object {
+            target_file_index,
+            target_object_index,
+        } => (target_file_index, target_object_index),
+        ref resolution => panic!("expected the external Transform to resolve, got {resolution:?}"),
+    };
+    let transform_file = &workspace.files()[target_file_index];
+    let transform_object = &transform_file.metadata.objects[target_object_index];
+    assert_eq!(transform_object.path_id, 99);
+    assert_eq!(transform_object.class_id, Some(4));
+
+    let root_catalog = RootResourceFileCatalog::default();
+    let provider = PlatformResourceProvider::new(None, None);
+    let settings = ExportSettingsFile::from(ExportDefaults::default());
+    let output_root =
+        crate::test_support::unique_test_directory("project-loaded-cross-file-component-e2e");
+    let report = export_workspace_yaml_project_with_settings(
+        &output_root,
+        false,
+        &filesystem,
+        &root_catalog,
+        &provider,
+        &workspace,
+        &objects,
+        &reference_graph,
+        &settings,
+        WorkspaceProjectExportLimits::default(),
+    )
+    .unwrap();
+
+    let prefab_path = output_root.join("Assets/GameObject/LoadedComponentRoot.prefab");
+    let prefab_meta_path = output_root.join("Assets/GameObject/LoadedComponentRoot.prefab.meta");
+    let prefab_yaml = std::fs::read_to_string(&prefab_path).unwrap();
+    let source_yaml = include_str!("../no_tree_loaded_component_source_prefab.yml");
+    assert_eq!(
+        normalize_generated_prefab_ids(&prefab_yaml),
+        normalize_generated_prefab_ids(source_yaml)
+    );
+    assert!(!output_root
+        .join("Assets/GameObject/LoadedComponentRoot.asset")
+        .exists());
+    let prefab_meta = std::fs::read_to_string(prefab_meta_path).unwrap();
+    let source_meta = include_str!("../no_tree_loaded_component_source_prefab.meta.yml");
+    let normalize_meta = |text: &str| {
+        text.lines()
+            .filter(|line| !line.starts_with("guid: ") && !line.starts_with("timeCreated: "))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_eq!(normalize_meta(&prefab_meta), normalize_meta(source_meta));
+    assert_eq!(report.asset_file_count, 1);
+    assert_eq!(report.meta_file_count, 1);
+    assert_eq!(report.collection_count, 1);
+    assert_eq!(report.exported_object_count, 2);
+
+    std::fs::remove_dir_all(output_root).unwrap();
+}
+
+#[test]
 fn project_export_routes_an_existing_modern_prefab_instance_collection() {
     let bytes = make_existing_prefab_instance_file();
     if let Ok(path) = std::env::var("ASSET_RIPPER_REFERENCE_PREFAB_FIXTURE") {

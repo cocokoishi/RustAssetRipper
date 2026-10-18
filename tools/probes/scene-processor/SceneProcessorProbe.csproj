@@ -7,6 +7,9 @@
     <ReferenceRoot Condition="'$(ReferenceRoot)' == ''">$(LOCALAPPDATA)\Temp\opencode\ar-ref</ReferenceRoot>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Remove="target/**/*.cs" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="$(ReferenceRoot)\Source\AssetRipper.Export.UnityProjects\AssetRipper.Export.UnityProjects.csproj" />
     <ProjectReference Include="$(ReferenceRoot)\Source\AssetRipper.IO.Files\AssetRipper.IO.Files.csproj" />
     <ProjectReference Include="$(ReferenceRoot)\Source\AssetRipper.Assets\AssetRipper.Assets.csproj" />
