@@ -1729,7 +1729,9 @@
                     let Some(sprite_id) = trimmed.strip_prefix("spriteID: ") else {
                         return line.to_owned();
                     };
-                    if sprite_id.len() == 32 && sprite_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    if sprite_id.len() == 32
+                        && sprite_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    {
                         format!("{}spriteID: <SPRITE_ID>", &line[..indent_length])
                     } else {
                         line.to_owned()
@@ -1790,7 +1792,9 @@
         let expected_texture_bytes = fixture
             .lines()
             .find_map(|line| {
-                let row = line.strip_prefix("SOURCE_OUTPUT|ExportedProject/Assets/Texture2D/AtlasTextureFixture.bmp|")?;
+                let row = line.strip_prefix(
+                    "SOURCE_OUTPUT|ExportedProject/Assets/Texture2D/AtlasTextureFixture.bmp|",
+                )?;
                 Some(decode_hex(row))
             })
             .expect("source fixture records the exported Texture2D bytes");
@@ -1922,7 +1926,9 @@
                 include_str!("export/sprite_atlas_importer_texture2d_2019_4_fixture.txt"),
             ),
         ] {
-            assert!(mode_fixture.lines().any(|line| line == format!("MODE|{mode}")));
+            assert!(mode_fixture
+                .lines()
+                .any(|line| line == format!("MODE|{mode}")));
             let mode_input_identity = mode_fixture
                 .lines()
                 .find_map(|line| line.strip_prefix("INPUT|"))
@@ -1954,7 +1960,9 @@
                 source_path.clone().into_os_string(),
             ];
             super::run(mode_arguments.into_iter()).unwrap_or_else(|error| {
-                panic!("export-project failed for source SpriteAtlas fixture in {mode} mode: {error}")
+                panic!(
+                    "export-project failed for source SpriteAtlas fixture in {mode} mode: {error}"
+                )
             });
 
             let mut expected_paths = mode_fixture
@@ -1980,9 +1988,14 @@
                 .collect::<Vec<_>>();
             expected_paths.sort();
             actual_paths.sort();
-            assert_eq!(actual_paths, expected_paths, "{mode} source project inventory");
+            assert_eq!(
+                actual_paths, expected_paths,
+                "{mode} source project inventory"
+            );
             assert!(
-                !actual_paths.iter().any(|path| path == "Assets/Sprite/PackedSpriteFixture.asset"),
+                !actual_paths
+                    .iter()
+                    .any(|path| path == "Assets/Sprite/PackedSpriteFixture.asset"),
                 "{mode} mode exports the Sprite as a Texture2D subasset"
             );
 
@@ -2003,8 +2016,10 @@
                     let relative_path = source_relative_path
                         .strip_prefix("ExportedProject/")
                         .unwrap_or(source_relative_path);
-                    let actual = fs::read(mode_output_root.join(relative_path))
-                        .unwrap_or_else(|error| panic!("could not read {mode} output {relative_path}: {error}"));
+                    let actual =
+                        fs::read(mode_output_root.join(relative_path)).unwrap_or_else(|error| {
+                            panic!("could not read {mode} output {relative_path}: {error}")
+                        });
                     assert_eq!(
                         normalize(&actual),
                         decode_hex(expected_hex),

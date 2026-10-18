@@ -3226,7 +3226,7 @@ mod tests {
     }
 
     #[test]
-    fn sprite_bone_geometry_decodes_positions_skin_and_little_endian_indices() {
+    fn sprite_bone_geometry_decodes_inline_data_and_ignores_stream_data() {
         fn field(name: &str, value: SerializedValue) -> SerializedFieldValue {
             SerializedFieldValue {
                 name: name.to_owned(),
@@ -3384,8 +3384,10 @@ mod tests {
             [10.0, 6.0],
         )
         .unwrap();
-        assert_eq!(streamed_geometry, geometry);
-        assert!(read_sprite_bone_geometry(
+        assert!(streamed_geometry.vertices.is_empty());
+        assert_eq!(streamed_geometry.indices, vec![0, 1, -1]);
+        assert!(streamed_geometry.weights.is_empty());
+        let unresolved_stream_geometry = read_sprite_bone_geometry(
             &streamed_render_data,
             version,
             EndianType::Little,
@@ -3393,7 +3395,8 @@ mod tests {
             2.0,
             [10.0, 6.0],
         )
-        .is_err());
+        .unwrap();
+        assert_eq!(unresolved_stream_geometry, streamed_geometry);
     }
 
     #[test]
