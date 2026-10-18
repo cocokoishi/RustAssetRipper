@@ -1778,6 +1778,95 @@ mod tests {
     }
 
     #[test]
+    fn web_project_export_applies_stored_sprite_texture_group_gate() {
+        let _source_layouts = crate::SourceFactoryLayoutGuard::use_source_factory();
+        let fixture = include_str!("../export/sprite_atlas_project_source_2019_4_fixture.txt");
+        let hex = fixture
+            .lines()
+            .find_map(|line| line.strip_prefix("INPUT_HEX|SpriteAtlasFixture.assets|"))
+            .expect("source fixture includes its SerializedFile input");
+        let source_bytes = hex
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                u8::from_str_radix(std::str::from_utf8(pair).expect("hex is ASCII"), 16)
+                    .expect("fixture hex is valid")
+            })
+            .collect::<Vec<_>>();
+        let directory = test_directory("engine-resource-sprite");
+        let source_path = directory.join("SpriteAtlasFixture.assets");
+        std::fs::write(&source_path, &source_bytes).expect("write source-generated fixture");
+        let source_path_text = source_path.to_string_lossy().into_owned();
+
+        let mut state = state(true);
+        state
+            .load(&[source_path_text])
+            .expect("load source-generated Texture2D, Sprite, and SpriteAtlas");
+        state
+            .set_singleton_data(
+                "EngineResourceData",
+                r#"{"DefaultResources":{"778":{"$type":"Sprite","Name":"PackedSpriteFixture","Texture":"AtlasTextureFixture"}},"ExtraResources":{}}"#,
+            )
+            .expect("store a Sprite key without its required texture-group key");
+        let sprite_only_output = directory.join("project-sprite-only");
+        state
+            .export_unity_project(&sprite_only_output.to_string_lossy(), false)
+            .expect("a Sprite key without a matching texture cache stays on the normal route");
+        let sprite_only_project = sprite_only_output.join("ExportedProject");
+        assert!(sprite_only_project
+            .join("Assets/Sprite/PackedSpriteFixture.asset")
+            .is_file());
+        assert!(
+            std::fs::read_dir(sprite_only_project.join("Assets/Texture2D"))
+                .expect("an uncached Texture2D remains exportable")
+                .next()
+                .is_some()
+        );
+
+        state
+            .set_singleton_data(
+                "EngineResourceData",
+                r#"{"DefaultResources":{"777":{"$type":"Texture2D","Name":"AtlasTextureFixture","Width":64,"Height":48}},"ExtraResources":{}}"#,
+            )
+            .expect("store the SpriteInformationObject texture-group key");
+        let texture_only_output = directory.join("project-texture-only");
+        state
+            .export_unity_project(&texture_only_output.to_string_lossy(), false)
+            .expect("a texture cache hit suppresses unmatched Sprite group members");
+        let texture_only_project = texture_only_output.join("ExportedProject");
+        assert!(!texture_only_project
+            .join("Assets/Sprite/PackedSpriteFixture.asset")
+            .exists());
+        assert!(!texture_only_project
+            .join("Assets/Texture2D/AtlasTextureFixture.png")
+            .exists());
+        assert!(!texture_only_project
+            .join("Assets/Texture2D/AtlasTextureFixture.bmp")
+            .exists());
+
+        state
+            .set_singleton_data(
+                "EngineResourceData",
+                r#"{"DefaultResources":{"777":{"$type":"Texture2D","Name":"AtlasTextureFixture","Width":64,"Height":48},"778":{"$type":"Sprite","Name":"PackedSpriteFixture","Texture":"AtlasTextureFixture"}},"ExtraResources":{}}"#,
+            )
+            .expect("store matching Texture2D and Sprite cache keys");
+        let matching_output = directory.join("project-matching");
+        state
+            .export_unity_project(&matching_output.to_string_lossy(), false)
+            .expect("a matching Sprite key redirects inside its cached texture group");
+        let matching_project = matching_output.join("ExportedProject");
+        assert!(!matching_project
+            .join("Assets/Sprite/PackedSpriteFixture.asset")
+            .exists());
+        assert!(!matching_project
+            .join("Assets/Texture2D/AtlasTextureFixture.png")
+            .exists());
+        assert!(!matching_project
+            .join("Assets/Texture2D/AtlasTextureFixture.bmp")
+            .exists());
+    }
+
+    #[test]
     fn typed_configuration_singletons_update_and_reset_the_live_settings() {
         let mut state = state(false);
         state

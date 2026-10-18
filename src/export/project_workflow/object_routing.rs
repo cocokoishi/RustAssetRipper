@@ -636,26 +636,17 @@ fn predefined_engine_audio_clip_key(root: &SerializedValue) -> Option<(String, i
     Some((name, *channels, *frequency, *length))
 }
 
-/// Resolves a Sprite render-data texture pointer to the name used for the
-/// group's predefined-engine lookup, mirroring the frozen `Cache.Contains(sio.Texture)`
-/// gate.
-///
-/// The outer `None` means "no engine-group redirect applies", which keeps the
-/// sprite's ordinary export: the pointer is unresolvable, the target is not a
-/// Texture2D, or the target texture is not a predefined engine texture once its
-/// name *and* dimensions are considered. `Some(name)` means the whole
-/// `SpriteInformationObject` group redirects, and the sprite's own table entry
-/// is then consulted with that texture name (a null or unreadable name stays
-/// `Some(None)`, preserving the name-only lookup the frozen cache also allows).
-fn resolve_engine_group_texture_name(
+/// Resolves a Sprite render-data texture pointer to the full key consumed by
+/// `PredefinedAssetCache.Contains(ITexture2D)`. The caller checks the appropriate
+/// embedded or stored texture cache before applying any Sprite key.
+fn resolve_engine_group_texture_key(
     field_path: &str,
     file_id: i32,
     path_id: i64,
     source: &WorkspaceObject,
     objects: &ObjectWorkspace,
     reference_graph: &MultiFileReferenceGraph<'_>,
-    unity_version: Option<&str>,
-) -> Result<Option<Option<String>>, Box<dyn Error>> {
+) -> Result<Option<(i32, String, i32, i32)>, Box<dyn Error>> {
     let mut matching_edges = reference_graph
         .references_from_object(source.file_index, source.object_index)
         .filter(|edge| {
@@ -671,9 +662,14 @@ fn resolve_engine_group_texture_name(
     else {
         return Ok(None);
     };
-    if reference_graph.object_class_id(*target_file_index, *target_object_index)
-        != Some(crate::export::res_wiring::TEXTURE2D_CLASS_ID)
-    {
+    let Some(class_id) = reference_graph.object_class_id(*target_file_index, *target_object_index)
+    else {
+        return Ok(None);
+    };
+    if !matches!(
+        class_id,
+        crate::export::res_wiring::TEXTURE2D_CLASS_ID | crate::resources::texture::CUBEMAP_CLASS_ID
+    ) {
         return Ok(None);
     }
     let Some(target) = objects.get(*target_file_index, *target_object_index) else {
@@ -682,16 +678,21 @@ fn resolve_engine_group_texture_name(
     let Ok(payload) = &target.payload else {
         return Ok(None);
     };
-    let Some(name) = predefined_engine_object_name(&payload.root) else {
-        return Ok(None);
+    let (name, width, height) = if class_id == crate::resources::texture::CUBEMAP_CLASS_ID {
+        let Some(key) = predefined_engine_cubemap_key(&payload.root) else {
+            return Ok(None);
+        };
+        key
+    } else {
+        let Some(name) = predefined_engine_object_name(&payload.root) else {
+            return Ok(None);
+        };
+        let Some((width, height)) = predefined_engine_texture_dimensions(&payload.root) else {
+            return Ok(None);
+        };
+        (name, width, height)
     };
-    let Some((width, height)) = predefined_engine_texture_dimensions(&payload.root) else {
-        return Ok(None);
-    };
-    match predefined_engine_texture_target(&name, width, height, unity_version)? {
-        Some(_) => Ok(Some(Some(name))),
-        None => Ok(None),
-    }
+    Ok(Some((class_id, name, width, height)))
 }
 
 fn resolved_material_shader_name(
@@ -1224,46 +1225,103 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
             } else {
                 None
             };
-            let predefined_engine_sprite = if use_embedded_engine_data
-                && source_engine_guid.is_none()
+            let mut sprite_texture_group_cached = false;
+            let predefined_engine_sprite = if source_engine_guid.is_none()
                 && class_id == crate::resources::sprite::SPRITE_CLASS_ID
             {
                 if let Some(payload) = payload {
                     let name = predefined_engine_object_name(&payload.root);
-                    // The frozen `EngineAssetsExporter` redirects a Sprite only through its
-                    // `SpriteInformationObject`: `Cache.Contains(sio.Texture)` decides the whole
-                    // texture group first (its table is keyed by name *and* dimensions), and only
-                    // then is the sprite's own table entry consulted for the redirected identity.
-                    // A sprite whose texture is an ordinary authored texture keeps its ordinary
-                    // export even when its own name and texture name happen to match an engine
-                    // row; only a null texture pointer falls back to a name-only sprite lookup.
-                    // Unreadable render data keeps the ordinary sprite route, so strict sprite
-                    // reads still fail loudly in their own path.
+                    // Frozen EngineAssetsExporter checks the SpriteInformationObject texture
+                    // cache first. A hit redirects the texture and then redirects matching
+                    // Sprites; Sprite cache misses in that group are marked missing and do not
+                    // fall through to standalone Sprite export.
                     let texture_pointer =
                         crate::export::importer_fields::sprite_render_data_texture_pointer(
                             &payload.root,
                         );
-                    let group_texture_name = match texture_pointer {
+                    let group_texture = match texture_pointer {
                         Ok(None) => Some(None),
                         Ok(Some((field_path, file_id, path_id))) => {
-                            resolve_engine_group_texture_name(
+                            resolve_engine_group_texture_key(
                                 &field_path,
                                 file_id,
                                 path_id,
                                 object,
                                 objects,
                                 reference_graph,
-                                file.metadata.prefix.unity_version_text.as_deref(),
                             )?
+                            .map(Some)
                         }
                         Err(_) => None,
                     };
-                    match (name, group_texture_name) {
-                        (Some(name), Some(texture_name)) => predefined_engine_sprite_target(
-                            &name,
-                            texture_name.as_deref(),
-                            file.metadata.prefix.unity_version_text.as_deref(),
-                        )?,
+                    match (group_texture, context.engine_asset_source) {
+                        (Some(None), EngineAssetSource::EmbeddedData) => match name.as_deref() {
+                            Some(name) => predefined_engine_sprite_target(
+                                name,
+                                None,
+                                file.metadata.prefix.unity_version_text.as_deref(),
+                            )?,
+                            None => None,
+                        },
+                        (Some(None), EngineAssetSource::StoredResourceData) => {
+                            name.as_deref().and_then(|name| {
+                                context
+                                    .engine_resource_data
+                                    .and_then(|data| data.sprite_target(name, None))
+                            })
+                        }
+                        (
+                            Some(Some((texture_class_id, texture_name, width, height))),
+                            EngineAssetSource::EmbeddedData,
+                        ) if texture_class_id == crate::export::res_wiring::TEXTURE2D_CLASS_ID => {
+                            if predefined_engine_texture_target(
+                                &texture_name,
+                                width,
+                                height,
+                                file.metadata.prefix.unity_version_text.as_deref(),
+                            )?
+                            .is_some()
+                            {
+                                sprite_texture_group_cached = true;
+                                match name.as_deref() {
+                                    Some(name) => predefined_engine_sprite_target(
+                                        name,
+                                        Some(&texture_name),
+                                        file.metadata.prefix.unity_version_text.as_deref(),
+                                    )?,
+                                    None => None,
+                                }
+                            } else {
+                                None
+                            }
+                        }
+                        (
+                            Some(Some((texture_class_id, texture_name, width, height))),
+                            EngineAssetSource::StoredResourceData,
+                        ) => {
+                            let texture_target = context.engine_resource_data.and_then(|data| {
+                                if texture_class_id == crate::export::res_wiring::TEXTURE2D_CLASS_ID
+                                {
+                                    data.texture_2d_target(&texture_name, width, height)
+                                } else if texture_class_id
+                                    == crate::resources::texture::CUBEMAP_CLASS_ID
+                                {
+                                    data.cubemap_target(&texture_name, width, height)
+                                } else {
+                                    None
+                                }
+                            });
+                            if texture_target.is_some() {
+                                sprite_texture_group_cached = true;
+                                name.as_deref().and_then(|name| {
+                                    context.engine_resource_data.and_then(|data| {
+                                        data.sprite_target(name, Some(&texture_name))
+                                    })
+                                })
+                            } else {
+                                None
+                            }
+                        }
                         _ => None,
                     }
                 } else {
@@ -1405,6 +1463,7 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
             let sprite_subasset = if class_id == crate::resources::sprite::SPRITE_CLASS_ID
                 && !settings_facts.sprite_export_mode_yaml
                 && engine_guid.is_none()
+                && !sprite_texture_group_cached
             {
                 sprite_texture_associations.subasset_for_sprite(file_index, object_index)
             } else {
@@ -1910,7 +1969,15 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
             let texture_file_skipped = class_id == 28
                 && selection.collection_name == "YamlStreamedAssetExportCollection"
                 && texture_lacks_usable_image_data(payload);
-            let (mut route, skip_reason, fallback_reason) = if engine_guid.is_some() {
+            let (mut route, skip_reason, fallback_reason) = if sprite_texture_group_cached
+                && predefined_engine_sprite.is_none()
+            {
+                (
+                        ObjectRoute::Skipped,
+                        "the source SpriteInformationObject texture matched, but this Sprite had no cache entry",
+                        None,
+                    )
+            } else if engine_guid.is_some() {
                 if selection.exporter != "EngineAssetsExporter"
                     || kind != ExportCollectionKind::Redirect
                 {

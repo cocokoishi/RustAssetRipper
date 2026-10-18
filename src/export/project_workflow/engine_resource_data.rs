@@ -8,6 +8,7 @@ use std::fmt;
 pub(super) struct EngineResourceData {
     text_assets: Vec<TextAssetEntry>,
     mesh_assets: Vec<MeshEntry>,
+    sprite_assets: Vec<SpriteEntry>,
     material_assets: Vec<MaterialEntry>,
     shader_assets: Vec<ShaderEntry>,
     texture_2d_assets: Vec<Texture2DEntry>,
@@ -28,6 +29,13 @@ struct MeshEntry {
     name: String,
     vertex_count: i32,
     sub_mesh_count: i32,
+    target: PredefinedEngineAssetTarget,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SpriteEntry {
+    name: String,
+    texture_name: Option<String>,
     target: PredefinedEngineAssetTarget,
 }
 
@@ -114,8 +122,8 @@ struct RawEngineResourceData {
 }
 
 impl EngineResourceData {
-    /// Parses the supported TextAsset, Mesh, Material, Shader, Texture2D, Cubemap, and AudioClip
-    /// subsets of the Mining EngineResourceData model.
+    /// Parses the supported TextAsset, Mesh, Sprite, Material, Shader, Texture2D, Cubemap, and
+    /// AudioClip subsets of the Mining EngineResourceData model.
     ///
     /// A missing, null, malformed, or otherwise non-deserializable nullable value means the
     /// frozen serializer produced `null` and the exporter falls back to embedded TPK data. A
@@ -132,6 +140,7 @@ impl EngineResourceData {
 
         let mut text_assets = Vec::new();
         let mut mesh_assets = Vec::new();
+        let mut sprite_assets = Vec::new();
         let mut material_assets = Vec::new();
         let mut shader_assets = Vec::new();
         let mut texture_2d_assets = Vec::new();
@@ -210,6 +219,22 @@ impl EngineResourceData {
                         name: name.to_owned(),
                         vertex_count,
                         sub_mesh_count,
+                        target: PredefinedEngineAssetTarget { file_id, guid },
+                    });
+                    continue;
+                }
+                if kind == "Sprite" {
+                    let Some(name) = object.get("Name").and_then(Value::as_str) else {
+                        return Ok(None);
+                    };
+                    let texture_name = match object.get("Texture") {
+                        None | Some(Value::Null) => None,
+                        Some(Value::String(texture_name)) => Some(texture_name.clone()),
+                        Some(_) => return Ok(None),
+                    };
+                    sprite_assets.push(SpriteEntry {
+                        name: name.to_owned(),
+                        texture_name,
                         target: PredefinedEngineAssetTarget { file_id, guid },
                     });
                     continue;
@@ -333,10 +358,9 @@ impl EngineResourceData {
                             | "NamedObject"
                             | "MonoBehaviour"
                             | "MonoScript"
-                            | "Sprite"
                     ) {
                         return Err(super::invalid_project(format!(
-                            "stored EngineResourceData contains unsupported {kind} cache entries; only TextAsset, Mesh, Material, Shader, Texture2D, Cubemap, and AudioClip matching is currently wired"
+                            "stored EngineResourceData contains unsupported {kind} cache entries; only TextAsset, Mesh, Sprite, Material, Shader, Texture2D, Cubemap, and AudioClip matching is currently wired"
                         )));
                     }
                     return Ok(None);
@@ -369,6 +393,7 @@ impl EngineResourceData {
         Ok(Some(Self {
             text_assets,
             mesh_assets,
+            sprite_assets,
             material_assets,
             shader_assets,
             texture_2d_assets,
@@ -413,6 +438,18 @@ impl EngineResourceData {
                     && center == [0.0; 3]
                     && extent == [0.0; 3]
             })
+            .map(|entry| entry.target)
+    }
+
+    /// The frozen cache keys Sprites by their name and nullable Texture name.
+    pub(super) fn sprite_target(
+        &self,
+        name: &str,
+        texture_name: Option<&str>,
+    ) -> Option<PredefinedEngineAssetTarget> {
+        self.sprite_assets
+            .iter()
+            .find(|entry| entry.name == name && entry.texture_name.as_deref() == texture_name)
             .map(|entry| entry.target)
     }
 
@@ -558,6 +595,36 @@ mod tests {
             .is_none());
         assert!(data
             .mesh_target("OtherMesh", 0, 0, [0.0; 3], [0.0; 3])
+            .is_none());
+    }
+
+    #[test]
+    fn engine_resource_data_sprite_matches_name_texture_and_resource_identity() {
+        let data = EngineResourceData::parse(Some(
+            r#"{"DefaultResources":{"777":{"$type":"Sprite","Name":"PackedSpriteFixture","Texture":"AtlasTextureFixture"},"778":{"$type":"Sprite","Name":"NullTextureSprite","Texture":null}},"ExtraResources":{"779":{"$type":"Sprite","Name":"ExtraSprite","Texture":"AtlasTextureFixture"}}}"#,
+        ))
+        .expect("Sprite resource entries parse")
+        .expect("valid object selects a stored cache");
+        let target = data
+            .sprite_target("PackedSpriteFixture", Some("AtlasTextureFixture"))
+            .expect("name and nullable Texture name identify the source Sprite");
+        assert_eq!(target.file_id, 777);
+        assert_eq!(target.guid[8..12], 14u32.to_le_bytes());
+        let null_texture_target = data
+            .sprite_target("NullTextureSprite", None)
+            .expect("null Sprite Texture remains part of the cache key");
+        assert_eq!(null_texture_target.file_id, 778);
+        let extra_target = data
+            .sprite_target("ExtraSprite", Some("AtlasTextureFixture"))
+            .expect("ExtraResources Sprites retain their resource identity");
+        assert_eq!(extra_target.file_id, 779);
+        assert_eq!(extra_target.guid[8..12], 15u32.to_le_bytes());
+        assert!(data
+            .sprite_target("PackedSpriteFixture", Some("OtherTexture"))
+            .is_none());
+        assert!(data.sprite_target("PackedSpriteFixture", None).is_none());
+        assert!(data
+            .sprite_target("OtherSprite", Some("AtlasTextureFixture"))
             .is_none());
     }
 
@@ -742,7 +809,7 @@ mod tests {
         ))
         .expect_err("unsupported typed resources must not be silently discarded");
         assert!(error.to_string().contains(
-            "only TextAsset, Mesh, Material, Shader, Texture2D, Cubemap, and AudioClip matching is currently wired"
+            "only TextAsset, Mesh, Sprite, Material, Shader, Texture2D, Cubemap, and AudioClip matching is currently wired"
         ));
     }
 }
