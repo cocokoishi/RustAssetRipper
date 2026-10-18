@@ -613,6 +613,12 @@ fn predefined_engine_texture_dimensions(root: &SerializedValue) -> Option<(i32, 
     Some((*width, *height))
 }
 
+fn predefined_engine_cubemap_key(root: &SerializedValue) -> Option<(String, i32, i32)> {
+    let name = predefined_engine_object_name(root)?;
+    let (width, height) = predefined_engine_texture_dimensions(root)?;
+    Some((name, width, height))
+}
+
 fn predefined_engine_audio_clip_key(root: &SerializedValue) -> Option<(String, i32, i32, f32)> {
     let name = predefined_engine_object_name(root)?;
     let channels = root.unique_field_in_base_chain("m_Channels").ok()??;
@@ -1255,6 +1261,21 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
             } else {
                 None
             };
+            let predefined_engine_cubemap = if context.engine_asset_source
+                == EngineAssetSource::StoredResourceData
+                && source_engine_guid.is_none()
+                && class_id == crate::export::res_wiring::CUBEMAP_CLASS_ID
+            {
+                payload
+                    .and_then(|payload| predefined_engine_cubemap_key(&payload.root))
+                    .and_then(|(name, width, height)| {
+                        context
+                            .engine_resource_data
+                            .and_then(|data| data.cubemap_target(&name, width, height))
+                    })
+            } else {
+                None
+            };
             let predefined_engine_texture = if source_engine_guid.is_none()
                 && class_id == crate::export::res_wiring::TEXTURE2D_CLASS_ID
             {
@@ -1326,6 +1347,7 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                 .or(predefined_engine_material)
                 .or(predefined_engine_sprite)
                 .or(predefined_engine_audio_clip)
+                .or(predefined_engine_cubemap)
                 .or(predefined_engine_texture)
                 .or(predefined_engine_mesh)
                 .or(predefined_engine_text_asset);

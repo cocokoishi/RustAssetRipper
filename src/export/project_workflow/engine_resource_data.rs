@@ -8,6 +8,7 @@ use std::fmt;
 pub(super) struct EngineResourceData {
     text_assets: Vec<TextAssetEntry>,
     texture_2d_assets: Vec<Texture2DEntry>,
+    cubemap_assets: Vec<CubemapEntry>,
     audio_clip_assets: Vec<AudioClipEntry>,
 }
 
@@ -21,6 +22,14 @@ struct TextAssetEntry {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Texture2DEntry {
+    name: String,
+    width: i32,
+    height: i32,
+    target: PredefinedEngineAssetTarget,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CubemapEntry {
     name: String,
     width: i32,
     height: i32,
@@ -80,7 +89,7 @@ struct RawEngineResourceData {
 }
 
 impl EngineResourceData {
-    /// Parses the supported TextAsset, Texture2D, and AudioClip subsets of the Mining
+    /// Parses the supported TextAsset, Texture2D, Cubemap, and AudioClip subsets of the Mining
     /// EngineResourceData model.
     ///
     /// A missing, null, malformed, or otherwise non-deserializable nullable value means the
@@ -98,6 +107,7 @@ impl EngineResourceData {
 
         let mut text_assets = Vec::new();
         let mut texture_2d_assets = Vec::new();
+        let mut cubemap_assets = Vec::new();
         let mut audio_clip_assets = Vec::new();
         for (resources, guid_words) in [
             (
@@ -149,6 +159,32 @@ impl EngineResourceData {
                     });
                     continue;
                 }
+                if kind == "Cubemap" {
+                    let Some(name) = object.get("Name").and_then(Value::as_str) else {
+                        return Ok(None);
+                    };
+                    let Some(width) = object
+                        .get("Width")
+                        .and_then(Value::as_i64)
+                        .and_then(|width| i32::try_from(width).ok())
+                    else {
+                        return Ok(None);
+                    };
+                    let Some(height) = object
+                        .get("Height")
+                        .and_then(Value::as_i64)
+                        .and_then(|height| i32::try_from(height).ok())
+                    else {
+                        return Ok(None);
+                    };
+                    cubemap_assets.push(CubemapEntry {
+                        name: name.to_owned(),
+                        width,
+                        height,
+                        target: PredefinedEngineAssetTarget { file_id, guid },
+                    });
+                    continue;
+                }
                 if kind == "AudioClip" {
                     let Some(name) = object.get("Name").and_then(Value::as_str) else {
                         return Ok(None);
@@ -189,7 +225,6 @@ impl EngineResourceData {
                         kind,
                         "Behaviour"
                             | "Component"
-                            | "Cubemap"
                             | "GameObject"
                             | "NamedObject"
                             | "Material"
@@ -200,7 +235,7 @@ impl EngineResourceData {
                             | "Sprite"
                     ) {
                         return Err(super::invalid_project(format!(
-                            "stored EngineResourceData contains unsupported {kind} cache entries; only TextAsset, Texture2D, and AudioClip matching is currently wired"
+                            "stored EngineResourceData contains unsupported {kind} cache entries; only TextAsset, Texture2D, Cubemap, and AudioClip matching is currently wired"
                         )));
                     }
                     return Ok(None);
@@ -233,6 +268,7 @@ impl EngineResourceData {
         Ok(Some(Self {
             text_assets,
             texture_2d_assets,
+            cubemap_assets,
             audio_clip_assets,
         }))
     }
@@ -261,6 +297,19 @@ impl EngineResourceData {
         height: i32,
     ) -> Option<PredefinedEngineAssetTarget> {
         self.texture_2d_assets
+            .iter()
+            .find(|entry| entry.name == name && entry.width == width && entry.height == height)
+            .map(|entry| entry.target)
+    }
+
+    /// The frozen cache keys Cubemaps by name and dimensions.
+    pub(super) fn cubemap_target(
+        &self,
+        name: &str,
+        width: i32,
+        height: i32,
+    ) -> Option<PredefinedEngineAssetTarget> {
+        self.cubemap_assets
             .iter()
             .find(|entry| entry.name == name && entry.width == width && entry.height == height)
             .map(|entry| entry.target)
@@ -363,6 +412,28 @@ mod tests {
     }
 
     #[test]
+    fn engine_resource_data_cubemap_matches_name_dimensions_and_resource_identity() {
+        let data = EngineResourceData::parse(Some(
+            r#"{"DefaultResources":{"900":{"$type":"Cubemap","Name":"CubeFixture","Width":2,"Height":2}},"ExtraResources":{"700":{"$type":"Cubemap","Name":"CubeFixture","Width":2,"Height":2},"901":{"$type":"Cubemap","Name":"ExtraCubeFixture","Width":4,"Height":4}}}"#,
+        ))
+        .expect("Cubemap resources parse")
+        .expect("valid object selects a stored cache");
+        let target = data
+            .cubemap_target("CubeFixture", 2, 2)
+            .expect("name and dimensions identify the source Cubemap");
+        assert_eq!(target.file_id, 900);
+        assert_eq!(target.guid[8..12], 14u32.to_le_bytes());
+        let extra_target = data
+            .cubemap_target("ExtraCubeFixture", 4, 4)
+            .expect("extra resource matches by name and dimensions");
+        assert_eq!(extra_target.file_id, 901);
+        assert_eq!(extra_target.guid[8..12], 15u32.to_le_bytes());
+        assert!(data.cubemap_target("CubeFixture", 3, 2).is_none());
+        assert!(data.cubemap_target("CubeFixture", 2, 3).is_none());
+        assert!(data.cubemap_target("Other", 2, 2).is_none());
+    }
+
+    #[test]
     fn valid_empty_engine_resource_data_selects_a_custom_empty_cache() {
         assert!(EngineResourceData::parse(Some("{}"))
             .expect("valid empty object parses")
@@ -416,8 +487,8 @@ mod tests {
             r#"{"DefaultResources":{"900":{"$type":"Shader","Name":"Custom"}},"ExtraResources":{}}"#,
         ))
         .expect_err("unsupported typed resources must not be silently discarded");
-        assert!(error
-            .to_string()
-            .contains("only TextAsset, Texture2D, and AudioClip matching is currently wired"));
+        assert!(error.to_string().contains(
+            "only TextAsset, Texture2D, Cubemap, and AudioClip matching is currently wired"
+        ));
     }
 }
