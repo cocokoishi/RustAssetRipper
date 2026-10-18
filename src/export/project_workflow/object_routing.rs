@@ -636,6 +636,8 @@ fn predefined_engine_audio_clip_key(root: &SerializedValue) -> Option<(String, i
     Some((name, *channels, *frequency, *length))
 }
 
+type EngineGroupTextureKey = (i32, String, i32, i32);
+
 /// Resolves a Sprite render-data texture pointer to the full key consumed by
 /// `PredefinedAssetCache.Contains(ITexture2D)`. The caller checks the appropriate
 /// embedded or stored texture cache before applying any Sprite key.
@@ -646,7 +648,7 @@ fn resolve_engine_group_texture_key(
     source: &WorkspaceObject,
     objects: &ObjectWorkspace,
     reference_graph: &MultiFileReferenceGraph<'_>,
-) -> Result<Option<(i32, String, i32, i32)>, Box<dyn Error>> {
+) -> Result<Option<EngineGroupTextureKey>, Box<dyn Error>> {
     let mut matching_edges = reference_graph
         .references_from_object(source.file_index, source.object_index)
         .filter(|edge| {
