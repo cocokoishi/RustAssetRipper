@@ -1238,7 +1238,8 @@
         let target_900_path = output_root.join("Assets/MonoBehaviour/ReferencedRoot.asset");
         let target_900_meta_path =
             output_root.join("Assets/MonoBehaviour/ReferencedRoot.asset.meta");
-        let target_901_path = output_root.join("Assets/MonoBehaviour/AlternateReferencedRoot.asset");
+        let target_901_path =
+            output_root.join("Assets/MonoBehaviour/AlternateReferencedRoot.asset");
         let target_901_meta_path =
             output_root.join("Assets/MonoBehaviour/AlternateReferencedRoot.asset.meta");
         let root_yaml = fs::read_to_string(&root_path).expect("managed root YAML is exported");
@@ -1264,12 +1265,15 @@
         let normalized_root_yaml = root_yaml
             .replace(target_900_guid, "<TARGET_900_GUID>")
             .replace(target_901_guid, "<TARGET_901_GUID>");
+        assert_eq!(source_root_yaml.trim_end(), normalized_root_yaml.trim_end());
         assert_eq!(
-            source_root_yaml.trim_end(),
-            normalized_root_yaml.trim_end()
+            source_target_900_yaml.trim_end(),
+            target_900_yaml.trim_end()
         );
-        assert_eq!(source_target_900_yaml.trim_end(), target_900_yaml.trim_end());
-        assert_eq!(source_target_901_yaml.trim_end(), target_901_yaml.trim_end());
+        assert_eq!(
+            source_target_901_yaml.trim_end(),
+            target_901_yaml.trim_end()
+        );
         assert_eq!(fs::read(&bundle_path).unwrap(), bundled_fixture);
 
         fs::remove_dir_all(&output_root)
