@@ -1,0 +1,12 @@
+# Frozen source AssetRipper export for resolved PPtrs in a managed-reference array inside nested UnityFS.
+VERSION|2019.4.40f1|format=21|platform=StandaloneWin64Player
+RESOLVED|source.bundle/managed.assets|target.assets|source.bundle/target.assets
+INPUT|workspace.bundle|3467|16F6958BFA901FED8D20399BC5A59102263B08532230026F8D425B7DA352B034
+ENTRY|workspace.bundle|source.bundle|3343|D54C7FBC986CDBEBBB62AAC36735606E424D82E7A90BDF2517B86A474928BDD9
+ENTRY|source.bundle|managed.assets|2360|8D5062FB8CB880F4AFF1D3CE27555FAC3772DCE679EC5C730DBCDE1DF6278CBF
+ENTRY|source.bundle|target.assets|824|38B8AC7D07DEBB265099D7D11B757DA72F91B5DAD00130E29BFEE4CF81D586DC
+OBJECT|MonoBehaviour|42|ManagedRoot;MonoBehaviour|900|ReferencedRoot
+POINTERS|- {fileID: 11400000, guid: <TARGET_GUID>, type: 2}|- {fileID: 11400000, guid: <TARGET_GUID>, type: 2}
+GUID_NORMALIZATION|AssetExportCollection.GUID uses UnityGuid.NewGuid; replace only the target meta GUID with <TARGET_GUID> when comparing root YAML.
+ROOT_YAML_FILE|source_nested_resolved_array_reference.asset
+TARGET_YAML_FILE|source_nested_resolved_array_target.asset

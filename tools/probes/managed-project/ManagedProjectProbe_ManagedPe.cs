@@ -231,7 +231,8 @@ ObjectData = audioBody,
 
     internal static byte[] BuildManagedRootFile(
         string targetFileName = "target.assets",
-        bool arrayAssetPointer = false)
+        bool arrayAssetPointer = false,
+        bool repeatedResolvedArrayPointer = false)
     {
         const string versionText = "2019.4.40f1";
         List<byte> payload = [];
@@ -256,10 +257,10 @@ ObjectData = audioBody,
         if (arrayAssetPointer)
         {
             WriteI32(payload, 2); // NodeA.m_Assets array size
-            WriteI32(payload, 1); // NodeA.m_Assets[0].m_FileID -> missing.assets
+            WriteI32(payload, 1); // NodeA.m_Assets[0].m_FileID -> targetFileName
             WriteI64(payload, 900); // NodeA.m_Assets[0].m_PathID
-            WriteI32(payload, 1); // NodeA.m_Assets[1].m_FileID -> missing.assets
-            WriteI64(payload, 901); // NodeA.m_Assets[1].m_PathID
+            WriteI32(payload, 1); // NodeA.m_Assets[1].m_FileID -> targetFileName
+            WriteI64(payload, repeatedResolvedArrayPointer ? 900 : 901); // second array target
         }
         else
         {

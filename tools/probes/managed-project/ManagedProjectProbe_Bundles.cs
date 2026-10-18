@@ -469,19 +469,25 @@ internal static partial class ManagedProjectProbe
 
     internal static int ExportNestedMissingDependency(string inputRootArgument, string outputRootArgument, string rowsArgument)
     {
-        return ExportNestedMissingDependencyCore(inputRootArgument, outputRootArgument, rowsArgument, false);
+        return ExportNestedArrayDependencyCore(inputRootArgument, outputRootArgument, rowsArgument, false, false);
     }
 
     internal static int ExportNestedMissingDependencyArray(string inputRootArgument, string outputRootArgument, string rowsArgument)
     {
-        return ExportNestedMissingDependencyCore(inputRootArgument, outputRootArgument, rowsArgument, true);
+        return ExportNestedArrayDependencyCore(inputRootArgument, outputRootArgument, rowsArgument, true, false);
     }
 
-    private static int ExportNestedMissingDependencyCore(
+    internal static int ExportNestedResolvedDependencyArray(string inputRootArgument, string outputRootArgument, string rowsArgument)
+    {
+        return ExportNestedArrayDependencyCore(inputRootArgument, outputRootArgument, rowsArgument, true, true);
+    }
+
+    private static int ExportNestedArrayDependencyCore(
         string inputRootArgument,
         string outputRootArgument,
         string rowsArgument,
-        bool arrayAssetPointer)
+        bool arrayAssetPointer,
+        bool resolvedArrayPointer)
     {
         string inputRoot = Path.GetFullPath(inputRootArgument);
         string outputRoot = Path.GetFullPath(outputRootArgument);
@@ -497,21 +503,33 @@ internal static partial class ManagedProjectProbe
         Directory.CreateDirectory(outputRoot);
         Directory.CreateDirectory(Path.GetDirectoryName(rowsPath)!);
 
-        byte[] managedFile = BuildManagedRootFile("missing.assets", arrayAssetPointer);
-        byte[] sourceBundle = BuildUnityFs(("managed.assets", managedFile));
+        string externalFileName = resolvedArrayPointer ? "target.assets" : "missing.assets";
+        byte[] managedFile = BuildManagedRootFile(externalFileName, arrayAssetPointer, resolvedArrayPointer);
+        byte[]? targetFile = resolvedArrayPointer ? BuildTargetBehaviourFile() : null;
+        byte[] sourceBundle = targetFile is null
+            ? BuildUnityFs(("managed.assets", managedFile))
+            : BuildUnityFs(("managed.assets", managedFile), ("target.assets", targetFile));
         byte[] outerBundle = BuildUnityFs(("source.bundle", sourceBundle));
         string bundlePath = Path.Combine(inputRoot, "workspace.bundle");
         File.WriteAllBytes(bundlePath, outerBundle);
 
         using StreamWriter rows = new(rowsPath, false, new UTF8Encoding(false)) { NewLine = "\n" };
-        rows.WriteLine(arrayAssetPointer
-            ? "# Frozen source AssetRipper export for missing PPtrs in an array inside a nested collection."
-            : "# Frozen source AssetRipper export for a missing external requested by a nested collection.");
+        rows.WriteLine(resolvedArrayPointer
+            ? "# Frozen source AssetRipper export for resolved PPtrs in an array inside a nested collection."
+            : arrayAssetPointer
+                ? "# Frozen source AssetRipper export for missing PPtrs in an array inside a nested collection."
+                : "# Frozen source AssetRipper export for a missing external requested by a nested collection.");
         rows.WriteLine("VERSION|2019.4.40f1|format=21|platform=StandaloneWin64Player");
-        rows.WriteLine("MISSING|source.bundle/managed.assets|missing.assets");
+        rows.WriteLine(resolvedArrayPointer
+            ? "RESOLVED|source.bundle/managed.assets|target.assets|source.bundle/target.assets"
+            : "MISSING|source.bundle/managed.assets|missing.assets");
         WriteInputRow(rows, bundlePath, outerBundle);
         rows.WriteLine($"ENTRY|workspace.bundle|source.bundle|{sourceBundle.Length}|{Convert.ToHexString(SHA256.HashData(sourceBundle))}");
         rows.WriteLine($"ENTRY|source.bundle|managed.assets|{managedFile.Length}|{Convert.ToHexString(SHA256.HashData(managedFile))}");
+        if (targetFile is not null)
+        {
+            rows.WriteLine($"ENTRY|source.bundle|target.assets|{targetFile.Length}|{Convert.ToHexString(SHA256.HashData(targetFile))}");
+        }
 
         Logger.Add(new ConsoleLogger());
         ExportHandler handler = new(new FullConfiguration());
@@ -521,9 +539,12 @@ internal static partial class ManagedProjectProbe
             .Select(asset => $"{asset.ClassName}|{asset.PathID}|{asset}")
             .Order(StringComparer.Ordinal)
             .ToArray();
-        if (sourceObjects.Length != 1 || !sourceObjects[0].Contains("ManagedRoot", StringComparison.Ordinal))
+        int expectedObjectCount = resolvedArrayPointer ? 2 : 1;
+        if (sourceObjects.Length != expectedObjectCount
+            || !sourceObjects.Any(line => line.Contains("ManagedRoot", StringComparison.Ordinal))
+            || (resolvedArrayPointer && !sourceObjects.Any(line => line.Contains("ReferencedRoot", StringComparison.Ordinal))))
         {
-            throw new InvalidDataException($"AssetRipper loaded an unexpected object set for the missing external: {string.Join(";", sourceObjects)}");
+            throw new InvalidDataException($"AssetRipper loaded an unexpected object set for the nested array dependency: {string.Join(";", sourceObjects)}");
         }
 
         handler.Export(gameData, outputRoot, LocalFileSystem.Instance);
@@ -539,11 +560,30 @@ internal static partial class ManagedProjectProbe
 
         string rootYaml = File.ReadAllText(rootYamlPath);
         string normalizedRootYaml = rootYaml.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
+        string? normalizedTargetYaml = null;
+        string? targetGuid = null;
+        if (resolvedArrayPointer)
+        {
+            string? targetYamlPath = Directory.GetFiles(projectAssets, "*.asset", SearchOption.AllDirectories)
+                .FirstOrDefault(path => File.ReadAllText(path).Contains("m_Name: ReferencedRoot", StringComparison.Ordinal));
+            if (targetYamlPath is null)
+            {
+                throw new InvalidDataException("AssetRipper export omitted the resolved array target");
+            }
+            string targetMetaPath = targetYamlPath + ".meta";
+            targetGuid = File.ReadLines(targetMetaPath)
+                .FirstOrDefault(line => line.StartsWith("guid: ", StringComparison.Ordinal))?[6..]
+                ?? throw new InvalidDataException("resolved array target metadata has no GUID");
+            normalizedTargetYaml = File.ReadAllText(targetYamlPath)
+                .Replace("\r\n", "\n", StringComparison.Ordinal)
+                .Replace('\r', '\n');
+            normalizedRootYaml = normalizedRootYaml.Replace(targetGuid, "<TARGET_GUID>", StringComparison.Ordinal);
+        }
         rows.WriteLine($"OBJECT|{string.Join(";", sourceObjects)}");
         if (arrayAssetPointer)
         {
             string[] pointerLines = normalizedRootYaml.Split('\n')
-                .Where(line => line.Contains("0000000deadbeef15deadf00d0000000", StringComparison.Ordinal))
+                .Where(line => line.TrimStart().StartsWith("- {fileID:", StringComparison.Ordinal))
                 .Select(line => line.Trim())
                 .ToArray();
             if (pointerLines.Length != 2)
@@ -551,7 +591,7 @@ internal static partial class ManagedProjectProbe
                 throw new InvalidDataException($"AssetRipper emitted {pointerLines.Length} missing PPtrs for the two-element managed array");
             }
             rows.WriteLine($"POINTERS|{string.Join("|", pointerLines)}");
-            Console.WriteLine($"source_missing_pointers={string.Join("|", pointerLines)}");
+            Console.WriteLine($"source_array_pointers={string.Join("|", pointerLines)}");
         }
         else
         {
@@ -562,6 +602,11 @@ internal static partial class ManagedProjectProbe
             Console.WriteLine($"source_missing_pointer={pointerLine.Trim()}");
         }
         rows.WriteLine($"ROOT_YAML|{Convert.ToBase64String(Encoding.UTF8.GetBytes(normalizedRootYaml))}");
+        if (normalizedTargetYaml is not null)
+        {
+            rows.WriteLine($"TARGET_YAML|{Convert.ToBase64String(Encoding.UTF8.GetBytes(normalizedTargetYaml))}");
+            rows.WriteLine($"TARGET_GUID|{targetGuid}");
+        }
         Console.WriteLine($"source_objects={string.Join(';', sourceObjects)}");
         Console.WriteLine($"bundle_bytes={outerBundle.Length}");
         return 0;

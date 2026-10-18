@@ -835,6 +835,215 @@
     }
 
     #[test]
+    fn export_project_resolves_nested_array_pointers_to_source_target_objects() {
+        let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
+        let source_fixture =
+            include_str!("export/managed_reference_resolved_nested_array_dependency_fixture.txt");
+        assert!(source_fixture.contains(
+            "RESOLVED|source.bundle/managed.assets|target.assets|source.bundle/target.assets"
+        ));
+        let source_root_yaml = include_str!(
+            "export/managed_reference_project_fixture/source_nested_resolved_array_reference.asset"
+        );
+        let source_target_yaml = include_str!(
+            "export/managed_reference_project_fixture/source_nested_resolved_array_target.asset"
+        );
+        let bundled_fixture = include_bytes!(
+            "export/managed_reference_project_fixture/nested_resolved_array_reference.bundle"
+        );
+
+        let directory = TestInputDirectory::new_root();
+        let bundle_path = directory.join("workspace.bundle");
+        fs::write(&bundle_path, bundled_fixture)
+            .expect("nested resolved-array dependency UnityFS fixture");
+        let input = TestInputDirectory {
+            directory: directory.clone(),
+            files: vec![bundle_path.clone()],
+            subdirectories: Vec::new(),
+        };
+        let (mut filesystem, selected_paths, mut mount_report) =
+            super::mount_project_inputs(std::slice::from_ref(&bundle_path)).unwrap();
+        let mixed = super::MixedGameStructure::from_vfs_paths(
+            &filesystem,
+            &selected_paths,
+            super::MixedGameStructureLimits::default(),
+        )
+        .unwrap();
+        let (workspace, dependency_report) = super::load_workspace_with_mount_report(
+            &mut filesystem,
+            &mixed.serialized_file_inputs,
+            &mixed.registered_files,
+            &mixed.data_paths,
+            super::WorkspaceLoadLimits::default(),
+            &mut mount_report,
+        )
+        .unwrap();
+        assert!(dependency_report.is_complete());
+        let requester_file_index = workspace
+            .files()
+            .iter()
+            .position(|file| file.virtual_path.ends_with("source.bundle/managed.assets"))
+            .expect("nested requester remains inside source.bundle");
+        let target_file_index = workspace
+            .files()
+            .iter()
+            .position(|file| file.virtual_path.ends_with("source.bundle/target.assets"))
+            .expect("resolved target remains inside source.bundle");
+        let node_a_type_index = workspace.files()[requester_file_index]
+            .metadata
+            .reference_types
+            .iter()
+            .position(|reference| reference.class_name.as_deref() == Some("NodeA"))
+            .expect("serialized reference table retains NodeA's TypeTree");
+        let node_a_tree = workspace.files()[requester_file_index]
+            .metadata
+            .reference_types[node_a_type_index]
+            .type_tree
+            .as_ref()
+            .expect("NodeA TypeTree is available");
+        assert!(node_a_tree.nodes.iter().any(|node| {
+            node.type_name.as_deref() == Some("vector") && node.name.as_deref() == Some("m_Assets")
+        }));
+        assert!(node_a_tree.nodes.iter().any(|node| {
+            node.type_name.as_deref() == Some("Array") && node.name.as_deref() == Some("Array")
+        }));
+        assert!(node_a_tree
+            .nodes
+            .iter()
+            .any(|node| node.type_name.as_deref() == Some("PPtr<$Object>")));
+
+        let object_workspace = super::load_object_workspace(
+            &filesystem,
+            &workspace,
+            super::ObjectWorkspaceLimits::default(),
+        )
+        .expect("nested managed registry and target object are decoded");
+        let managed_root = object_workspace
+            .objects_for_file(requester_file_index)
+            .iter()
+            .find(|object| object.path_id == 42)
+            .expect("nested workspace contains ManagedRoot");
+        let managed_root_payload = managed_root
+            .payload
+            .as_ref()
+            .expect("ManagedRoot payload is decoded");
+        let assetripper::serialized_file::object::SerializedValue::ManagedReferenceRegistry(
+            registry,
+        ) = managed_root_payload
+            .root
+            .unique_field("references")
+            .unwrap()
+            .expect("ManagedRoot retains its reference registry")
+        else {
+            panic!("ManagedRoot references field is a managed registry");
+        };
+        assert_eq!(
+            registry.entries[0].reference_type_index,
+            Some(node_a_type_index),
+            "each managed registry entry retains its serialized TypeTree identity"
+        );
+        let target_object_index = object_workspace
+            .objects_for_file(target_file_index)
+            .iter()
+            .position(|object| object.path_id == 900)
+            .expect("target file contains ReferencedRoot at PathID 900");
+        let target_object =
+            &object_workspace.objects_for_file(target_file_index)[target_object_index];
+        assert_eq!(target_object.class_id, Some(114));
+        let loaded_dependency = dependency_report
+            .requests
+            .iter()
+            .find(|request| {
+                request.source_file_index == requester_file_index
+                    && request.dependency_name == "target.assets"
+            })
+            .expect("nested requester records its target.assets dependency");
+        assert!(matches!(
+            &loaded_dependency.outcome,
+            assetripper::serialized_file::workspace::SerializedFileDependencyOutcome::LoadedSerializedFile {
+                file_index,
+                virtual_path,
+            } if *file_index == target_file_index && virtual_path.ends_with("source.bundle/target.assets")
+        ));
+        assert_eq!(
+            workspace.resolve_dependency_collections().unwrap()[requester_file_index][0],
+            Some(target_file_index),
+            "dependency collection lookup and PPtr resolution select the same nested file"
+        );
+
+        let graph = workspace
+            .reference_graph(
+                assetripper::serialized_file::reference_graph::MultiFileReferenceGraphLimits::default(),
+            )
+            .unwrap();
+        let managed_array_pointers = graph
+            .references()
+            .iter()
+            .filter(|reference| {
+                reference.source_file_index == requester_file_index
+                    && reference
+                        .field_path
+                        .starts_with("references.RefIds[0].data.m_Assets[")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(managed_array_pointers.len(), 2);
+        for index in [0, 1] {
+            let expected_path = format!("references.RefIds[0].data.m_Assets[{index}]");
+            let pointer = managed_array_pointers
+                .iter()
+                .find(|reference| reference.field_path == expected_path)
+                .unwrap_or_else(|| {
+                    panic!("managed array pointer path {expected_path} is retained")
+                });
+            assert_eq!(
+                pointer.resolution,
+                assetripper::serialized_file::reference_graph::MultiFilePPtrResolution::Object {
+                    target_file_index,
+                    target_object_index,
+                }
+            );
+        }
+        assert!(graph.is_complete());
+
+        let output_root = directory.join("project-nested-resolved-array-dependency");
+        let mut status = Vec::new();
+        super::export_project_to(
+            std::slice::from_ref(&bundle_path),
+            &output_root,
+            false,
+            &default_export_settings(),
+            &mut status,
+        )
+        .expect("nested array PPtrs export with source target mappings");
+        let status = String::from_utf8(status).expect("export status is UTF-8");
+        assert!(status.contains("2 SerializedFiles"), "{status}");
+        assert!(status.contains("2 objects in 2 asset files"), "{status}");
+        let root_path = output_root.join("Assets/MonoBehaviour/ManagedRoot.asset");
+        let target_path = output_root.join("Assets/MonoBehaviour/ReferencedRoot.asset");
+        let target_meta_path = output_root.join("Assets/MonoBehaviour/ReferencedRoot.asset.meta");
+        let root_yaml = fs::read_to_string(&root_path).expect("managed root YAML is exported");
+        let target_yaml =
+            fs::read_to_string(&target_path).expect("resolved target YAML is exported");
+        let target_meta =
+            fs::read_to_string(&target_meta_path).expect("target metadata is exported");
+        let target_guid = target_meta
+            .lines()
+            .find_map(|line| line.strip_prefix("guid: "))
+            .expect("target metadata has its GUID");
+        assert_eq!(root_yaml.matches(target_guid).count(), 2);
+        assert_eq!(
+            source_root_yaml.trim_end(),
+            root_yaml.replace(target_guid, "<TARGET_GUID>").trim_end()
+        );
+        assert_eq!(source_target_yaml.trim_end(), target_yaml.trim_end());
+        assert_eq!(fs::read(&bundle_path).unwrap(), bundled_fixture);
+
+        fs::remove_dir_all(&output_root)
+            .expect("remove nested resolved array dependency project output");
+        drop(input);
+    }
+
+    #[test]
     fn export_project_saves_managed_assembly_and_maps_script_pointer() {
         let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
         let fixture = include_str!("processing/managed_assembly_saved_project_fixture.txt");
