@@ -70,13 +70,13 @@ struct RawEngineResourceData {
 }
 
 impl EngineResourceData {
-    /// Parses the supported TextAsset subset of the Mining EngineResourceData model.
+    /// Parses the supported TextAsset and Texture2D subsets of the Mining EngineResourceData model.
     ///
     /// A missing, null, malformed, or otherwise non-deserializable nullable value means the
     /// frozen serializer produced `null` and the exporter falls back to embedded TPK data. A
     /// valid empty object remains `Some`, because it selects a custom empty cache and suppresses
-    /// that TPK fallback. Known non-TextAsset object kinds fail loudly until their cache keys are
-    /// implemented; they are never silently dropped.
+    /// that TPK fallback. Known object kinds without a stored-resource cache key fail loudly; they
+    /// are never silently dropped.
     pub(super) fn parse(text: Option<&str>) -> Result<Option<Self>, Box<dyn std::error::Error>> {
         let Some(text) = text.filter(|text| !text.is_empty()) else {
             return Ok(None);
@@ -152,10 +152,9 @@ impl EngineResourceData {
                             | "MonoScript"
                             | "Shader"
                             | "Sprite"
-                            | "Texture2D"
                     ) {
                         return Err(super::invalid_project(format!(
-                            "stored EngineResourceData contains unsupported {kind} cache entries; only TextAsset matching is currently wired"
+                            "stored EngineResourceData contains unsupported {kind} cache entries; only TextAsset and Texture2D matching is currently wired"
                         )));
                     }
                     return Ok(None);
@@ -256,7 +255,7 @@ mod tests {
     #[test]
     fn engine_resource_data_texture2d_matches_name_dimensions_and_resource_identity() {
         let data = EngineResourceData::parse(Some(
-            r#"{"DefaultResources":{"777":{"$type":"Texture2D","Name":"TextureFixture","Width":2,"Height":2}},"ExtraResources":{}}"#,
+            r#"{"DefaultResources":{"777":{"$type":"Texture2D","Name":"TextureFixture","Width":2,"Height":2}},"ExtraResources":{"700":{"$type":"Texture2D","Name":"TextureFixture","Width":2,"Height":2},"778":{"$type":"Texture2D","Name":"ExtraTextureFixture","Width":2,"Height":2}}}"#,
         ))
         .expect("Texture2D resource parses")
         .expect("valid object selects a stored cache");
@@ -265,6 +264,11 @@ mod tests {
             .expect("name and dimensions identify the source Texture2D");
         assert_eq!(target.file_id, 777);
         assert_eq!(target.guid[8..12], 14u32.to_le_bytes());
+        let extra_target = data
+            .texture_2d_target("ExtraTextureFixture", 2, 2)
+            .expect("extra resource matches by name and dimensions");
+        assert_eq!(extra_target.file_id, 778);
+        assert_eq!(extra_target.guid[8..12], 15u32.to_le_bytes());
         assert!(data.texture_2d_target("TextureFixture", 3, 2).is_none());
         assert!(data.texture_2d_target("Other", 2, 2).is_none());
     }
@@ -325,6 +329,6 @@ mod tests {
         .expect_err("unsupported typed resources must not be silently discarded");
         assert!(error
             .to_string()
-            .contains("only TextAsset matching is currently wired"));
+            .contains("only TextAsset and Texture2D matching is currently wired"));
     }
 }
