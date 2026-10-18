@@ -9115,3 +9115,11 @@ These results do not pass the first-phase gate. The reference .NET solution buil
   `EXP-GLB-SCENE-001`, `EXP-GLB-001`, `RES-MODEL-001`, and the primary-content rows remain
   unverified; cross-file MeshFilter references, wider scene/version behavior and other exporters
   are still open. No private samples were used.
+
+## 2026-10-17 - Cross-file Prefab MeshFilter geometry through primary content
+
+- **Gap and frozen behavior.** AssetRipper.Export.Modules.Models/GlbLevelBuilder.cs follows MeshFilter.TryGetMesh, requires a set Mesh and usable MeshData, then attaches it when the GameObject has a Renderer. A Prefab m_Mesh PPtr may target another loaded SerializedFile.
+- **Rust behavior.** src/main_cli_primary_content.rs builds and reuses the workspace MultiFileReferenceGraph; src/export/scene_glb.rs::resolve_one follows the unique resolved m_Mesh edge and decodes the target payload using that file’s Unity version and endianness. Missing and ambiguous targets remain unresolved.
+- **End-to-end evidence.** web::routes::tests::the_primary_content_export_resolves_prefab_mesh_from_an_external_file submits separate synthetic Unity 2019.4 Prefab and Mesh SerializedFiles through /Export/PrimaryContent. It checks attached hierarchy geometry by node and primitive, POSITION Float32 bit patterns, and triangle index order against src/resources/glb_level_mesh_fixture.txt captured from the frozen runtime. No private input was used.
+- **Actions.** Run 39094484787 on 94ea4d0dcd329e9ee22886e9d63d2a5d4e3a0e67 completed successfully across all eight jobs, including Ubuntu and Windows tests/release builds, Ubuntu release-mode tests, both Clippy jobs, formatting, ledger audit, and public-repository hygiene.
+- **Scope remains open.** This verifies one cross-file triangle in Unity 2019.4. Other scene forms, renderers, topology, Unity versions, and broader model/export semantics remain unverified; related rows retain their open statuses.

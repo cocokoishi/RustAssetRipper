@@ -16,7 +16,7 @@ Reference identity: `AssetRipper/` snapshot, version prefix `2.0.0`, `net10.0`, 
 | AssetRipper.Configuration | JSON/string/singleton/list settings persistence machinery | none (values only, in `export/settings.rs`) | 未调查 | Persistence, contexts, and serializers not audited |
 | AssetRipper.DocExtraction | Documentation XML extraction for the dumper chain | none | 未调查 | File list only |
 | AssetRipper.Export.Modules.Audio | FMOD/NAudio decode, AudioClipDecoder/Converter | none | 未调查 | File list only; needed for audio export parity |
-| AssetRipper.Export.Modules.Models | SharpGLTF GLB model/mesh/navmesh/terrain export | none | 未调查 | File list only; needed for model export parity |
+| AssetRipper.Export.Modules.Models | SharpGLTF GLB model/mesh/navmesh/terrain export | `src/resources/glb.rs`, `src/resources/glb_level.rs`, `src/export/scene_glb.rs`, `src/main_cli_primary_content.rs` | 实现中 | Mesh, terrain and navmesh routes are exercised; one Unity 2019.4 cross-file Prefab triangle is compared through primary content. Wider model version and topology coverage remains open |
 | AssetRipper.Export.Modules.Textures | Crunch/FastPng/UnityCrunch/TextureDecoder conversion | none | 未调查 | File list only; needed for texture export parity |
 | AssetRipper.Export.PrimaryContent | Second export pipeline and content extractors | `export/primary_content.rs` (handlers, order, paths) | 实现中 | Planning verified; extractor internals open |
 | AssetRipper.Export.UnityProjects | Main export pipeline, collections, YAML walkers, Meta | `export/*` planners, tables, `meta.rs`, `unity_yaml.rs` | 实现中 | Planning/routing verified; byte-writing pipeline and generated schemas open |
@@ -90,7 +90,7 @@ available for audit. All rows are `已调查` with outputs as the ongoing audit 
 
 ## Summary counts
 
-- Libraries: 0 已验证, 3 已调查, 9 实现中, 10 未调查.
+- Libraries: 0 已验证, 3 已调查, 10 实现中, 9 未调查.
 - Tools: 0 ported, 15 未调查.
 - Tests: 8 executed as evidence.
 - Generators: 6 已调查 (outputs pending).

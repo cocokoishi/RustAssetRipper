@@ -1,26 +1,13 @@
 # RustAssetRipper hand-off — 2026-10-17
 
-## Latest current checkpoint - 2026-10-17 (Prefab mesh geometry through primary content)
+## Latest current checkpoint - 2026-10-17 (cross-file Prefab Mesh geometry through primary content)
 
-- `the_primary_content_export_attaches_prefab_mesh_geometry` drives a synthetic Unity 2019.4
-  Prefab+Mesh SerializedFile through `/Export/PrimaryContent`. It reads back the hierarchy GLB and
-  standalone Mesh GLB, then checks the hierarchy node/primitive and POSITION Float32 bits and index
-  order against `src/resources/glb_level_mesh_fixture.txt` captured from the frozen runtime.
-- The route test initially exposed an invalid fixture: its Mesh TypeTree omitted zero-length vector
-  element nodes and used `Array` instead of `string` for string fields. The fixture now describes the
-  source 2019.4 `BlendShapeData`, bind-pose, bone bounds, baked-mesh, and `StreamingInfo` fields;
-  the GLB parser reads the binary chunk length before its `BIN\0` type. The focused route test passes.
-- Actions run `39092848759` passed on `432dcfd3f38934f92d5b51506d7c2870df963d35`: all eight jobs
-  passed, including Ubuntu/Windows tests and release builds, Ubuntu release-mode tests, both
-  Clippy jobs, changed-line formatting, ledger/repository audit, and public-repository hygiene.
-- The live parity report remains open: 409 rows, 380 verified, 29 non-verified, zero duplicate IDs,
-  and zero malformed rows. `EXP-GLB-SCENE-001`, `EXP-GLB-001`, and the primary-content rows remain
-  unverified; this one same-file Prefab case does not close the other scene/version branches,
-  script production, terrain heatmap, or non-Texture2D image classes.
-- **Next:** resolve cross-file `MeshFilter.m_Mesh` references. Rust
-  `src/export/scene_glb.rs::resolve_one` currently declines every nonzero `file_id`; the frozen
-  `GlbLevelBuilder` reads `meshFilter.MeshP` and can use the resolved asset. Add a two-SerializedFile
-  fixture and compare hierarchy geometry through the same primary-content route.
+- Current revision: 94ea4d0dcd329e9ee22886e9d63d2a5d4e3a0e67 on main, matching origin/main; the worktree was clean at inspection.
+- The frozen `GlbLevelBuilder.Build` reads `MeshFilter.MeshP`; Rust previously declined every nonzero `m_Mesh.file_id`. The route now reuses `MultiFileReferenceGraph` and resolves a unique external Mesh object before decoding it with the target file’s version and endianness.
+- `web::routes::tests::the_primary_content_export_resolves_prefab_mesh_from_an_external_file` sends separate Prefab and Mesh SerializedFiles through `/Export/PrimaryContent`. It compares hierarchy node/primitive, POSITION Float32 bits, and triangle index order against `src/resources/glb_level_mesh_fixture.txt`, captured from the frozen runtime.
+- GitHub Actions run 39094484787 for this revision completed successfully across all eight jobs. The route regression passed; Ubuntu reported 1,935 library and 215 CLI tests, Windows reported 1,937 library and 215 CLI tests, and Ubuntu release-mode tests passed.
+- The live parity report remains open: 409 rows, 380 verified, 29 non-verified, zero duplicate IDs, and zero malformed rows. The GLB/model and primary-content rows stay unverified because this slice covers one Unity 2019.4 triangle only.
+- **Primary next gap:** the CI builds Linux and Windows release binaries but uploads no artifacts; run 39094484787 has zero artifacts. Add a privacy-safe upload of only the Rust release executable for each platform, then use those CI-built binaries for local acceptance.
 
 ## Previous checkpoint - 2026-10-17 (the primary-content export is verified end to end)
 
