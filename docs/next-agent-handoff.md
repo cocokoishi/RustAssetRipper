@@ -2,15 +2,15 @@
 
 ## Latest verified checkpoint
 
-- Latest product-code revision: `e5917a4b09958c5d432665cb81975c4505f490db`.
-- GitHub Actions run [`39159501038`](https://github.com/cocokoishi/RustAssetRipper/actions/runs/39159501038) passed all eight jobs; Windows/Linux release artifacts were uploaded.
-- `OBJ-REF-001` now has a nested-owner differential: a requester inside `source.bundle` resolves duplicate `target.assets` siblings to the first remaining outer-entry match. Rust's PPtr graph, collection dependency table, and project YAML match frozen AssetRipper. See `DIFF-OBJ-REF-NESTED-OWNER-SCOPE-001`.
+- Latest product-code revision: `af9943ad08ce861ea1587627269adec2b6560e43`.
+- GitHub Actions run [`39162781437`](https://github.com/cocokoishi/RustAssetRipper/actions/runs/39162781437) passed all eight jobs and uploaded Windows/Linux release artifacts.
+- `OBJ-REF-001` now has a source-backed nested missing-dependency case: the graph retains `MissingDependency { external_index: 0, path_id: 900 }`, and CI-artifact `export-project` output matches the frozen root YAML byte-for-byte. See `DIFF-OBJ-REF-NESTED-MISSING-DEPENDENCY-001`.
 - The ledger remains 409 rows: 381 verified and 28 non-verified. `OBJ-REF-001` remains in progress; this case does not close the row.
 - Preserve the existing untracked `tools/__pycache__/` directory.
 
 ## Primary next gap
 
-Probe a missing external dependency requested by a SerializedFile inside a nested UnityFS bundle. Compare frozen `Bundle.ResolveCollection`/PPtr/export behavior with Rust's dependency report, unresolved graph edge, and CLI/export result. Pin the requester bundle identity and exact missing name; do not infer parity from output counts.
+Exercise a `PPtr` inside an array-valued managed-reference entry. The exporter now maps concrete `SerializedValue` paths such as `[0]` to TypeTree wildcard paths such as `[*]`, but the current missing-reference fixture only exercises a scalar `m_Asset`. Build a public synthetic input, compare the frozen source graph and full project YAML with the CI-built Rust `export-project` artifact, and keep the parent row open until broader identity coverage is complete.
 
 ## External limitation
 
