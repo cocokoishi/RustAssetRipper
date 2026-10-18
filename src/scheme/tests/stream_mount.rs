@@ -1,4 +1,4 @@
-use super::support::{decode_hex_fixture, webdata_fixture};
+use super::support::{decode_hex_fixture, unityraw_fixture, webdata_fixture};
 use super::*;
 use crate::io::stream::SmartStream;
 use crate::scheme::container_mount::mount_stream_container_tree;
@@ -137,4 +137,57 @@ fn shared_nested_ranges_use_zero_budget_but_wrapper_backing_is_charged() {
         } if requested_total == nested.len() as u64
     ));
     assert_eq!(error.partial_report.mounted_entries, 0);
+}
+
+#[test]
+fn unityraw_routes_nested_webdata_through_the_common_stream_mount() {
+    let payload = b"nested resource bytes";
+    let nested = webdata_fixture(&[("leaf.resS", payload)]);
+    let input = unityraw_fixture("nested.webdata", &nested);
+
+    let mut legacy_filesystem = VirtualFileSystem::new();
+    let expected = SchemeReader::read(&input)
+        .unwrap()
+        .mount_container_tree_with_source_name(
+            &mut legacy_filesystem,
+            Some("/tree"),
+            Some("root.raw"),
+            ContainerMountLimits::default(),
+        )
+        .unwrap();
+
+    let mut filesystem = VirtualFileSystem::new();
+    let source = SmartStream::from_reader(Box::new(Cursor::new(input))).unwrap();
+    let actual = mount_stream_container_tree(
+        &source,
+        FileKind::UnityRaw,
+        Some("root.raw"),
+        &mut filesystem,
+        Some("/tree"),
+        SchemeReaderLimits::default(),
+        ContainerMountLimits {
+            max_active_nested_bytes: 0,
+            ..ContainerMountLimits::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(actual, expected);
+    assert_eq!(actual.container_bundles.len(), 2);
+    assert_eq!(actual.mounted_entries, 1);
+    drop(source);
+    assert_eq!(
+        filesystem
+            .read_all_bytes("/tree/nested.webdata/leaf.resS", payload.len())
+            .unwrap(),
+        payload,
+    );
+    assert_eq!(
+        filesystem
+            .read_all_bytes("/tree/nested.webdata/leaf.resS", payload.len())
+            .unwrap(),
+        legacy_filesystem
+            .read_all_bytes("/tree/nested.webdata/leaf.resS", payload.len())
+            .unwrap(),
+    );
 }
