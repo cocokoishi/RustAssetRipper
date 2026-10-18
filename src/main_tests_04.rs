@@ -2126,7 +2126,9 @@
                 multi_source_path.clone().into_os_string(),
             ];
             super::run(mode_arguments.into_iter()).unwrap_or_else(|error| {
-                panic!("export-project failed for multi-Sprite source fixture in {mode} mode: {error}")
+                panic!(
+                    "export-project failed for multi-Sprite source fixture in {mode} mode: {error}"
+                )
             });
 
             let mut expected_paths = if mode == "Yaml" {
@@ -2195,7 +2197,10 @@
                     } else {
                         actual
                     };
-                    assert_eq!(actual, expected, "Yaml source output differs for {relative_path}");
+                    assert_eq!(
+                        actual, expected,
+                        "Yaml source output differs for {relative_path}"
+                    );
                 }
 
                 let texture_meta = fs::read_to_string(
@@ -2207,9 +2212,9 @@
                     .find_map(|line| line.strip_prefix("guid: "))
                     .expect("multi-Sprite texture meta has its generated GUID");
                 for sprite_name in ["ZetaSpriteFixture", "AlphaSpriteFixture"] {
-                    let sprite_yaml = fs::read_to_string(mode_output_root.join(format!(
-                        "Assets/Sprite/{sprite_name}.asset"
-                    )))
+                    let sprite_yaml = fs::read_to_string(
+                        mode_output_root.join(format!("Assets/Sprite/{sprite_name}.asset")),
+                    )
                     .unwrap();
                     let sprite_texture_guid = sprite_yaml
                         .lines()
@@ -2243,8 +2248,9 @@
                         let relative_path = source_relative_path
                             .strip_prefix("ExportedProject/")
                             .unwrap_or(source_relative_path);
-                        let actual = fs::read(mode_output_root.join(relative_path))
-                            .unwrap_or_else(|error| panic!("could not read {relative_path}: {error}"));
+                        let actual = fs::read(mode_output_root.join(relative_path)).unwrap_or_else(
+                            |error| panic!("could not read {relative_path}: {error}"),
+                        );
                         assert_eq!(
                             normalize(&actual),
                             decode_hex(expected_hex),
@@ -2273,7 +2279,10 @@
                     .expect("TextureImporter has its SpriteSheet");
                 let zeta_sheet = sprite_sheet.find("name: ZetaSpriteFixture").unwrap();
                 let alpha_sheet = sprite_sheet.find("name: AlphaSpriteFixture").unwrap();
-                assert!(zeta_sheet < alpha_sheet, "SpriteSheet preserves first encounter order");
+                assert!(
+                    zeta_sheet < alpha_sheet,
+                    "SpriteSheet preserves first encounter order"
+                );
             }
 
             let texture_path = mode_output_root.join("Assets/Texture2D/AtlasTextureFixture.bmp");
