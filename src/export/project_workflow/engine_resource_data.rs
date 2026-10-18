@@ -12,7 +12,6 @@ pub(super) struct EngineResourceData {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TextAssetEntry {
     name: String,
-    length: i32,
     hash: u128,
     target: PredefinedEngineAssetTarget,
 }
@@ -127,7 +126,7 @@ impl EngineResourceData {
                 let Some(name) = object.get("Name").and_then(Value::as_str) else {
                     return Ok(None);
                 };
-                let Some(length) = object
+                let Some(_source_length) = object
                     .get("Length")
                     .and_then(Value::as_i64)
                     .and_then(|length| i32::try_from(length).ok())
@@ -143,7 +142,6 @@ impl EngineResourceData {
                 };
                 text_assets.push(TextAssetEntry {
                     name: name.to_owned(),
-                    length,
                     hash,
                     target: PredefinedEngineAssetTarget { file_id, guid },
                 });
@@ -152,16 +150,18 @@ impl EngineResourceData {
         Ok(Some(Self { text_assets }))
     }
 
+    /// The frozen cache matches TextAssets by name and MD5; its serialized `Length` field does
+    /// not participate in the lookup key. The source-run regression deliberately stores a
+    /// seven-byte length for an eight-byte payload and still observes the redirect.
     pub(super) fn text_asset_target(
         &self,
         name: &str,
         bytes: &[u8],
     ) -> Option<PredefinedEngineAssetTarget> {
-        let length = i32::try_from(bytes.len()).ok()?;
         let hash = u128::from_le_bytes(crate::export::script_hashing::md5(bytes));
         self.text_assets
             .iter()
-            .find(|entry| entry.name == name && entry.length == length && entry.hash == hash)
+            .find(|entry| entry.name == name && entry.hash == hash)
             .map(|entry| entry.target)
     }
 }
@@ -171,7 +171,7 @@ mod tests {
     use super::EngineResourceData;
 
     #[test]
-    fn engine_resource_data_textasset_uses_source_length_hash_and_resource_identity() {
+    fn engine_resource_data_textasset_matches_name_hash_and_resource_identity() {
         let data = EngineResourceData::parse(Some(
             r#"{"DefaultResources":{"777":{"$type":"TextAsset","Name":"Hero","Length":7,"Hash":130469715505528193672212848297838865176}},"ExtraResources":{}}"#,
         ))
@@ -179,7 +179,7 @@ mod tests {
         .expect("valid object selects a stored cache");
         let target = data
             .text_asset_target("Hero", b"print(1)")
-            .expect("name, byte length and UInt128 MD5 identify the source TextAsset");
+            .expect("name and UInt128 MD5 identify the source TextAsset");
         assert_eq!(target.file_id, 777);
         assert_eq!(target.guid[8..12], 14u32.to_le_bytes());
         assert!(data.text_asset_target("Hero", b"print(2)").is_none());

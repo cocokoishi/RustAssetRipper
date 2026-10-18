@@ -1390,7 +1390,7 @@ mod tests {
             .expect("the custom cache redirects a matching TextAsset");
         assert!(
             !custom_output.join("Assets/TextAsset/Hero.txt").exists(),
-            "a TextAsset matched by name, byte length and UInt128 MD5 is redirected"
+            "a TextAsset matched by name and UInt128 MD5 is redirected"
         );
         assert!(!custom_output
             .join("Assets/TextAsset/Hero.txt.meta")
