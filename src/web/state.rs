@@ -1593,6 +1593,62 @@ mod tests {
     }
 
     #[test]
+    fn web_project_export_redirects_stored_material_engine_resource_data() {
+        let _source_layouts = crate::SourceFactoryLayoutGuard::use_source_factory();
+        let fixture = include_str!("../export/material_engine_resource_project_2019_4_fixture.txt");
+        let hex = fixture
+            .lines()
+            .find_map(|line| line.strip_prefix("INPUT_HEX|MaterialFixture.assets|"))
+            .expect("source fixture includes the Material and Shader SerializedFile");
+        let source_bytes = hex
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                u8::from_str_radix(std::str::from_utf8(pair).expect("hex is ASCII"), 16)
+                    .expect("fixture hex is valid")
+            })
+            .collect::<Vec<_>>();
+        let directory = test_directory("engine-resource-material");
+        let source_path = directory.join("MaterialFixture.assets");
+        std::fs::write(&source_path, &source_bytes).expect("write generated fixture");
+        let source_path_text = source_path.to_string_lossy().into_owned();
+
+        let mut state = state(true);
+        state
+            .load(&[source_path_text])
+            .expect("load source-generated Material and Shader");
+        state
+            .set_singleton_data(
+                "EngineResourceData",
+                r#"{"DefaultResources":{"777":{"$type":"Material","Name":"MaterialFixture","Shader":"ShaderFixture"}},"ExtraResources":{}}"#,
+            )
+            .expect("store source-shaped custom Material resource data");
+
+        let output_root = directory.join("project-custom");
+        let output_root_text = output_root.to_string_lossy().into_owned();
+        state
+            .export_unity_project(&output_root_text, false)
+            .expect("the custom cache redirects a matching Material");
+
+        let project = output_root.join("ExportedProject");
+        assert!(
+            !project.join("Assets/Material/MaterialFixture.mat").exists(),
+            "a Material matched by name and resolved shader name is redirected"
+        );
+        assert!(project.join("Assets/Shader/ShaderFixture.shader").is_file());
+        assert!(project.join("ProjectSettings/ProjectVersion.txt").is_file());
+        assert!(project.join("Packages/manifest.json").is_file());
+        let path_map: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(output_root.join("AuxiliaryFiles/path_id_map.json")).unwrap(),
+        )
+        .expect("path ID map is valid JSON");
+        assert!(path_map["Files"][0]["Assets"]
+            .as_array()
+            .is_some_and(Vec::is_empty));
+        assert_eq!(std::fs::read(&source_path).unwrap(), source_bytes);
+    }
+
+    #[test]
     fn typed_configuration_singletons_update_and_reset_the_live_settings() {
         let mut state = state(false);
         state

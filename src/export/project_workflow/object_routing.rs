@@ -1180,20 +1180,25 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
             } else {
                 None
             };
-            let predefined_engine_material = if use_embedded_engine_data {
-                if let Some(material) = material_view.as_ref() {
-                    let resolved_shader_name =
-                        resolved_material_shader_name(material, object, objects, reference_graph)?;
-                    match (material.name.as_deref(), resolved_shader_name) {
-                        (Some(name), Some(shader_name)) => predefined_engine_material_target(
+            let predefined_engine_material = if let Some(material) = material_view.as_ref() {
+                let resolved_shader_name =
+                    resolved_material_shader_name(material, object, objects, reference_graph)?;
+                match (material.name.as_deref(), resolved_shader_name) {
+                    (Some(name), Some(shader_name)) if use_embedded_engine_data => {
+                        predefined_engine_material_target(
                             name,
                             shader_name.as_deref(),
                             file.metadata.prefix.unity_version_text.as_deref(),
-                        )?,
-                        _ => None,
+                        )?
                     }
-                } else {
-                    None
+                    (Some(name), Some(shader_name))
+                        if context.engine_asset_source == EngineAssetSource::StoredResourceData =>
+                    {
+                        context
+                            .engine_resource_data
+                            .and_then(|data| data.material_target(name, shader_name.as_deref()))
+                    }
+                    _ => None,
                 }
             } else {
                 None

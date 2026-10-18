@@ -7,6 +7,7 @@ use std::fmt;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct EngineResourceData {
     text_assets: Vec<TextAssetEntry>,
+    material_assets: Vec<MaterialEntry>,
     texture_2d_assets: Vec<Texture2DEntry>,
     cubemap_assets: Vec<CubemapEntry>,
     audio_clip_assets: Vec<AudioClipEntry>,
@@ -17,6 +18,13 @@ struct TextAssetEntry {
     name: String,
     length: i32,
     hash: u128,
+    target: PredefinedEngineAssetTarget,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MaterialEntry {
+    name: String,
+    shader_name: Option<String>,
     target: PredefinedEngineAssetTarget,
 }
 
@@ -89,8 +97,8 @@ struct RawEngineResourceData {
 }
 
 impl EngineResourceData {
-    /// Parses the supported TextAsset, Texture2D, Cubemap, and AudioClip subsets of the Mining
-    /// EngineResourceData model.
+    /// Parses the supported TextAsset, Material, Texture2D, Cubemap, and AudioClip subsets of the
+    /// Mining EngineResourceData model.
     ///
     /// A missing, null, malformed, or otherwise non-deserializable nullable value means the
     /// frozen serializer produced `null` and the exporter falls back to embedded TPK data. A
@@ -106,6 +114,7 @@ impl EngineResourceData {
         };
 
         let mut text_assets = Vec::new();
+        let mut material_assets = Vec::new();
         let mut texture_2d_assets = Vec::new();
         let mut cubemap_assets = Vec::new();
         let mut audio_clip_assets = Vec::new();
@@ -133,6 +142,22 @@ impl EngineResourceData {
                 let Some(kind) = object.get("$type").and_then(Value::as_str) else {
                     return Ok(None);
                 };
+                if kind == "Material" {
+                    let Some(name) = object.get("Name").and_then(Value::as_str) else {
+                        return Ok(None);
+                    };
+                    let shader_name = match object.get("Shader") {
+                        None | Some(Value::Null) => None,
+                        Some(Value::String(shader_name)) => Some(shader_name.clone()),
+                        Some(_) => return Ok(None),
+                    };
+                    material_assets.push(MaterialEntry {
+                        name: name.to_owned(),
+                        shader_name,
+                        target: PredefinedEngineAssetTarget { file_id, guid },
+                    });
+                    continue;
+                }
                 if kind == "Texture2D" {
                     let Some(name) = object.get("Name").and_then(Value::as_str) else {
                         return Ok(None);
@@ -227,7 +252,6 @@ impl EngineResourceData {
                             | "Component"
                             | "GameObject"
                             | "NamedObject"
-                            | "Material"
                             | "Mesh"
                             | "MonoBehaviour"
                             | "MonoScript"
@@ -235,7 +259,7 @@ impl EngineResourceData {
                             | "Sprite"
                     ) {
                         return Err(super::invalid_project(format!(
-                            "stored EngineResourceData contains unsupported {kind} cache entries; only TextAsset, Texture2D, Cubemap, and AudioClip matching is currently wired"
+                            "stored EngineResourceData contains unsupported {kind} cache entries; only TextAsset, Material, Texture2D, Cubemap, and AudioClip matching is currently wired"
                         )));
                     }
                     return Ok(None);
@@ -267,6 +291,7 @@ impl EngineResourceData {
         }
         Ok(Some(Self {
             text_assets,
+            material_assets,
             texture_2d_assets,
             cubemap_assets,
             audio_clip_assets,
@@ -286,6 +311,18 @@ impl EngineResourceData {
         self.text_assets
             .iter()
             .find(|entry| entry.name == name && entry.length == length && entry.hash == hash)
+            .map(|entry| entry.target)
+    }
+
+    /// The frozen cache keys Materials by name and the resolved Shader name.
+    pub(super) fn material_target(
+        &self,
+        name: &str,
+        shader_name: Option<&str>,
+    ) -> Option<PredefinedEngineAssetTarget> {
+        self.material_assets
+            .iter()
+            .find(|entry| entry.name == name && entry.shader_name.as_deref() == shader_name)
             .map(|entry| entry.target)
     }
 
@@ -365,6 +402,36 @@ mod tests {
                 .is_none(),
             "the serialized Length participates in the source TextAsset cache key"
         );
+    }
+
+    #[test]
+    fn engine_resource_data_material_matches_name_shader_and_resource_identity() {
+        let data = EngineResourceData::parse(Some(
+            r#"{"DefaultResources":{"777":{"$type":"Material","Name":"MaterialFixture","Shader":"ShaderFixture"},"778":{"$type":"Material","Name":"NullShaderFixture","Shader":null}},"ExtraResources":{"779":{"$type":"Material","Name":"ExtraMaterialFixture","Shader":"ShaderFixture"}}}"#,
+        ))
+        .expect("Material resource entries parse")
+        .expect("valid object selects a stored cache");
+        let target = data
+            .material_target("MaterialFixture", Some("ShaderFixture"))
+            .expect("name and resolved shader name identify the source Material");
+        assert_eq!(target.file_id, 777);
+        assert_eq!(target.guid[8..12], 14u32.to_le_bytes());
+        let null_shader_target = data
+            .material_target("NullShaderFixture", None)
+            .expect("a null Material shader remains part of the cache key");
+        assert_eq!(null_shader_target.file_id, 778);
+        let extra_target = data
+            .material_target("ExtraMaterialFixture", Some("ShaderFixture"))
+            .expect("extra Material entries use their resource identity");
+        assert_eq!(extra_target.file_id, 779);
+        assert_eq!(extra_target.guid[8..12], 15u32.to_le_bytes());
+        assert!(data
+            .material_target("MaterialFixture", Some("OtherShader"))
+            .is_none());
+        assert!(data
+            .material_target("OtherMaterial", Some("ShaderFixture"))
+            .is_none());
+        assert!(data.material_target("MaterialFixture", None).is_none());
     }
 
     #[test]
@@ -488,7 +555,7 @@ mod tests {
         ))
         .expect_err("unsupported typed resources must not be silently discarded");
         assert!(error.to_string().contains(
-            "only TextAsset, Texture2D, Cubemap, and AudioClip matching is currently wired"
+            "only TextAsset, Material, Texture2D, Cubemap, and AudioClip matching is currently wired"
         ));
     }
 }
