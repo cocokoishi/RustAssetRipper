@@ -1,27 +1,26 @@
 # RustAssetRipper hand-off — 2026-10-17
 
-## Latest current checkpoint - 2026-10-17 (Prefab hierarchy GLB route and valid JSON)
+## Latest current checkpoint - 2026-10-17 (Prefab mesh geometry through primary content)
 
-- The GLB writers now emit the `asset.generator` value as a complete JSON string. The frozen
-  `GlbWriter.TryWrite` calls `SceneBuilder.ToGltf2().WriteGLB`; the pinned
-  `AssetRipper.SharpGLTF.Toolkit` 1.0.2 runtime reports the generator string recorded in
-  `src/resources/glb_generator_fixture.txt`. Mesh, terrain, navmesh, and scene outputs are parsed
-  as JSON in regression coverage.
-- `the_primary_content_export_writes_one_prefab_hierarchy_glb` drives a committed synthetic Prefab
-  SerializedFile through `/Export/PrimaryContent`, verifies exactly one `Root.glb`, and checks its
-  JSON, generator, root node, and hierarchy-only shape. This fixture has no MeshFilter or mesh
-  vertex data, so it does not verify positive geometry attachment through the driver.
-- Actions run `39089666411` passed on commit `c315864e19ef0d94c8bed5f35d981bbba709976e`. All eight
-  jobs passed: Ubuntu and Windows workspace tests/release builds, Ubuntu release-mode tests, both
-  Clippy jobs, changed-line formatting, ledger/repository audit, and public-repository hygiene. No
-  local Cargo build or test was run for this unit.
+- `the_primary_content_export_attaches_prefab_mesh_geometry` drives a synthetic Unity 2019.4
+  Prefab+Mesh SerializedFile through `/Export/PrimaryContent`. It reads back the hierarchy GLB and
+  standalone Mesh GLB, then checks the hierarchy node/primitive and POSITION Float32 bits and index
+  order against `src/resources/glb_level_mesh_fixture.txt` captured from the frozen runtime.
+- The route test initially exposed an invalid fixture: its Mesh TypeTree omitted zero-length vector
+  element nodes and used `Array` instead of `string` for string fields. The fixture now describes the
+  source 2019.4 `BlendShapeData`, bind-pose, bone bounds, baked-mesh, and `StreamingInfo` fields;
+  the GLB parser reads the binary chunk length before its `BIN\0` type. The focused route test passes.
+- Actions run `39092848759` passed on `432dcfd3f38934f92d5b51506d7c2870df963d35`: all eight jobs
+  passed, including Ubuntu/Windows tests and release builds, Ubuntu release-mode tests, both
+  Clippy jobs, changed-line formatting, ledger/repository audit, and public-repository hygiene.
 - The live parity report remains open: 409 rows, 380 verified, 29 non-verified, zero duplicate IDs,
   and zero malformed rows. `EXP-GLB-SCENE-001`, `EXP-GLB-001`, and the primary-content rows remain
-  unverified; script production, terrain heatmap, non-Texture2D image classes, and positive mesh
-  geometry through the primary-content driver remain open.
-- **Next:** exercise a positive MeshFilter/Renderer/Mesh geometry path end to end through
-  `/Export/PrimaryContent`, using a synthetic SerializedFile fixture and comparing GLB node,
-  POSITION, and index semantics against the frozen runtime.
+  unverified; this one same-file Prefab case does not close the other scene/version branches,
+  script production, terrain heatmap, or non-Texture2D image classes.
+- **Next:** resolve cross-file `MeshFilter.m_Mesh` references. Rust
+  `src/export/scene_glb.rs::resolve_one` currently declines every nonzero `file_id`; the frozen
+  `GlbLevelBuilder` reads `meshFilter.MeshP` and can use the resolved asset. Add a two-SerializedFile
+  fixture and compare hierarchy geometry through the same primary-content route.
 
 ## Previous checkpoint - 2026-10-17 (the primary-content export is verified end to end)
 

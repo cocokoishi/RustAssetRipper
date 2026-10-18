@@ -9086,3 +9086,32 @@ These results do not pass the first-phase gate. The reference .NET solution buil
   the script producer, terrain heatmap, and the other image classes still need implementation or
   production-route evidence. The live ledger remains 409 rows with 29 non-verified entries, zero
   duplicate IDs, and zero malformed rows.
+## 2026-10-17 - Prefab mesh geometry through primary-content export
+
+- **Gap and frozen behavior.** The frozen
+  `AssetRipper/Source/AssetRipper.Export.Modules.Models/GlbLevelBuilder.cs` reaches a GameObject's
+  `MeshFilter.TryGetMesh`, requires `Mesh.IsSet()` and `TryGetOrMakeMeshData`, then requires a
+  Renderer before attaching geometry. The previous route fixture exercised only hierarchy output;
+  it did not cover a positive MeshFilter/Renderer/Mesh chain.
+- **Rust route and regression.**
+  `web::routes::tests::the_primary_content_export_attaches_prefab_mesh_geometry` submits one
+  synthetic 2019.4 Prefab+Mesh SerializedFile through `/Export/PrimaryContent`. The fixture uses the
+  production-layout Mesh TypeTree and payload, links the MeshFilter and MeshRenderer by local
+  PPtrs, and checks that the route writes the hierarchy and standalone Mesh GLBs. It parses the
+  hierarchy GLB and compares its node, primitive, POSITION Float32 bit patterns, and triangle index
+  order to `src/resources/glb_level_mesh_fixture.txt`, the committed frozen-runtime output.
+- **Fixture defects found and repaired.** The test's production-layout Mesh TypeTree was missing
+  `data` nodes for zero-length vectors and declared string roots as `Array`; the corrected fixture
+  includes the source element structures and `string` nodes. The GLB reader now follows the binary
+  container's length-then-type chunk header order. No production exporter behavior changed in this
+  slice.
+- **Verification.** The focused local command
+  `cargo test --bin assetripper-rs the_primary_content_export_attaches_prefab_mesh_geometry
+  -- --nocapture` passed. Actions run `39092848759` for
+  `432dcfd3f38934f92d5b51506d7c2870df963d35` completed successfully: all eight jobs passed,
+  including both platform test/release jobs, Ubuntu release-mode tests, both Clippy jobs,
+  changed-line formatting, ledger/repository audit, and public-repository hygiene.
+- **Scope remains open.** The evidence covers one same-file Prefab in Unity 2019.4 with one triangle.
+  `EXP-GLB-SCENE-001`, `EXP-GLB-001`, `RES-MODEL-001`, and the primary-content rows remain
+  unverified; cross-file MeshFilter references, wider scene/version behavior and other exporters
+  are still open. No private samples were used.
