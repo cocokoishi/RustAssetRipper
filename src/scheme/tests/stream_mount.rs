@@ -191,3 +191,95 @@ fn unityraw_routes_nested_webdata_through_the_common_stream_mount() {
             .unwrap(),
     );
 }
+
+#[test]
+fn source_unityraw_nested_unityfs_routes_through_the_common_stream_mount() {
+    let row = include_str!("../../io/io_differential_stream_fixture.txt")
+        .lines()
+        .find(|line| line.starts_with("SCHEME|raw_nested_unityfs|"))
+        .expect("frozen source UnityRaw-with-UnityFS row");
+    let fields: Vec<&str> = row.split('|').collect();
+    let input = fields
+        .iter()
+        .find_map(|field| field.strip_prefix("in="))
+        .map(decode_hex_fixture)
+        .expect("source UnityRaw row includes exact input bytes");
+    let expected_tree = fields
+        .iter()
+        .find_map(|field| field.strip_prefix("tree="))
+        .expect("source UnityRaw row includes its frozen mount tree");
+    assert_eq!(
+        expected_tree,
+        "CONTAINER:RawBundleFile:raw_nested_unityfs.bin:res=0:failed=0,CONTAINER:FileStreamBundleFile:nested.bundle:res=1:failed=0,RES:data/file.bin:30313233343536373839"
+    );
+    let expected_payload = decode_hex_fixture("30313233343536373839");
+
+    let mut legacy_filesystem = VirtualFileSystem::new();
+    let expected = SchemeReader::read(&input)
+        .unwrap()
+        .mount_container_tree_with_source_name(
+            &mut legacy_filesystem,
+            Some("/tree"),
+            Some("raw_nested_unityfs.bin"),
+            ContainerMountLimits::default(),
+        )
+        .unwrap();
+
+    let mut filesystem = VirtualFileSystem::new();
+    let source = SmartStream::from_reader(Box::new(Cursor::new(input))).unwrap();
+    let actual = mount_stream_container_tree(
+        &source,
+        FileKind::UnityRaw,
+        Some("raw_nested_unityfs.bin"),
+        &mut filesystem,
+        Some("/tree"),
+        SchemeReaderLimits::default(),
+        ContainerMountLimits {
+            max_active_nested_bytes: 0,
+            ..ContainerMountLimits::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(actual, expected);
+    assert_eq!(actual.container_scopes, ["/tree", "/tree/nested.bundle"]);
+    assert_eq!(actual.container_bundles.len(), 2);
+    assert_eq!(actual.mounted_entries, 1);
+    assert!(actual.failed_entries.is_empty());
+    assert_eq!(actual.resource_files.len(), 1);
+    assert_eq!(
+        actual.resource_files[0].virtual_path,
+        "/tree/nested.bundle/data/file.bin"
+    );
+    drop(source);
+    assert_eq!(
+        filesystem
+            .open_file("/tree/nested.bundle/data/file.bin")
+            .unwrap()
+            .stream_type(),
+        crate::io::stream::SmartStreamType::File
+    );
+    assert_eq!(
+        filesystem
+            .read_all_bytes(
+                "/tree/nested.bundle/data/file.bin",
+                expected_payload.len(),
+            )
+            .unwrap(),
+        expected_payload,
+    );
+    assert_eq!(
+        filesystem
+            .read_all_bytes(
+                "/tree/nested.bundle/data/file.bin",
+                expected_payload.len(),
+            )
+            .unwrap(),
+        legacy_filesystem
+            .read_all_bytes(
+                "/tree/nested.bundle/data/file.bin",
+                expected_payload.len(),
+            )
+            .unwrap(),
+    );
+}
