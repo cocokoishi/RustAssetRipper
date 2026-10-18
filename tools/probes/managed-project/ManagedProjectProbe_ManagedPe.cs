@@ -229,7 +229,9 @@ ObjectData = audioBody,
         return Regex.Replace(text, "(?m)^timeCreated: [0-9]+$", "timeCreated: <TIME>");
     }
 
-    internal static byte[] BuildManagedRootFile(string targetFileName = "target.assets")
+    internal static byte[] BuildManagedRootFile(
+        string targetFileName = "target.assets",
+        bool arrayAssetPointer = false)
     {
         const string versionText = "2019.4.40f1";
         List<byte> payload = [];
@@ -251,8 +253,19 @@ ObjectData = audioBody,
         WriteManagedType(payload, "NodeA");
         WriteI32(payload, 123); // NodeA.m_Value
         WriteI64(payload, 200); // NodeA.m_Link -> NodeB
-        WriteI32(payload, 1);   // NodeA.m_Asset.m_FileID -> target.assets
-        WriteI64(payload, 900); // NodeA.m_Asset.m_PathID
+        if (arrayAssetPointer)
+        {
+            WriteI32(payload, 2); // NodeA.m_Assets array size
+            WriteI32(payload, 1); // NodeA.m_Assets[0].m_FileID -> missing.assets
+            WriteI64(payload, 900); // NodeA.m_Assets[0].m_PathID
+            WriteI32(payload, 1); // NodeA.m_Assets[1].m_FileID -> missing.assets
+            WriteI64(payload, 901); // NodeA.m_Assets[1].m_PathID
+        }
+        else
+        {
+            WriteI32(payload, 1);   // NodeA.m_Asset.m_FileID -> targetFileName
+            WriteI64(payload, 900); // NodeA.m_Asset.m_PathID
+        }
         WriteI64(payload, 200);
         WriteManagedType(payload, "NodeB");
         WriteI32(payload, 456); // NodeB.m_Value
@@ -262,7 +275,9 @@ ObjectData = audioBody,
 
         SerializedType monoBehaviourType = new() { RawTypeID = 114 };
         AssignTree(monoBehaviourType, MonoBehaviourTree());
-        SerializedTypeReference nodeAType = MakeReferenceType("NodeA", NodeTree("NodeA"));
+        SerializedTypeReference nodeAType = MakeReferenceType(
+            "NodeA",
+            arrayAssetPointer ? NodeArrayTree("NodeA") : NodeTree("NodeA"));
         SerializedTypeReference nodeBType = MakeReferenceType("NodeB", NodeTree("NodeB"));
         SerializedFile file = new SerializedFileBuilder
         {
@@ -396,6 +411,23 @@ ObjectData = audioBody,
         ("PPtr<$Object>", "m_Asset", 1, 12, 0),
         ("SInt32", "m_FileID", 2, 4, 0),
         ("SInt64", "m_PathID", 2, 8, 0),
+    ]);
+    }
+
+    internal static TypeTree NodeArrayTree(string name)
+    {
+        return MakeTree(
+        [
+            (name, name, 0, -1, 0),
+        ("int", "m_Value", 1, 4, 0),
+        ("managedReference", "m_Link", 1, -1, 0),
+        ("SInt64", "rid", 2, 8, 0),
+        ("vector", "m_Assets", 1, -1, 0),
+        ("Array", "Array", 2, -1, 0),
+        ("int", "size", 3, 4, 0),
+        ("PPtr<$Object>", "data", 3, 12, 0),
+        ("SInt32", "m_FileID", 4, 4, 0),
+        ("SInt64", "m_PathID", 4, 8, 0),
     ]);
     }
 

@@ -1,0 +1,9 @@
+# Frozen source AssetRipper export for missing PPtrs inside a managed-reference array in a nested collection.
+VERSION|2019.4.40f1|format=21|platform=StandaloneWin64Player
+MISSING|source.bundle/managed.assets|missing.assets
+INPUT|workspace.bundle|2609|CC90A757C71317E368F10AE90C83DA6DA47438B845FC1279338DF83110E723F1
+ENTRY|workspace.bundle|source.bundle|2485|CF76A277E027BC39B39AE64F884A4AA4C1F1597B9BAB0B18A72C7B4E6D62CFB7
+ENTRY|source.bundle|managed.assets|2360|13827F66D41E5E32A726276CE4A134AC367F4B293A99C16012DD0226EBC515F5
+OBJECT|MonoBehaviour|42|ManagedRoot
+POINTERS|- {fileID: 0, guid: 0000000deadbeef15deadf00d0000000, type: 2}|- {fileID: 0, guid: 0000000deadbeef15deadf00d0000000, type: 2}
+ROOT_YAML_FILE|source_nested_missing_external_array_reference.asset

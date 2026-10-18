@@ -469,6 +469,20 @@ internal static partial class ManagedProjectProbe
 
     internal static int ExportNestedMissingDependency(string inputRootArgument, string outputRootArgument, string rowsArgument)
     {
+        return ExportNestedMissingDependencyCore(inputRootArgument, outputRootArgument, rowsArgument, false);
+    }
+
+    internal static int ExportNestedMissingDependencyArray(string inputRootArgument, string outputRootArgument, string rowsArgument)
+    {
+        return ExportNestedMissingDependencyCore(inputRootArgument, outputRootArgument, rowsArgument, true);
+    }
+
+    private static int ExportNestedMissingDependencyCore(
+        string inputRootArgument,
+        string outputRootArgument,
+        string rowsArgument,
+        bool arrayAssetPointer)
+    {
         string inputRoot = Path.GetFullPath(inputRootArgument);
         string outputRoot = Path.GetFullPath(outputRootArgument);
         string rowsPath = Path.GetFullPath(rowsArgument);
@@ -483,14 +497,16 @@ internal static partial class ManagedProjectProbe
         Directory.CreateDirectory(outputRoot);
         Directory.CreateDirectory(Path.GetDirectoryName(rowsPath)!);
 
-        byte[] managedFile = BuildManagedRootFile("missing.assets");
+        byte[] managedFile = BuildManagedRootFile("missing.assets", arrayAssetPointer);
         byte[] sourceBundle = BuildUnityFs(("managed.assets", managedFile));
         byte[] outerBundle = BuildUnityFs(("source.bundle", sourceBundle));
         string bundlePath = Path.Combine(inputRoot, "workspace.bundle");
         File.WriteAllBytes(bundlePath, outerBundle);
 
         using StreamWriter rows = new(rowsPath, false, new UTF8Encoding(false)) { NewLine = "\n" };
-        rows.WriteLine("# Frozen source AssetRipper export for a missing external requested by a nested collection.");
+        rows.WriteLine(arrayAssetPointer
+            ? "# Frozen source AssetRipper export for missing PPtrs in an array inside a nested collection."
+            : "# Frozen source AssetRipper export for a missing external requested by a nested collection.");
         rows.WriteLine("VERSION|2019.4.40f1|format=21|platform=StandaloneWin64Player");
         rows.WriteLine("MISSING|source.bundle/managed.assets|missing.assets");
         WriteInputRow(rows, bundlePath, outerBundle);
@@ -523,14 +539,30 @@ internal static partial class ManagedProjectProbe
 
         string rootYaml = File.ReadAllText(rootYamlPath);
         string normalizedRootYaml = rootYaml.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
-        string pointerLine = normalizedRootYaml.Split('\n')
-            .FirstOrDefault(line => line.Contains("m_Asset:", StringComparison.Ordinal))
-            ?? throw new InvalidDataException("AssetRipper root YAML omitted the managed m_Asset field");
         rows.WriteLine($"OBJECT|{string.Join(";", sourceObjects)}");
-        rows.WriteLine($"POINTER|{pointerLine.Trim()}");
+        if (arrayAssetPointer)
+        {
+            string[] pointerLines = normalizedRootYaml.Split('\n')
+                .Where(line => line.Contains("0000000deadbeef15deadf00d0000000", StringComparison.Ordinal))
+                .Select(line => line.Trim())
+                .ToArray();
+            if (pointerLines.Length != 2)
+            {
+                throw new InvalidDataException($"AssetRipper emitted {pointerLines.Length} missing PPtrs for the two-element managed array");
+            }
+            rows.WriteLine($"POINTERS|{string.Join("|", pointerLines)}");
+            Console.WriteLine($"source_missing_pointers={string.Join("|", pointerLines)}");
+        }
+        else
+        {
+            string pointerLine = normalizedRootYaml.Split('\n')
+                .FirstOrDefault(line => line.Contains("m_Asset:", StringComparison.Ordinal))
+                ?? throw new InvalidDataException("AssetRipper root YAML omitted the managed m_Asset field");
+            rows.WriteLine($"POINTER|{pointerLine.Trim()}");
+            Console.WriteLine($"source_missing_pointer={pointerLine.Trim()}");
+        }
         rows.WriteLine($"ROOT_YAML|{Convert.ToBase64String(Encoding.UTF8.GetBytes(normalizedRootYaml))}");
         Console.WriteLine($"source_objects={string.Join(';', sourceObjects)}");
-        Console.WriteLine($"source_missing_pointer={pointerLine.Trim()}");
         Console.WriteLine($"bundle_bytes={outerBundle.Length}");
         return 0;
     }
