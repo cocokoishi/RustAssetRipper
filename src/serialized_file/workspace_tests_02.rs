@@ -659,6 +659,7 @@
             ("unknown_no_tree", 8),
             ("unreadable_version", 20),
             ("unreadable_no_tree", 8),
+            ("textasset_bad_tail", 25),
         ] {
             let hex = fixture
                 .lines()
@@ -708,10 +709,12 @@
             )
             .unwrap_or_else(|error| panic!("{case}: workspace load failed: {error}"));
 
-            assert!(!workspace.files()[0].reference_graph.is_complete());
-            assert!(!workspace.files()[0]
-                .reference_graph
-                .object_scan_is_complete(0));
+            if case != "textasset_bad_tail" {
+                assert!(!workspace.files()[0].reference_graph.is_complete());
+                assert!(!workspace.files()[0]
+                    .reference_graph
+                    .object_scan_is_complete(0));
+            }
             let objects = ObjectWorkspace::load_from_vfs(
                 &filesystem,
                 &workspace,
@@ -729,11 +732,42 @@
             assert_eq!(object.factory.class_id, expected_class_id);
             assert_eq!(object.factory.class_name, expected_class_name);
             assert_eq!(object.factory.name, expected_name);
-            assert_eq!(
-                object.factory.log_level,
-                crate::processing::asset_factory::FactoryLogLevel::Silent
-            );
-            assert!(object.factory.log_message.is_none());
+            let source_log = fixture
+                .lines()
+                .find(|line| line.starts_with(&format!("SF_READ|{case}|LOG|")));
+            if let Some(source_log) = source_log {
+                let fields: Vec<_> = source_log.splitn(6, '|').collect();
+                assert_eq!(fields[3], "Error");
+                assert_eq!(fields[4], "Import");
+                assert_eq!(
+                    object.factory.log_level,
+                    crate::processing::asset_factory::FactoryLogLevel::Error
+                );
+                let source_message = fields[5];
+                let (source_prefix, source_path) = source_message
+                    .split_once(" Path:")
+                    .expect("source log includes its file-path context");
+                assert_eq!(
+                    source_path, "\u{2420}",
+                    "the fixture marks its trailing path space visibly"
+                );
+                let actual_message = object
+                    .factory
+                    .log_message
+                    .as_deref()
+                    .expect("source error log message is retained");
+                let (actual_prefix, actual_path) = actual_message
+                    .split_once(" Path: ")
+                    .expect("Rust error log includes its file-path context");
+                assert_eq!(actual_prefix, source_prefix);
+                assert_eq!(actual_path, virtual_path.as_str());
+            } else {
+                assert_eq!(
+                    object.factory.log_level,
+                    crate::processing::asset_factory::FactoryLogLevel::Silent
+                );
+                assert!(object.factory.log_message.is_none());
+            }
             assert!(!object.is_fully_materialized());
 
             let error = object.payload.as_ref().unwrap_err();
@@ -745,9 +779,11 @@
                         crate::serialized_file::object::ObjectDecodeErrorKind::FactoryObjectOutcome {
                             class_id,
                             outcome: actual_outcome,
-                            diagnostic: None,
+                            diagnostic,
                             ..
-                        } if *class_id == expected_class_id && actual_outcome == expected_outcome
+                        } if *class_id == expected_class_id
+                            && actual_outcome == expected_outcome
+                            && diagnostic.as_deref() == object.factory.log_message.as_deref()
                     )
             ));
             let file_bytes = filesystem
@@ -763,19 +799,14 @@
                 "{case}: exact raw payload survives ObjectWorkspace"
             );
             assert_eq!(payload_end - payload_start, expected_raw_len);
-            if case != "unreadable_version" {
-                assert_eq!(
+            match case {
+                "unknown_class" | "unknown_no_tree" | "unreadable_no_tree" => assert_eq!(
                     file_bytes.get(payload_start..payload_end),
                     Some([1, 2, 3, 4, 5, 6, 7, 8].as_slice()),
                     "{case}: fixture payload is retained byte-for-byte"
-                );
+                ),
+                _ => {}
             }
-            assert!(
-                !fixture
-                    .lines()
-                    .any(|line| line.starts_with(&format!("SF_READ|{case}|LOG|"))),
-                "{case}: the source UnknownObject fallback is silent"
-            );
         }
     }
 
