@@ -538,7 +538,7 @@ pub(crate) fn make_prefab_mesh_instance_file(
         }
         .to_le_bytes(),
     );
-    mesh_filter.extend_from_slice(&i64::from(MESH_PATH_ID).to_le_bytes());
+    mesh_filter.extend_from_slice(&MESH_PATH_ID.to_le_bytes());
 
     let mut mesh_renderer = Vec::with_capacity(20);
     append_component_pointer(&mut mesh_renderer, GAME_OBJECT_PATH_ID);
