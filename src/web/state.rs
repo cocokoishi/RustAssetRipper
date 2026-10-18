@@ -252,6 +252,12 @@ impl WebState {
                         )
                     });
             }
+            "EngineResourceData" => {
+                let text = normalize_empty_engine_resource_data_json(content)
+                    .unwrap_or_else(|| content.to_owned());
+                *self.singleton_data.get_or_add(key) = text;
+                return Ok(());
+            }
             _ => {
                 *self.singleton_data.get_or_add(key) = content.to_owned();
                 return Ok(());
@@ -1192,6 +1198,40 @@ fn parse_scene_unity_version(
         })
 }
 
+/// Applies the nullable JSON serializer behavior for EngineResourceData values whose resource
+/// dictionaries are empty. Non-empty resource dictionaries need the typed Mining object model and
+/// are left untouched until that model is available to the exporter.
+fn normalize_empty_engine_resource_data_json(content: &str) -> Option<String> {
+    use serde_json::{Map, Value};
+
+    let value = match serde_json::from_str::<Value>(content) {
+        Ok(value) => value,
+        // JsonDataSerializer catches malformed input and resets a nullable value to null.
+        Err(_) => return Some(String::new()),
+    };
+    let Some(object) = value.as_object() else {
+        // A scalar or array cannot deserialize as EngineResourceData and also resets to null.
+        return Some(String::new());
+    };
+
+    let mut normalized = Map::new();
+    for key in ["DefaultResources", "ExtraResources"] {
+        let entries = match object.get(key) {
+            None | Some(Value::Null) => Value::Object(Map::new()),
+            Some(Value::Object(entries)) if entries.is_empty() => Value::Object(Map::new()),
+            Some(Value::Object(_)) => return None,
+            Some(_) => {
+                // A field with the wrong JSON type makes JsonSerializer.Deserialize fail; the
+                // source serializer then creates the nullable default value.
+                return Some(String::new());
+            }
+        };
+        normalized.insert(key.to_owned(), entries);
+    }
+
+    serde_json::to_string_pretty(&Value::Object(normalized)).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::localization::{Messages, FALLBACK_LANGUAGE};
@@ -1247,6 +1287,45 @@ mod tests {
             Some(&String::new())
         );
         assert!(state.lists().is_empty());
+    }
+
+    #[test]
+    fn engine_resource_data_json_matches_nullable_and_empty_dictionary_text() {
+        let mut state = state(false);
+        for content in ["", "null", "not-json", "[]", r#"{"DefaultResources":[]}"#] {
+            state
+                .set_singleton_data("EngineResourceData", content)
+                .expect("nullable JSON settings accept malformed text by resetting to default");
+            assert_eq!(
+                state.singletons().get("EngineResourceData"),
+                Some(&String::new()),
+                "content {content:?} resets to a null EngineResourceData"
+            );
+        }
+
+        let expected = "{\n  \"DefaultResources\": {},\n  \"ExtraResources\": {}\n}".to_owned();
+        for content in [
+            "{}",
+            r#"{"DefaultResources":null,"ExtraResources":{}}"#,
+            r#"{"DefaultResources":{},"ExtraResources":{}}"#,
+        ] {
+            state
+                .set_singleton_data("EngineResourceData", content)
+                .expect("empty resource dictionaries parse");
+            assert_eq!(
+                state.singletons().get("EngineResourceData"),
+                Some(&expected),
+                "content {content:?} serializes with both source dictionary defaults"
+            );
+        }
+
+        state
+            .clear_singleton_data("EngineResourceData")
+            .expect("the typed nullable entry clears");
+        assert_eq!(
+            state.singletons().get("EngineResourceData"),
+            Some(&String::new())
+        );
     }
 
     #[test]
