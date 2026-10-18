@@ -2,15 +2,15 @@
 
 ## Latest verified checkpoint
 
-- Code revision: 85fa01b10199591b2faa6e62ac97ae7605a53be2.
-- GitHub Actions run [39147814501](https://github.com/cocokoishi/RustAssetRipper/actions/runs/39147814501) passed all eight jobs and uploaded Windows/Linux release artifacts.
-- Stored EngineResourceData redirects now cover TextAsset, Texture2D, AudioClip, Cubemap, Material, Shader, Mesh, and Sprite. Sprite routing first checks its texture-group cache key; a texture hit suppresses unmatched Sprite members.
-- The ledger remains 409 rows: 381 verified and 28 non-verified. Phase 1 remains open. PRODUCT-CONFIG-001 stays unverified because generic DataSet serializers, other stored resource kinds, and native file-dialog input remain open.
-- Preserve the existing untracked tools/__pycache__/ directory.
+- Code revision: `7e5cd8a4a98f0214d6aab3f62ac1c3c478496876`.
+- GitHub Actions run [39150098598](https://github.com/cocokoishi/RustAssetRipper/actions/runs/39150098598) passed all eight jobs and uploaded Windows/Linux release artifacts.
+- Normal class-43 Mesh YAML on the public Unity 5.6 fixture now matches the frozen Release GUI byte-for-byte. Both Web exports contain the same 12 relative paths. Focused backfill and processor-override tests passed.
+- The ledger remains 409 rows: 381 verified and 28 non-verified. `RES-MODEL-001` remains open for broader Mesh/model behavior; `PRODUCT-CONFIG-001` remains unverified.
+- Preserve the existing untracked `tools/__pycache__/` directory.
 
 ## Primary next gap
 
-Fix the normal class-43 Mesh YAML omissions already observed on the public Unity 5.6 fixture: m_ObjectHideFlags, m_PrefabParentObject, m_PrefabInternal, and m_MeshOptimized. Trace each field through the frozen Mesh exporter and generated interfaces, then implement the general source rule and compare the complete normalized Mesh YAML. Keep this separate from the stored Mesh cache redirect.
+Fix the reproducible class-28 Texture2D YAML mismatch on the same public Unity 5.6 fixture under `RES-TEXTURE-001`. The Rust output uses `m_Format` and `m_Dimension` and omits source editor fields including the legacy prefab headers and `m_ImageContentsHash`; the frozen output uses `m_TextureFormat` and `m_TextureDimension`. Trace the complete Texture2D path through the frozen editor TypeTree/exporter and Rust conversion before changing code, then compare the whole asset YAML.
 
 ## External limitation
 
