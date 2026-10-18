@@ -43,14 +43,14 @@ use assetripper::export::project_exporter::{
 };
 use assetripper::export::res_wiring::{
     plan_binary_export, plan_resource_export, ResourceExportLimits, ResourceExportRequest,
-    TEXTURE2D_CLASS_ID,
+    TEXTURE2D_CLASS_ID, VIDEO_CLIP_CLASS_ID,
 };
 use assetripper::export::settings_file::SerializedSettingsFile;
 use assetripper::io::platform_structure::PlatformResourceProvider;
 use assetripper::resource::{
     extract_streamed_resource_info, resolve_and_read_streamed_resource_info,
-    InvalidStreamedResourceRange, StreamedResourceContentError, StreamedResourceContentLimits,
-    StreamedResourceContentResolution, StreamedResourceError, StreamedResourceInfo,
+    StreamedResourceContentError, StreamedResourceContentLimits, StreamedResourceContentResolution,
+    StreamedResourceError, StreamedResourceInfo,
 };
 use assetripper::resources::vertex_data_blob::{EndianType, UnityVersion};
 use assetripper::serialized_file::object::SerializedValue;
@@ -155,8 +155,8 @@ pub(super) fn export_loaded_primary_content<W: io::Write>(
     let mut entries: HashMap<u64, ObjectEntry> = HashMap::new();
     let mut facts_by_identity: HashMap<u64, PrimaryContentObjectFacts> = HashMap::new();
     let mut payloads: HashMap<u64, &SerializedValue> = HashMap::new();
-    // Streamed pixel ranges this path resolved, keyed like the payloads: the producer cannot read a
-    // resource file, so the caller that can hands it the bytes.
+    // Streamed payload ranges this path resolved, keyed like the payloads: the producer cannot
+    // read a resource file, so the caller that can hands it the bytes.
     let mut stream_contents: HashMap<u64, Vec<u8>> = HashMap::new();
     let mut undecidable: Vec<UndecidableObject> = Vec::new();
 
@@ -206,33 +206,23 @@ pub(super) fn export_loaded_primary_content<W: io::Write>(
             continue;
         };
 
-        // `ImageTextureExtensions.CheckAssetIntegrity` reads the inline `ImageData` first and only
-        // consults `m_StreamData` when there is none: `Has_StreamData` plus
-        // `StreamedResourceExtensions.CheckIntegrity`, which is true for an empty path without any
-        // lookup, false for a missing resource, a zero-length range or a range outside its file, and
-        // a resolved bounded read otherwise. `m_StreamData` is present in every 2019.4-and-later
-        // tree, so answering from the field's mere presence refused textures whose pixels are
-        // inline; the rule's own answer is what the gate needs.
-        let mut texture_stream: Option<bool> = None;
+        // The primary-content texture and VideoClip handlers both use
+        // `StreamedResourceExtensions.CheckIntegrity`. The texture reaches it only when it has no
+        // inline pixels; the VideoClip always reaches it. Resolve only the descriptor each class
+        // actually declares, and pass the source check plus the bytes to the production exporter.
+        let mut stream_integrity: Option<bool> = None;
         let mut stream_bytes: Option<Vec<u8>> = None;
-        if class_id == TEXTURE2D_CLASS_ID {
-            match texture2d_stream_data(&payload.root) {
-                // The payload has no `m_StreamData` field: the rule's stream branch is never
-                // reached, so the caller has no answer to give it.
-                Ok(None) => {}
-                Ok(Some(info)) => match read_texture_stream(game, file, &info) {
-                    Ok((is_intact, bytes)) => {
-                        texture_stream = Some(is_intact);
-                        stream_bytes = bytes;
-                    }
-                    Err(reason) => {
-                        undecidable.push(UndecidableObject {
-                            name: best_name(&named_name, class_id, None),
-                            reason,
-                        });
-                        continue;
-                    }
-                },
+        let stream_info = match class_id {
+            TEXTURE2D_CLASS_ID => texture2d_stream_data(&payload.root),
+            VIDEO_CLIP_CLASS_ID => video_clip_stream_data(&payload.root),
+            _ => Ok(None),
+        };
+        match stream_info {
+            Ok(Some(info)) => match read_primary_content_stream(game, file, &info) {
+                Ok((is_intact, bytes)) => {
+                    stream_integrity = Some(is_intact);
+                    stream_bytes = bytes;
+                }
                 Err(reason) => {
                     undecidable.push(UndecidableObject {
                         name: best_name(&named_name, class_id, None),
@@ -240,6 +230,14 @@ pub(super) fn export_loaded_primary_content<W: io::Write>(
                     });
                     continue;
                 }
+            },
+            Ok(None) => {}
+            Err(reason) => {
+                undecidable.push(UndecidableObject {
+                    name: best_name(&named_name, class_id, None),
+                    reason,
+                });
+                continue;
             }
         }
 
@@ -249,7 +247,7 @@ pub(super) fn export_loaded_primary_content<W: io::Write>(
             .copied()
             .unwrap_or(MainAssetFacts::NotAHierarchy);
         match object_facts_from_payload(class_id, &payload.root, context, main_asset, || {
-            texture_stream
+            stream_integrity
         }) {
             PrimaryContentObjectFactsOutcome::Known(facts) => {
                 names.push(best_name(&named_name, class_id, None));
@@ -414,8 +412,8 @@ fn produce(
     let Some(kind) = payload_kind(collection.extractor) else {
         return PrimaryContentPayload::Unimplemented;
     };
-    // Only a texture resolves a streamed range on this path, so this is `None` for every other
-    // family, which is what the planners already expect.
+    // Textures and VideoClips resolve their streamed range on this path; all other families pass
+    // `None`, which is what their planners expect.
     let stream_content = stream_contents.get(&collection.primary).map(Vec::as_slice);
 
     match kind {
@@ -563,14 +561,21 @@ fn texture2d_stream_data(root: &SerializedValue) -> Result<Option<StreamedResour
         })
 }
 
-/// Reads a class-28 texture's streamed pixel range: the rule's answer, plus the bytes when intact.
+/// A class-329 `VideoClip`'s decoded `m_ExternalResources`, when present.
+fn video_clip_stream_data(root: &SerializedValue) -> Result<Option<StreamedResourceInfo>, String> {
+    assetripper::resources::video_clip::VideoClipView::from_value(root)
+        .map(|view| view.external_resources)
+        .map_err(|error| format!("its VideoClip resource descriptor is not readable: {error}"))
+}
+
+/// Reads a streamed primary-content range: the rule's answer, plus the bytes when intact.
 ///
 /// The answer is `StreamedResourceExtensions.CheckIntegrity`, which is what
-/// `ImageTextureExtensions.CheckAssetIntegrity` feeds into the `Has_StreamData` branch when the
-/// texture has no inline pixels:
+/// `ImageTextureExtensions.CheckAssetIntegrity` feeds into the `Has_StreamData` branch when a
+/// texture has no inline pixels, and `VideoClipExtensions.CheckIntegrity` always uses it:
 ///
-/// - an empty path is intact without any lookup, and `GetImageData` then yields no bytes, so the
-///   export fails afterwards exactly as the reference's does;
+/// - an empty path is intact without any lookup, but the producer then receives no bytes and
+///   fails the export as the reference's does;
 /// - a missing resource is not intact, which is the reference's `false` for a name its bundle
 ///   cannot resolve, and which sends the object to the JSON fallback;
 /// - a zero-length range and a range outside its file are the reference's own `false` too, so those
@@ -579,7 +584,7 @@ fn texture2d_stream_data(root: &SerializedValue) -> Result<Option<StreamedResour
 ///
 /// Anything else is reported: a lookup or read error the port cannot tell from the reference's
 /// decline must not be silently turned into one.
-fn read_texture_stream(
+fn read_primary_content_stream(
     game: &LoadedGame,
     file: &LoadedSerializedFile,
     info: &StreamedResourceInfo,
@@ -603,10 +608,7 @@ fn read_texture_stream(
         // Only an empty path resolves to `Unset`, and that is answered above.
         Ok(StreamedResourceContentResolution::Unset) => Ok((false, None)),
         Err(StreamedResourceContentError::Read(
-            StreamedResourceError::InvalidRange {
-                reason: InvalidStreamedResourceRange::ZeroLength,
-                ..
-            }
+            StreamedResourceError::InvalidRange { .. }
             | StreamedResourceError::RangeOutsideResource { .. },
         )) => Ok((false, None)),
         Err(error) => Err(format!(

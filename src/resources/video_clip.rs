@@ -32,17 +32,28 @@ impl VideoClipView {
         })
     }
 
-    /// `VideoClipExtensions.CheckIntegrity`: whether the streamed descriptor names a usable
-    /// range.
+    /// The descriptor-local part of `VideoClipExtensions.CheckIntegrity`.
     ///
-    /// The frozen method folds in the collection's resource lookup, so a descriptor that is
-    /// unset, names no path, or reports a zero size is not intact. Resolution against the actual
-    /// resource files happens in [`crate::resource`]; this is the descriptor-level gate the
-    /// browser route uses to decide whether to advertise the tab.
+    /// The frozen method also resolves the resource in the owning collection. Callers that have
+    /// that collection must use the resource resolver and pass its answer to the export gate. This
+    /// method mirrors the checks available from the decoded descriptor alone: an empty path is
+    /// considered intact before the size checks, while a named path needs a non-empty range whose
+    /// end fits the source's signed stream limit.
     pub fn check_integrity(&self) -> bool {
-        self.external_resources
-            .as_ref()
-            .is_some_and(|info| !info.path.is_empty() && info.size > 0)
+        let Some(info) = self.external_resources.as_ref() else {
+            return false;
+        };
+        if !info.is_set() {
+            return true;
+        }
+        let maximum = i64::MAX as u64;
+        let size = u64::from(info.size);
+        size > 0
+            && info.offset <= maximum
+            && info
+                .offset
+                .checked_add(size)
+                .is_some_and(|end| end <= maximum)
     }
 
     /// `VideoClipExtensions.TryGetExtensionFromPath`: the original path's extension, dot
@@ -264,15 +275,17 @@ mod tests {
     }
 
     #[test]
-    fn integrity_needs_a_named_nonempty_range() {
+    fn descriptor_integrity_matches_stream_gate_prechecks() {
         let view = VideoClipView::from_value(&clip("archive:/video", "video.mp4", 64)).unwrap();
         assert!(view.check_integrity());
         // A zero size is not intact, matching the streamed-resource gate.
         let view = VideoClipView::from_value(&clip("archive:/video", "video.mp4", 0)).unwrap();
         assert!(!view.check_integrity());
-        // An empty path is not intact.
+        // The source returns true for an empty path before inspecting its zero size.
         let view = VideoClipView::from_value(&clip("", "video.mp4", 64)).unwrap();
-        assert!(!view.check_integrity());
+        assert!(view.check_integrity());
+        let view = VideoClipView::from_value(&clip("", "video.mp4", 0)).unwrap();
+        assert!(view.check_integrity());
         // An absent descriptor is not intact.
         let view = VideoClipView::from_value(&SerializedValue::Struct(vec![field(
             "m_OriginalPath",
@@ -281,6 +294,22 @@ mod tests {
         .unwrap();
         assert!(!view.check_integrity());
         assert!(view.external_resources.is_none());
+
+        // Named ranges that cannot fit the source's signed stream position are declined.
+        let overflow = SerializedValue::Struct(vec![
+            field(
+                "m_ExternalResources",
+                SerializedValue::Struct(vec![
+                    field("path", text("archive:/video")),
+                    field("offset", SerializedValue::U64(i64::MAX as u64)),
+                    field("size", SerializedValue::U32(1)),
+                ]),
+            ),
+            field("m_OriginalPath", text("video.mp4")),
+        ]);
+        assert!(!VideoClipView::from_value(&overflow)
+            .unwrap()
+            .check_integrity());
     }
 
     #[test]

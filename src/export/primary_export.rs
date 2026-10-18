@@ -420,6 +420,8 @@ const HIERARCHY_REASON: &str =
 /// The reason a non-`Texture2D` image class is undecidable here.
 const IMAGE_CLASS_REASON: &str =
     "this image class's integrity rule is not read on this path; only class-28 Texture2D is";
+/// The reason a VideoClip's source-relevant fields could not be read.
+const VIDEO_CLIP_REASON: &str = "the VideoClip streamed-resource fields could not be read";
 
 /// Derive the claim-dispatch facts for one object from its class and decoded payload.
 ///
@@ -428,10 +430,11 @@ const IMAGE_CLASS_REASON: &str =
 /// per-family *fact*: whether a mesh is set, whether navmesh data has a height-mesh list, whether an
 /// image texture's bytes are reachable, which of the binary extractor's four arms applies.
 ///
-/// `stream_check` answers `m_StreamData`'s collection check for an image texture - `None` when the
-/// texture has no `m_StreamData`, otherwise whether the streamed file resolved. It is a closure
-/// because the file lookup is the caller's, and it is passed straight to the already-ported
-/// [`image_texture_check_asset_integrity`] rather than restating that rule.
+/// `stream_check` answers the collection-aware integrity check for a streamed image texture or
+/// video clip - `None` when that object declares no stream, otherwise whether its resource range
+/// resolved and passed the source bounds checks. It is a closure because the file lookup belongs to
+/// the caller. For textures it is passed to the already-ported
+/// [`image_texture_check_asset_integrity`]; for clips it decides the binary extractor's claim.
 pub fn object_facts_from_payload(
     class_id: i32,
     root: &SerializedValue,
@@ -576,13 +579,17 @@ pub fn object_facts_from_payload(
                 facts.binary = Some(BinaryAssetFacts::MovieTexture { movie_data });
             }
             VIDEO_CLIP_CLASS_ID => {
+                let view = match VideoClipView::from_value(root) {
+                    Ok(view) => view,
+                    Err(_) => {
+                        return PrimaryContentObjectFactsOutcome::Undecidable {
+                            reason: VIDEO_CLIP_REASON,
+                        }
+                    }
+                };
                 facts.binary = Some(BinaryAssetFacts::VideoClip {
-                    intact: VideoClipView::from_value(root)
-                        .map(|view| view.check_integrity())
-                        .unwrap_or(false),
-                    original_path: string_field(root, "m_OriginalPath")
-                        .unwrap_or("")
-                        .to_owned(),
+                    intact: stream_check().unwrap_or_else(|| view.check_integrity()),
+                    original_path: view.original_path.unwrap_or_default(),
                 });
             }
             MONO_SCRIPT_CLASS_ID => facts.is_mono_script = true,
@@ -631,15 +638,6 @@ fn bytes_field_len(root: &SerializedValue, name: &'static str) -> Option<usize> 
         Some(SerializedValue::Array(values)) => Some(values.len()),
         _ => None,
     }
-}
-
-/// A field's UTF-8 text, for the video clip's original path.
-fn string_field<'a>(root: &'a SerializedValue, name: &'static str) -> Option<&'a str> {
-    let bytes = match field(root, name) {
-        Some(SerializedValue::StringBytes(bytes)) | Some(SerializedValue::Bytes(bytes)) => bytes,
-        _ => return None,
-    };
-    std::str::from_utf8(bytes).ok()
 }
 
 #[cfg(test)]

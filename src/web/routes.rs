@@ -1520,6 +1520,96 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
     }
 
+    /// `PRODUCT-PRIMARY-CONTENT-EXTRACTORS-001`: VideoClip bytes come from its resource range.
+    ///
+    /// The frozen binary extractor admits a VideoClip through the collection-aware streamed
+    /// integrity rule, then writes `GetContent()` using the original-path extension. A resolved
+    /// range must therefore reach the `.mp4` producer, while a missing resource, zero-length range
+    /// or range beyond the resource must decline to the JSON extractor.
+    #[test]
+    fn the_primary_content_export_reads_video_clip_resource_ranges() {
+        use crate::tests::make_video_clip_file;
+
+        const RESOURCE_PATH: &str = "video.resS";
+        const VIDEO_BYTES: &[u8] = b"source video bytes from resource";
+        let video_size = u32::try_from(VIDEO_BYTES.len()).expect("the fixture size fits");
+        let directory =
+            PathBuf::from("target/primary-content-video-e2e").join(std::process::id().to_string());
+        std::fs::create_dir_all(&directory).expect("the probe directory is created");
+        let _layouts = crate::SourceFactoryLayoutGuard::use_source_factory();
+
+        let export_case = |case: &str, resource: Option<&[u8]>, size: u32| {
+            let case_directory = directory.join(case);
+            std::fs::create_dir_all(&case_directory).expect("the case directory is created");
+            let asset_input = case_directory.join("video.assets");
+            std::fs::write(
+                &asset_input,
+                make_video_clip_file("Assets/movie.mp4", RESOURCE_PATH, size),
+            )
+            .expect("the VideoClip is written");
+            let mut inputs = vec![asset_input.to_string_lossy().into_owned()];
+            if let Some(bytes) = resource {
+                let resource_input = case_directory.join(RESOURCE_PATH);
+                std::fs::write(&resource_input, bytes).expect("the resource is written");
+                inputs.push(resource_input.to_string_lossy().into_owned());
+            }
+
+            let mut export_state = state();
+            export_state.load(&inputs).expect("the probe inputs load");
+            assert!(export_state.is_loaded());
+            let export_root = case_directory.join("primary-content");
+            let submitted = export_root.to_string_lossy().replace('\\', "/");
+            let response = dispatch(
+                &mut export_state,
+                &request_with_body(
+                    "/Export/PrimaryContent",
+                    &format!("Path={submitted}&ConfirmDelete=true"),
+                ),
+            );
+            assert_eq!(response.status(), 302);
+            let log = export_state.take_log().join("\n");
+            let mut files: Vec<(PathBuf, Vec<u8>)> = Vec::new();
+            collect_export_files(&export_root, &mut files);
+            (log, files)
+        };
+
+        let (log, files) = export_case("resolved", Some(VIDEO_BYTES), video_size);
+        assert!(log.contains("Wrote 1 primary-content files to"), "{log}");
+        assert!(!log.contains("could not be decided"), "{log}");
+        assert!(!log.contains("collections failed:"), "{log}");
+        assert_eq!(files.len(), 1, "{log}");
+        assert_eq!(
+            files[0].0.extension().and_then(|value| value.to_str()),
+            Some("mp4"),
+            "{log}"
+        );
+        assert_eq!(files[0].1, VIDEO_BYTES);
+
+        for (case, resource, size) in [
+            ("missing", None, video_size),
+            ("zero-length", Some(VIDEO_BYTES), 0),
+            ("out-of-range", Some(&b"short"[..]), video_size),
+        ] {
+            let (log, files) = export_case(case, resource, size);
+            assert!(log.contains("Wrote 1 primary-content files to"), "{log}");
+            assert!(!log.contains("could not be decided"), "{log}");
+            assert!(!log.contains("collections failed:"), "{log}");
+            assert_eq!(files.len(), 1, "{log}");
+            assert_eq!(
+                files[0].0.extension().and_then(|value| value.to_str()),
+                Some("json"),
+                "{case}: {log}"
+            );
+            assert!(
+                String::from_utf8_lossy(&files[0].1).contains("TestVideo"),
+                "{case}: {:?}",
+                files[0].1
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
     /// Every file under an export root, in no particular order.
     fn collect_export_files(root: &std::path::Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
         for entry in std::fs::read_dir(root).expect("the export root is readable") {
