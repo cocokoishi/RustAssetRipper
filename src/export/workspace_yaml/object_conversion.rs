@@ -2493,9 +2493,11 @@ const CLASS_EDITOR_FIELD_DELTAS: &[ClassEditorFieldDelta] = &[
 
 /// Applies the class-specific editor-layout delta for the document's class, if
 /// any is declared. Insertions skip fields already present and skip versions
-/// outside their proven list; removals drop release-only fields the editor
-/// layout omits. Other classes select no completion. MonoBehaviour documents
-/// are excluded by the caller.
+/// outside their proven list. The Mesh optimization fields also take the value
+/// forced by `EditorFormatProcessor`, even when serialized data had another
+/// value; removals drop release-only fields the editor layout omits. Other
+/// classes select no completion. MonoBehaviour documents are excluded by the
+/// caller.
 pub(super) fn apply_class_editor_field_backfill(
     document: &mut UnityYamlDocument,
     class_id: i32,
@@ -2521,10 +2523,15 @@ pub(super) fn apply_class_editor_field_backfill(
         return;
     };
     for insert in delta.inserts {
-        if yaml_field_index(fields, insert.name).is_some() {
+        if !insert.versions.is_empty() && !insert.versions.contains(&(major, minor)) {
             continue;
         }
-        if !insert.versions.is_empty() && !insert.versions.contains(&(major, minor)) {
+        if let Some(index) = yaml_field_index(fields, insert.name) {
+            if class_id == 43
+                && matches!(insert.name, "m_MeshOptimized" | "m_MeshOptimizationFlags")
+            {
+                fields[index].1 = insert.value.node();
+            }
             continue;
         }
         let position = match yaml_field_index(fields, insert.after) {

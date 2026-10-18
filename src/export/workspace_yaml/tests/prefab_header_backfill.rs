@@ -475,6 +475,30 @@ fn mesh_unity_5_6_backfill_emits_legacy_headers_and_optimized_flag() {
 }
 
 #[test]
+fn mesh_editor_processor_overwrites_existing_optimization_values() {
+    let mut legacy_body = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    legacy_body
+        .insert_field(
+            "m_MeshOptimized",
+            UnityYamlNode::scalar(UnityYamlScalar::Boolean(false)),
+        )
+        .unwrap();
+    let mut legacy_document = UnityYamlDocument::object(43, 55, "Mesh", legacy_body, false)
+        .expect("test legacy Mesh document builds");
+    apply_class_editor_field_backfill(&mut legacy_document, 43, 5, 6);
+    assert!(render(&legacy_document).contains("m_MeshOptimized: 1"));
+
+    let mut current_body = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
+    current_body
+        .insert_field("m_MeshOptimizationFlags", signed(0))
+        .unwrap();
+    let mut current_document = UnityYamlDocument::object(43, 56, "Mesh", current_body, false)
+        .expect("test current Mesh document builds");
+    apply_class_editor_field_backfill(&mut current_document, 43, 2019, 4);
+    assert!(render(&current_document).contains("m_MeshOptimizationFlags: -1"));
+}
+
+#[test]
 fn mesh_optimization_flags_replace_optimizer_flag_on_2019_4() {
     let mut body = UnityYamlNode::mapping(UnityYamlMappingStyle::Block);
     body.insert_field("m_MeshMetrics", signed(0)).unwrap();
