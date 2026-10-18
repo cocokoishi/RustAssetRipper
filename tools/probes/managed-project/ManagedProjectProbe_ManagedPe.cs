@@ -232,7 +232,8 @@ ObjectData = audioBody,
     internal static byte[] BuildManagedRootFile(
         string targetFileName = "target.assets",
         bool arrayAssetPointer = false,
-        bool repeatedResolvedArrayPointer = false)
+        bool repeatedResolvedArrayPointer = false,
+        string? secondTargetFileName = null)
     {
         const string versionText = "2019.4.40f1";
         List<byte> payload = [];
@@ -259,7 +260,7 @@ ObjectData = audioBody,
             WriteI32(payload, 2); // NodeA.m_Assets array size
             WriteI32(payload, 1); // NodeA.m_Assets[0].m_FileID -> targetFileName
             WriteI64(payload, 900); // NodeA.m_Assets[0].m_PathID
-            WriteI32(payload, 1); // NodeA.m_Assets[1].m_FileID -> targetFileName
+            WriteI32(payload, secondTargetFileName is null ? 1 : 2); // NodeA.m_Assets[1].m_FileID
             WriteI64(payload, repeatedResolvedArrayPointer ? 900 : 901); // second array target
         }
         else
@@ -280,7 +281,7 @@ ObjectData = audioBody,
             "NodeA",
             arrayAssetPointer ? NodeArrayTree("NodeA") : NodeTree("NodeA"));
         SerializedTypeReference nodeBType = MakeReferenceType("NodeB", NodeTree("NodeB"));
-        SerializedFile file = new SerializedFileBuilder
+        SerializedFileBuilder builder = new()
         {
             Generation = FormatVersion.StoresTypeDependencies,
             Version = UnityVersion.Parse(versionText),
@@ -289,26 +290,31 @@ ObjectData = audioBody,
             HasTypeTree = true,
             Types = { monoBehaviourType },
             RefTypes = { nodeAType, nodeBType },
-            Dependencies =
+        };
+        builder.Dependencies.Add(new FileIdentifier
         {
-            new FileIdentifier
+            AssetPath = targetFileName,
+            PathNameOrigin = targetFileName,
+            PathName = targetFileName,
+            Type = AssetType.Serialized,
+        });
+        if (secondTargetFileName is not null)
+        {
+            builder.Dependencies.Add(new FileIdentifier
             {
-                AssetPath = targetFileName,
-                PathNameOrigin = targetFileName,
-                PathName = targetFileName,
+                AssetPath = secondTargetFileName,
+                PathNameOrigin = secondTargetFileName,
+                PathName = secondTargetFileName,
                 Type = AssetType.Serialized,
-            },
-        },
-            Objects =
+            });
+        }
+        builder.Objects.Add(new ObjectInfo(monoBehaviourType)
         {
-            new ObjectInfo(monoBehaviourType)
-            {
-                FileID = 42,
-                TypeID = 114,
-                ObjectData = payload.ToArray(),
-            },
-        },
-        }.Build();
+            FileID = 42,
+            TypeID = 114,
+            ObjectData = payload.ToArray(),
+        });
+        SerializedFile file = builder.Build();
         file.FilePath = "managed.assets";
         return file.ToByteArray();
     }

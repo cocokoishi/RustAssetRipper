@@ -1,0 +1,16 @@
+# Frozen source AssetRipper export for resolved array PPtrs routed to separate nested files.
+VERSION|2019.4.40f1|format=21|platform=StandaloneWin64Player
+DISTINCT_FILE_RESOLVED|source.bundle/managed.assets|first-target.assets|first.bundle/first-target.assets|900|second-target.assets|second.bundle/second-target.assets|901
+INPUT|workspace.bundle|4673|5E4930BBF43E982D346D096DF99851981D9E5EC0994DBD456A9D7DF3297D79FC
+ENTRY|workspace.bundle|source.bundle|2565|718F4FD3C49FD6D88352F37A376C9721D8CBAB9CBA13F184E16E3479B35C630D
+ENTRY|workspace.bundle|first.bundle|954|EE14587B7D884B24DAA7655FE0CC555D18082AE086C68D2904F4B65C4BC2231E
+ENTRY|workspace.bundle|second.bundle|963|15D922F542789377432F9F280748F1E4C9F8766302EB6D647AD247ACDC6F79CE
+ENTRY|source.bundle|managed.assets|2440|E0D7BD1A93149BC736E9D5502750F615CC5B1FC31B211B6DFCC95BE188733D65
+ENTRY|first.bundle|first-target.assets|824|38B8AC7D07DEBB265099D7D11B757DA72F91B5DAD00130E29BFEE4CF81D586DC
+ENTRY|second.bundle|second-target.assets|832|BF2E022322E63456FEB5E9C4AAEE10B9B1AD790F875E6676DEEE2A57740426CE
+OBJECT|MonoBehaviour|42|ManagedRoot;MonoBehaviour|900|ReferencedRoot;MonoBehaviour|901|AlternateReferencedRoot
+POINTERS|- {fileID: 11400000, guid: <TARGET_900_GUID>, type: 2}|- {fileID: 11400000, guid: <TARGET_901_GUID>, type: 2}
+ROOT_YAML_FILE|source_nested_separate_resolved_array_reference.asset
+TARGET_900_YAML_FILE|source_nested_separate_resolved_array_target_900.asset
+TARGET_901_YAML_FILE|source_nested_separate_resolved_array_target_901.asset
+GUID_NORMALIZATION|AssetExportCollection.GUID uses UnityGuid.NewGuid; replace the target meta GUID for PathID 900 with <TARGET_900_GUID> and the target meta GUID for PathID 901 with <TARGET_901_GUID> when comparing root YAML.

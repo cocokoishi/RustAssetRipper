@@ -328,6 +328,16 @@ if (args.Length > 0 && args[0] == "export-nested-distinct-resolved-dependency-ar
     return ExportNestedDistinctResolvedDependencyArray(args[1], args[2], args[3]);
 }
 
+if (args.Length > 0 && args[0] == "export-nested-separate-resolved-dependency-array")
+{
+    if (args.Length != 4)
+    {
+        Console.Error.WriteLine("usage: managed-project export-nested-separate-resolved-dependency-array <input-root> <output-root> <rows-file>");
+        return 2;
+    }
+    return ExportNestedSeparateResolvedDependencyArray(args[1], args[2], args[3]);
+}
+
 if (args.Length > 0 && args[0] == "export-empty-script")
 {
     if (args.Length != 4)

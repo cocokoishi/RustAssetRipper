@@ -487,13 +487,19 @@ internal static partial class ManagedProjectProbe
         return ExportNestedArrayDependencyCore(inputRootArgument, outputRootArgument, rowsArgument, true, true, true);
     }
 
+    internal static int ExportNestedSeparateResolvedDependencyArray(string inputRootArgument, string outputRootArgument, string rowsArgument)
+    {
+        return ExportNestedArrayDependencyCore(inputRootArgument, outputRootArgument, rowsArgument, true, true, true, true);
+    }
+
     private static int ExportNestedArrayDependencyCore(
         string inputRootArgument,
         string outputRootArgument,
         string rowsArgument,
         bool arrayAssetPointer,
         bool resolvedArrayPointer,
-        bool distinctResolvedArrayTargets = false)
+        bool distinctResolvedArrayTargets = false,
+        bool separateResolvedArrayFiles = false)
     {
         string inputRoot = Path.GetFullPath(inputRootArgument);
         string outputRoot = Path.GetFullPath(outputRootArgument);
@@ -509,44 +515,86 @@ internal static partial class ManagedProjectProbe
         Directory.CreateDirectory(outputRoot);
         Directory.CreateDirectory(Path.GetDirectoryName(rowsPath)!);
 
-        string externalFileName = resolvedArrayPointer ? "target.assets" : "missing.assets";
+        if (separateResolvedArrayFiles && (!resolvedArrayPointer || !distinctResolvedArrayTargets))
+        {
+            throw new ArgumentException("Separate target files require distinct resolved array targets");
+        }
+        string externalFileName = !resolvedArrayPointer
+            ? "missing.assets"
+            : separateResolvedArrayFiles
+                ? "first-target.assets"
+                : "target.assets";
+        string secondExternalFileName = "second-target.assets";
         byte[] managedFile = BuildManagedRootFile(
             externalFileName,
             arrayAssetPointer,
-            resolvedArrayPointer && !distinctResolvedArrayTargets);
+            resolvedArrayPointer && !distinctResolvedArrayTargets,
+            separateResolvedArrayFiles ? secondExternalFileName : null);
         byte[]? targetFile = resolvedArrayPointer
-            ? distinctResolvedArrayTargets
+            ? separateResolvedArrayFiles
+                ? BuildTargetBehaviourFileWithObjects(externalFileName, (900, "ReferencedRoot", 789))
+                : distinctResolvedArrayTargets
                 ? BuildTargetBehaviourFileWithObjects(
                     "target.assets",
                     (900, "ReferencedRoot", 789),
                     (901, "AlternateReferencedRoot", 456))
                 : BuildTargetBehaviourFile()
             : null;
-        byte[] sourceBundle = targetFile is null
+        byte[]? secondTargetFile = separateResolvedArrayFiles
+            ? BuildTargetBehaviourFileWithObjects(secondExternalFileName, (901, "AlternateReferencedRoot", 456))
+            : null;
+        byte[] sourceBundle = separateResolvedArrayFiles
             ? BuildUnityFs(("managed.assets", managedFile))
-            : BuildUnityFs(("managed.assets", managedFile), ("target.assets", targetFile));
-        byte[] outerBundle = BuildUnityFs(("source.bundle", sourceBundle));
+            : targetFile is null
+                ? BuildUnityFs(("managed.assets", managedFile))
+                : BuildUnityFs(("managed.assets", managedFile), ("target.assets", targetFile));
+        byte[]? firstBundle = separateResolvedArrayFiles
+            ? BuildUnityFs((externalFileName, targetFile!))
+            : null;
+        byte[]? secondBundle = separateResolvedArrayFiles
+            ? BuildUnityFs((secondExternalFileName, secondTargetFile!))
+            : null;
+        byte[] outerBundle = separateResolvedArrayFiles
+            ? BuildUnityFs(
+                ("source.bundle", sourceBundle),
+                ("first.bundle", firstBundle!),
+                ("second.bundle", secondBundle!))
+            : BuildUnityFs(("source.bundle", sourceBundle));
         string bundlePath = Path.Combine(inputRoot, "workspace.bundle");
         File.WriteAllBytes(bundlePath, outerBundle);
 
         using StreamWriter rows = new(rowsPath, false, new UTF8Encoding(false)) { NewLine = "\n" };
-        rows.WriteLine(distinctResolvedArrayTargets
-            ? "# Frozen source AssetRipper export for distinct resolved PPtrs in an array inside a nested collection."
+        rows.WriteLine(separateResolvedArrayFiles
+            ? "# Frozen source AssetRipper export for resolved array PPtrs routed to separate nested files."
+            : distinctResolvedArrayTargets
+                ? "# Frozen source AssetRipper export for distinct resolved PPtrs in an array inside a nested collection."
             : resolvedArrayPointer
                 ? "# Frozen source AssetRipper export for resolved PPtrs in an array inside a nested collection."
             : arrayAssetPointer
                 ? "# Frozen source AssetRipper export for missing PPtrs in an array inside a nested collection."
                 : "# Frozen source AssetRipper export for a missing external requested by a nested collection.");
         rows.WriteLine("VERSION|2019.4.40f1|format=21|platform=StandaloneWin64Player");
-        rows.WriteLine(distinctResolvedArrayTargets
-            ? "DISTINCT_RESOLVED|source.bundle/managed.assets|target.assets|source.bundle/target.assets|900|901"
+        rows.WriteLine(separateResolvedArrayFiles
+            ? "DISTINCT_FILE_RESOLVED|source.bundle/managed.assets|first-target.assets|first.bundle/first-target.assets|900|second-target.assets|second.bundle/second-target.assets|901"
+            : distinctResolvedArrayTargets
+                ? "DISTINCT_RESOLVED|source.bundle/managed.assets|target.assets|source.bundle/target.assets|900|901"
             : resolvedArrayPointer
                 ? "RESOLVED|source.bundle/managed.assets|target.assets|source.bundle/target.assets"
             : "MISSING|source.bundle/managed.assets|missing.assets");
         WriteInputRow(rows, bundlePath, outerBundle);
         rows.WriteLine($"ENTRY|workspace.bundle|source.bundle|{sourceBundle.Length}|{Convert.ToHexString(SHA256.HashData(sourceBundle))}");
+        if (separateResolvedArrayFiles)
+        {
+            rows.WriteLine($"ENTRY|workspace.bundle|first.bundle|{firstBundle!.Length}|{Convert.ToHexString(SHA256.HashData(firstBundle))}");
+            rows.WriteLine($"ENTRY|workspace.bundle|second.bundle|{secondBundle!.Length}|{Convert.ToHexString(SHA256.HashData(secondBundle))}");
+        }
         rows.WriteLine($"ENTRY|source.bundle|managed.assets|{managedFile.Length}|{Convert.ToHexString(SHA256.HashData(managedFile))}");
-        if (targetFile is not null)
+        if (separateResolvedArrayFiles)
+        {
+            rows.WriteLine($"ENTRY|first.bundle|first-target.assets|{targetFile!.Length}|{Convert.ToHexString(SHA256.HashData(targetFile))}");
+            rows.WriteLine($"ENTRY|second.bundle|second-target.assets|{secondTargetFile!.Length}|{Convert.ToHexString(SHA256.HashData(secondTargetFile))}");
+        }
+        else if (targetFile is not null)
         {
             rows.WriteLine($"ENTRY|source.bundle|target.assets|{targetFile.Length}|{Convert.ToHexString(SHA256.HashData(targetFile))}");
         }
