@@ -8,6 +8,7 @@ use std::fmt;
 pub(super) struct EngineResourceData {
     text_assets: Vec<TextAssetEntry>,
     texture_2d_assets: Vec<Texture2DEntry>,
+    audio_clip_assets: Vec<AudioClipEntry>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -23,6 +24,15 @@ struct Texture2DEntry {
     name: String,
     width: i32,
     height: i32,
+    target: PredefinedEngineAssetTarget,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AudioClipEntry {
+    name: String,
+    channels: i32,
+    frequency: i32,
+    length_bits: u32,
     target: PredefinedEngineAssetTarget,
 }
 
@@ -70,7 +80,8 @@ struct RawEngineResourceData {
 }
 
 impl EngineResourceData {
-    /// Parses the supported TextAsset and Texture2D subsets of the Mining EngineResourceData model.
+    /// Parses the supported TextAsset, Texture2D, and AudioClip subsets of the Mining
+    /// EngineResourceData model.
     ///
     /// A missing, null, malformed, or otherwise non-deserializable nullable value means the
     /// frozen serializer produced `null` and the exporter falls back to embedded TPK data. A
@@ -87,6 +98,7 @@ impl EngineResourceData {
 
         let mut text_assets = Vec::new();
         let mut texture_2d_assets = Vec::new();
+        let mut audio_clip_assets = Vec::new();
         for (resources, guid_words) in [
             (
                 raw.default_resources.unwrap_or_default(),
@@ -137,11 +149,45 @@ impl EngineResourceData {
                     });
                     continue;
                 }
+                if kind == "AudioClip" {
+                    let Some(name) = object.get("Name").and_then(Value::as_str) else {
+                        return Ok(None);
+                    };
+                    let Some(channels) = object
+                        .get("Channels")
+                        .and_then(Value::as_i64)
+                        .and_then(|channels| i32::try_from(channels).ok())
+                    else {
+                        return Ok(None);
+                    };
+                    let Some(frequency) = object
+                        .get("Frequency")
+                        .and_then(Value::as_i64)
+                        .and_then(|frequency| i32::try_from(frequency).ok())
+                    else {
+                        return Ok(None);
+                    };
+                    let Some(length) = object
+                        .get("Length")
+                        .and_then(Value::as_f64)
+                        .map(|length| length as f32)
+                        .filter(|length| length.is_finite())
+                    else {
+                        return Ok(None);
+                    };
+                    audio_clip_assets.push(AudioClipEntry {
+                        name: name.to_owned(),
+                        channels,
+                        frequency,
+                        length_bits: length.to_bits(),
+                        target: PredefinedEngineAssetTarget { file_id, guid },
+                    });
+                    continue;
+                }
                 if kind != "TextAsset" {
                     if matches!(
                         kind,
-                        "AudioClip"
-                            | "Behaviour"
+                        "Behaviour"
                             | "Component"
                             | "Cubemap"
                             | "GameObject"
@@ -154,7 +200,7 @@ impl EngineResourceData {
                             | "Sprite"
                     ) {
                         return Err(super::invalid_project(format!(
-                            "stored EngineResourceData contains unsupported {kind} cache entries; only TextAsset and Texture2D matching is currently wired"
+                            "stored EngineResourceData contains unsupported {kind} cache entries; only TextAsset, Texture2D, and AudioClip matching is currently wired"
                         )));
                     }
                     return Ok(None);
@@ -187,6 +233,7 @@ impl EngineResourceData {
         Ok(Some(Self {
             text_assets,
             texture_2d_assets,
+            audio_clip_assets,
         }))
     }
 
@@ -216,6 +263,25 @@ impl EngineResourceData {
         self.texture_2d_assets
             .iter()
             .find(|entry| entry.name == name && entry.width == width && entry.height == height)
+            .map(|entry| entry.target)
+    }
+
+    /// The frozen cache keys AudioClips by name, channel count, frequency, and float length.
+    pub(super) fn audio_clip_target(
+        &self,
+        name: &str,
+        channels: i32,
+        frequency: i32,
+        length: f32,
+    ) -> Option<PredefinedEngineAssetTarget> {
+        self.audio_clip_assets
+            .iter()
+            .find(|entry| {
+                entry.name == name
+                    && entry.channels == channels
+                    && entry.frequency == frequency
+                    && f32::from_bits(entry.length_bits) == length
+            })
             .map(|entry| entry.target)
     }
 }
@@ -274,6 +340,29 @@ mod tests {
     }
 
     #[test]
+    fn engine_resource_data_audioclip_matches_name_metadata_and_resource_identity() {
+        let data = EngineResourceData::parse(Some(
+            r#"{"DefaultResources":{"900":{"$type":"AudioClip","Name":"AudioFixture","Channels":0,"Frequency":0,"Length":0.0}},"ExtraResources":{"700":{"$type":"AudioClip","Name":"AudioFixture","Channels":0,"Frequency":0,"Length":0.0},"901":{"$type":"AudioClip","Name":"ExtraAudioFixture","Channels":2,"Frequency":44100,"Length":1.25}}}"#,
+        ))
+        .expect("AudioClip resources parse")
+        .expect("valid object selects a stored cache");
+        let target = data
+            .audio_clip_target("AudioFixture", 0, 0, 0.0)
+            .expect("name and audio metadata identify the source AudioClip");
+        assert_eq!(target.file_id, 900);
+        assert_eq!(target.guid[8..12], 14u32.to_le_bytes());
+        let extra_target = data
+            .audio_clip_target("ExtraAudioFixture", 2, 44100, 1.25)
+            .expect("extra resource matches by name and audio metadata");
+        assert_eq!(extra_target.file_id, 901);
+        assert_eq!(extra_target.guid[8..12], 15u32.to_le_bytes());
+        assert!(data.audio_clip_target("AudioFixture", 1, 0, 0.0).is_none());
+        assert!(data.audio_clip_target("AudioFixture", 0, 1, 0.0).is_none());
+        assert!(data.audio_clip_target("AudioFixture", 0, 0, 0.1).is_none());
+        assert!(data.audio_clip_target("Other", 0, 0, 0.0).is_none());
+    }
+
+    #[test]
     fn valid_empty_engine_resource_data_selects_a_custom_empty_cache() {
         assert!(EngineResourceData::parse(Some("{}"))
             .expect("valid empty object parses")
@@ -329,6 +418,6 @@ mod tests {
         .expect_err("unsupported typed resources must not be silently discarded");
         assert!(error
             .to_string()
-            .contains("only TextAsset and Texture2D matching is currently wired"));
+            .contains("only TextAsset, Texture2D, and AudioClip matching is currently wired"));
     }
 }

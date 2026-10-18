@@ -1473,6 +1473,71 @@ mod tests {
     }
 
     #[test]
+    fn web_project_export_redirects_stored_audioclip_engine_resource_data() {
+        let _source_layouts = crate::SourceFactoryLayoutGuard::use_source_factory();
+        let fixture = include_str!("../export/audio_project_stream_source_2019_4_fixture.txt");
+
+        fn fixture_bytes(fixture: &str, prefix: &str) -> Vec<u8> {
+            let hex = fixture
+                .lines()
+                .find_map(|line| line.strip_prefix(prefix))
+                .unwrap_or_else(|| panic!("AudioClip fixture is missing {prefix}"));
+            hex.as_bytes()
+                .chunks_exact(2)
+                .map(|pair| {
+                    u8::from_str_radix(std::str::from_utf8(pair).expect("hex is ASCII"), 16)
+                        .expect("fixture hex is valid")
+                })
+                .collect()
+        }
+
+        let source_bytes = fixture_bytes(fixture, "INPUT_HEX|AudioFixture.assets|");
+        let resource_bytes = fixture_bytes(fixture, "INPUT_HEX|AudioFixture.resS|");
+        let directory = test_directory("engine-resource-audio-clip");
+        let input_root = directory.join("audio-input");
+        std::fs::create_dir_all(&input_root).expect("create AudioClip fixture directory");
+        let source_path = input_root.join("AudioFixture.assets");
+        let resource_path = input_root.join("AudioFixture.resS");
+        std::fs::write(&source_path, &source_bytes).expect("write generated AudioClip fixture");
+        std::fs::write(&resource_path, &resource_bytes).expect("write generated resource sidecar");
+
+        let input_root_text = input_root.to_string_lossy().into_owned();
+        let mut state = state(true);
+        state
+            .load(&[input_root_text])
+            .expect("load source-generated AudioClip and its resource sidecar");
+        state
+            .set_singleton_data(
+                "EngineResourceData",
+                r#"{"DefaultResources":{"777":{"$type":"AudioClip","Name":"AudioFixture","Channels":0,"Frequency":0,"Length":0.0}},"ExtraResources":{}}"#,
+            )
+            .expect("store source-shaped custom AudioClip resource data");
+
+        let output_root = directory.join("project-custom");
+        let output_root_text = output_root.to_string_lossy().into_owned();
+        state
+            .export_unity_project(&output_root_text, false)
+            .expect("the custom cache redirects a matching AudioClip");
+
+        let project = output_root.join("ExportedProject");
+        assert!(
+            !project.join("Assets").exists(),
+            "an AudioClip matched by name, channels, frequency, and length is redirected"
+        );
+        assert!(project.join("ProjectSettings/ProjectVersion.txt").is_file());
+        assert!(project.join("Packages/manifest.json").is_file());
+        let path_map: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(output_root.join("AuxiliaryFiles/path_id_map.json")).unwrap(),
+        )
+        .expect("path ID map is valid JSON");
+        assert_eq!(path_map["Files"][0]["Assets"][0]["PathID"], 303);
+        assert_eq!(path_map["Files"][0]["Assets"][0]["Name"], "AudioFixture");
+        assert_eq!(path_map["Files"][0]["Assets"][0]["Type"], "AudioClip");
+        assert_eq!(std::fs::read(&source_path).unwrap(), source_bytes);
+        assert_eq!(std::fs::read(&resource_path).unwrap(), resource_bytes);
+    }
+
+    #[test]
     fn typed_configuration_singletons_update_and_reset_the_live_settings() {
         let mut state = state(false);
         state

@@ -613,6 +613,23 @@ fn predefined_engine_texture_dimensions(root: &SerializedValue) -> Option<(i32, 
     Some((*width, *height))
 }
 
+fn predefined_engine_audio_clip_key(root: &SerializedValue) -> Option<(String, i32, i32, f32)> {
+    let name = predefined_engine_object_name(root)?;
+    let channels = root.unique_field_in_base_chain("m_Channels").ok()??;
+    let frequency = root.unique_field_in_base_chain("m_Frequency").ok()??;
+    let length = root.unique_field_in_base_chain("m_Length").ok()??;
+    let SerializedValue::I32(channels) = channels else {
+        return None;
+    };
+    let SerializedValue::I32(frequency) = frequency else {
+        return None;
+    };
+    let SerializedValue::F32(length) = length else {
+        return None;
+    };
+    Some((name, *channels, *frequency, *length))
+}
+
 /// Resolves a Sprite render-data texture pointer to the name used for the
 /// group's predefined-engine lookup, mirroring the frozen `Cache.Contains(sio.Texture)`
 /// gate.
@@ -1223,6 +1240,21 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
             } else {
                 None
             };
+            let predefined_engine_audio_clip = if context.engine_asset_source
+                == EngineAssetSource::StoredResourceData
+                && source_engine_guid.is_none()
+                && class_id == crate::resources::audio::AUDIO_CLIP_CLASS_ID
+            {
+                payload
+                    .and_then(|payload| predefined_engine_audio_clip_key(&payload.root))
+                    .and_then(|(name, channels, frequency, length)| {
+                        context.engine_resource_data.and_then(|data| {
+                            data.audio_clip_target(&name, channels, frequency, length)
+                        })
+                    })
+            } else {
+                None
+            };
             let predefined_engine_texture = if source_engine_guid.is_none()
                 && class_id == crate::export::res_wiring::TEXTURE2D_CLASS_ID
             {
@@ -1293,6 +1325,7 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
             let predefined_engine_target = predefined_engine_shader
                 .or(predefined_engine_material)
                 .or(predefined_engine_sprite)
+                .or(predefined_engine_audio_clip)
                 .or(predefined_engine_texture)
                 .or(predefined_engine_mesh)
                 .or(predefined_engine_text_asset);
