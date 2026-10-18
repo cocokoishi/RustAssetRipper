@@ -309,12 +309,25 @@ pub(crate) fn make_existing_prefab_instance_file() -> Vec<u8> {
 
 /// Combine the Prefab hierarchy fixture with a production-layout class-43 Mesh object.
 ///
-/// `mesh_file` is the existing 2019.4 single-Mesh fixture. Its TypeTree record and payload are
-/// copied into the hierarchy file, while minimal serialized MeshFilter and MeshRenderer objects
-/// provide the same local references and empty static-batch range used by the frozen GLB probe.
-/// This lets the product route exercise the full GameObject -> component -> Mesh path without
-/// inventing vertex bytes or a Mesh schema.
+/// `mesh_file` is the existing 2019.4 single-Mesh fixture. By default its TypeTree record and
+/// payload are copied into the hierarchy file; the external-mesh variant leaves the object in its
+/// own SerializedFile and writes a source-table PPtr plus external-file record. Both variants use
+/// the same production Mesh payload and minimal MeshFilter/MeshRenderer objects.
 pub(crate) fn make_prefab_mesh_instance_file(mesh_file: Option<&[u8]>) -> Vec<u8> {
+    make_prefab_mesh_instance_file_inner(mesh_file, None)
+}
+
+pub(crate) fn make_prefab_mesh_instance_file_with_external_mesh(
+    mesh_file: &[u8],
+    dependency_name: &str,
+) -> Vec<u8> {
+    make_prefab_mesh_instance_file_inner(Some(mesh_file), Some(dependency_name))
+}
+
+fn make_prefab_mesh_instance_file_inner(
+    mesh_file: Option<&[u8]>,
+    external_mesh_file_name: Option<&str>,
+) -> Vec<u8> {
     const GAME_OBJECT_PATH_ID: i64 = 10;
     const TRANSFORM_PATH_ID: i64 = 11;
     const MESH_FILTER_PATH_ID: i64 = 13;
@@ -445,6 +458,11 @@ pub(crate) fn make_prefab_mesh_instance_file(mesh_file: Option<&[u8]>) -> Vec<u8
         }
     }
 
+    fn append_metadata_string(output: &mut Vec<u8>, value: &str) {
+        output.extend_from_slice(value.as_bytes());
+        output.push(0);
+    }
+
     let prefab_file = make_prefab_hierarchy_file();
     let Some(mesh_file) = mesh_file else {
         return prefab_file;
@@ -523,7 +541,15 @@ pub(crate) fn make_prefab_mesh_instance_file(mesh_file: Option<&[u8]>) -> Vec<u8
 
     let mut mesh_filter = Vec::with_capacity(24);
     append_component_pointer(&mut mesh_filter, GAME_OBJECT_PATH_ID);
-    append_component_pointer(&mut mesh_filter, MESH_PATH_ID);
+    mesh_filter.extend_from_slice(
+        &if external_mesh_file_name.is_some() {
+            1_i32
+        } else {
+            0_i32
+        }
+        .to_le_bytes(),
+    );
+    mesh_filter.extend_from_slice(&i64::from(MESH_PATH_ID).to_le_bytes());
 
     let mut mesh_renderer = Vec::with_capacity(20);
     append_component_pointer(&mut mesh_renderer, GAME_OBJECT_PATH_ID);
@@ -541,12 +567,14 @@ pub(crate) fn make_prefab_mesh_instance_file(mesh_file: Option<&[u8]>) -> Vec<u8
     }
     output_objects.push((MESH_FILTER_PATH_ID as i32, 33, 33, mesh_filter));
     output_objects.push((MESH_RENDERER_PATH_ID as i32, 23, 23, mesh_renderer));
-    output_objects.push((
-        MESH_PATH_ID as i32,
-        43,
-        43,
-        payload_for(mesh_file, &mesh_layout, mesh_record).to_vec(),
-    ));
+    if external_mesh_file_name.is_none() {
+        output_objects.push((
+            MESH_PATH_ID as i32,
+            43,
+            43,
+            payload_for(mesh_file, &mesh_layout, mesh_record).to_vec(),
+        ));
+    }
 
     let mut data = Vec::new();
     let mut object_records = Vec::with_capacity(output_objects.len());
@@ -567,13 +595,22 @@ pub(crate) fn make_prefab_mesh_instance_file(mesh_file: Option<&[u8]>) -> Vec<u8
 
     let mut metadata = Vec::new();
     metadata.extend_from_slice(&prefab_metadata[..prefab_layout.type_count_offset]);
-    metadata.extend_from_slice(&6_i32.to_le_bytes()); // six serialized classes
+    metadata.extend_from_slice(
+        &if external_mesh_file_name.is_some() {
+            5_i32
+        } else {
+            6_i32
+        }
+        .to_le_bytes(),
+    ); // three hierarchy classes, MeshFilter, MeshRenderer, and an optional local Mesh
     for range in &prefab_layout.type_ranges {
         metadata.extend_from_slice(&prefab_metadata[range.start..range.end]);
     }
     metadata.extend_from_slice(&extra_types);
-    metadata.extend_from_slice(&mesh_metadata[mesh_type_range.start..mesh_type_range.end]);
-    // Preserve the generation-10 long-FileID flag and the base file's external/user-info tail.
+    if external_mesh_file_name.is_none() {
+        metadata.extend_from_slice(&mesh_metadata[mesh_type_range.start..mesh_type_range.end]);
+    }
+    // Preserve the generation-10 long-FileID flag before writing the external/user-info tail.
     metadata.extend_from_slice(
         &prefab_metadata[prefab_layout.type_records_end..prefab_layout.object_count_offset],
     );
@@ -588,7 +625,16 @@ pub(crate) fn make_prefab_mesh_instance_file(mesh_file: Option<&[u8]>) -> Vec<u8
             class_id,
         );
     }
-    metadata.extend_from_slice(&prefab_metadata[prefab_layout.object_records_end..]);
+    if let Some(dependency_name) = external_mesh_file_name {
+        metadata.extend_from_slice(&1_i32.to_le_bytes()); // one external file
+        append_metadata_string(&mut metadata, dependency_name); // asset path
+        metadata.extend_from_slice(&[0; 16]); // GUID
+        metadata.extend_from_slice(&0_i32.to_le_bytes()); // asset type
+        append_metadata_string(&mut metadata, dependency_name); // path name
+        metadata.push(0); // empty user information string
+    } else {
+        metadata.extend_from_slice(&prefab_metadata[prefab_layout.object_records_end..]);
+    }
 
     let data_offset = 20 + metadata.len();
     let file_size = data_offset + data.len();

@@ -1708,6 +1708,162 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
     }
 
+    /// `EXP-GLB-SCENE-001`: a MeshFilter can resolve its Mesh through another SerializedFile.
+    ///
+    /// The root Prefab and the production-layout Mesh remain separate files. Its `m_Mesh` PPtr
+    /// names the Mesh through external file ID 1, so reading POSITION and indices from the written
+    /// hierarchy GLB exercises the workspace reference graph rather than a local PathID lookup.
+    #[test]
+    fn the_primary_content_export_resolves_prefab_mesh_from_an_external_file() {
+        use crate::test_fixtures::make_prefab_mesh_instance_file_with_external_mesh;
+        use crate::tests::make_production_mesh_file;
+
+        let directory = PathBuf::from("target/primary-content-prefab-cross-file-mesh-e2e")
+            .join(std::process::id().to_string());
+        std::fs::create_dir_all(&directory).expect("the probe directory is created");
+        let input = directory.join("prefab-mesh-2019.4.assets");
+        let mesh_path = directory.join("mesh.assets");
+        let mesh_file = make_production_mesh_file();
+        std::fs::write(
+            &input,
+            make_prefab_mesh_instance_file_with_external_mesh(&mesh_file, "mesh.assets"),
+        )
+        .expect("the Prefab with an external Mesh PPtr is written");
+        std::fs::write(&mesh_path, &mesh_file).expect("the target Mesh file is written");
+
+        let mut state = state();
+        state
+            .load(&[
+                input.to_string_lossy().into_owned(),
+                mesh_path.to_string_lossy().into_owned(),
+            ])
+            .expect("the Prefab and external Mesh files load");
+        assert!(state.is_loaded());
+
+        let export_root = directory.join("primary-content");
+        let submitted = export_root.to_string_lossy().replace('\\', "/");
+        let response = dispatch(
+            &mut state,
+            &request_with_body(
+                "/Export/PrimaryContent",
+                &format!("Path={submitted}&ConfirmDelete=true"),
+            ),
+        );
+        assert_eq!(response.status(), 302);
+
+        let log = state.take_log().join("\n");
+        assert!(log.contains("Wrote 2 primary-content files to"), "{log}");
+        assert!(!log.contains("could not be decided"), "{log}");
+        assert!(!log.contains("collections failed:"), "{log}");
+
+        let mut files: Vec<(PathBuf, Vec<u8>)> = Vec::new();
+        collect_export_files(&export_root, &mut files);
+        assert_eq!(files.len(), 2, "the hierarchy and Mesh export once: {log}");
+        let hierarchy = files
+            .iter()
+            .find(|(path, _)| path.file_stem().and_then(|value| value.to_str()) == Some("Meshed"))
+            .expect("the Prefab hierarchy GLB is written");
+        let bytes = &hierarchy.1;
+        assert_eq!(&bytes[..4], b"glTF");
+        let json_length = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+        assert_eq!(&bytes[16..20], b"JSON");
+        let document: serde_json::Value = serde_json::from_slice(
+            bytes
+                .get(20..20 + json_length)
+                .expect("the GLB JSON chunk is in bounds"),
+        )
+        .expect("the GLB JSON chunk is valid");
+        assert_eq!(document["nodes"][0]["name"], "Meshed");
+        assert_eq!(document["nodes"][0]["mesh"], 0);
+        let primitive = &document["meshes"][0]["primitives"][0];
+        let position_accessor = &document["accessors"][primitive["attributes"]["POSITION"]
+            .as_u64()
+            .expect("the resolved Mesh has a POSITION attribute") as usize];
+        assert_eq!(position_accessor["componentType"], 5126);
+        assert_eq!(position_accessor["type"], "VEC3");
+        assert_eq!(position_accessor["count"], 3);
+
+        let bin_header = 20 + json_length;
+        assert_eq!(&bytes[bin_header + 4..bin_header + 8], b"BIN\0");
+        let bin_length =
+            u32::from_le_bytes(bytes[bin_header..bin_header + 4].try_into().unwrap()) as usize;
+        let binary = &bytes[bin_header + 8..bin_header + 8 + bin_length];
+        let position_view = &document["bufferViews"][position_accessor["bufferView"]
+            .as_u64()
+            .expect("the POSITION accessor has a bufferView") as usize];
+        let position_base = position_view["byteOffset"].as_u64().unwrap_or(0) as usize
+            + position_accessor["byteOffset"].as_u64().unwrap_or(0) as usize;
+        let position_stride = position_view["byteStride"].as_u64().unwrap_or(12) as usize;
+        let positions = (0..3)
+            .map(|index| {
+                let start = position_base + index * position_stride;
+                [
+                    u32::from_le_bytes(binary[start..start + 4].try_into().unwrap()),
+                    u32::from_le_bytes(binary[start + 4..start + 8].try_into().unwrap()),
+                    u32::from_le_bytes(binary[start + 8..start + 12].try_into().unwrap()),
+                ]
+            })
+            .collect::<Vec<_>>();
+        let expected_positions = include_str!("../resources/glb_level_mesh_fixture.txt")
+            .lines()
+            .filter_map(|line| {
+                let fields: Vec<_> = line.split('|').collect();
+                (fields.len() == 6 && fields[0] == "GPOS" && fields[1] == "mesh").then(|| {
+                    [
+                        fields[3].parse::<f32>().unwrap().to_bits(),
+                        fields[4].parse::<f32>().unwrap().to_bits(),
+                        fields[5].parse::<f32>().unwrap().to_bits(),
+                    ]
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(positions, expected_positions);
+
+        let index_accessor = &document["accessors"][primitive["indices"]
+            .as_u64()
+            .expect("the resolved Mesh has an index accessor") as usize];
+        let index_view = &document["bufferViews"][index_accessor["bufferView"]
+            .as_u64()
+            .expect("the index accessor has a bufferView") as usize];
+        let index_base = index_view["byteOffset"].as_u64().unwrap_or(0) as usize
+            + index_accessor["byteOffset"].as_u64().unwrap_or(0) as usize;
+        let component_type = index_accessor["componentType"].as_u64().unwrap();
+        let index_size = match component_type {
+            5121 => 1,
+            5123 => 2,
+            5125 => 4,
+            other => panic!("unexpected GLB index component type {other}"),
+        };
+        let indices = (0..index_accessor["count"].as_u64().unwrap() as usize)
+            .map(|index| {
+                let start = index_base + index * index_size;
+                match component_type {
+                    5121 => u32::from(binary[start]),
+                    5123 => u32::from(u16::from_le_bytes(
+                        binary[start..start + 2].try_into().unwrap(),
+                    )),
+                    5125 => u32::from_le_bytes(binary[start..start + 4].try_into().unwrap()),
+                    _ => unreachable!(),
+                }
+            })
+            .collect::<Vec<_>>();
+        let expected_indices = include_str!("../resources/glb_level_mesh_fixture.txt")
+            .lines()
+            .find_map(|line| {
+                let fields: Vec<_> = line.split('|').collect();
+                (fields.len() == 3 && fields[0] == "GIDX" && fields[1] == "mesh").then(|| {
+                    fields[2]
+                        .split(',')
+                        .map(|value| value.parse::<u32>().unwrap())
+                        .collect::<Vec<_>>()
+                })
+            })
+            .expect("the frozen runtime fixture records indices");
+        assert_eq!(indices, expected_indices);
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
     /// `PRODUCT-PRIMARY-CONTENT-001`: a streamed texture's pixels come from its `.resS`.
     ///
     /// The 2019.4 tree carries `m_StreamData` on every texture, so "streamed" is a question of where

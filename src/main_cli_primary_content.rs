@@ -72,7 +72,9 @@ use assetripper::processing::scene_hierarchy::{
 };
 use assetripper::resources::glb::{GlbBuildLimits, GlbLevelLimits};
 use assetripper::resources::packed_bit_vector::PackedBitVectorLimits;
-use assetripper::serialized_file::reference_graph::MultiFileReferenceGraphLimits;
+use assetripper::serialized_file::reference_graph::{
+    MultiFileReferenceGraph, MultiFileReferenceGraphLimits,
+};
 
 use super::export_commands::LoadedGame;
 
@@ -138,7 +140,12 @@ pub(super) fn export_loaded_primary_content<W: io::Write>(
         hierarchy_collection_assets,
         hierarchy_collection_names,
         note: scene_note,
-    } = main_asset_classification(game, scene_processing.as_ref());
+    } = main_asset_classification(
+        game,
+        scene_processing
+            .as_ref()
+            .map(|(processing, _)| processing),
+    );
     if let Some(note) = &scene_note {
         writeln!(status_output, "{note}")?;
     }
@@ -146,7 +153,7 @@ pub(super) fn export_loaded_primary_content<W: io::Write>(
     // The per-mesh geometry each hierarchy needs, resolved once per file. `resolve_scene_meshes`
     // reads payloads and builds `MeshData`, so it is not repeated per collection.
     let mut resolved_by_file: HashMap<usize, ResolvedSceneMeshes> = HashMap::new();
-    if let Some(processing) = &scene_processing {
+    if let Some((processing, references)) = &scene_processing {
         for file_index in hierarchy_file.values() {
             if resolved_by_file.contains_key(file_index) {
                 continue;
@@ -156,6 +163,7 @@ pub(super) fn export_loaded_primary_content<W: io::Write>(
             };
             let context = SceneMeshResolution {
                 objects: &game.objects,
+                references,
                 files: game.workspace.files(),
                 limits: PackedBitVectorLimits::default(),
             };
@@ -811,19 +819,22 @@ impl ExportFileSystem for RunFileSystem {
 ///
 /// Run the scene and prefab processing, which the main-asset relation and the hierarchy GLB both
 /// need. `None` means it could not run; the caller reports that.
-fn process_scenes(game: &LoadedGame) -> Option<WorkspaceSceneProcessing> {
+fn process_scenes<'a>(
+    game: &'a LoadedGame,
+) -> Option<(WorkspaceSceneProcessing, MultiFileReferenceGraph<'a>)> {
     let references = game
         .workspace
         .reference_graph(MultiFileReferenceGraphLimits::default())
         .ok()?;
-    process_workspace_scenes_and_prefabs(
+    let processing = process_workspace_scenes_and_prefabs(
         &game.filesystem,
         &game.workspace,
         &game.objects,
         &references,
         WorkspaceSceneProcessingLimits::default(),
     )
-    .ok()
+    .ok()?;
+    Some((processing, references))
 }
 
 /// Build each object's main-asset classification and the ordered members of its source collection.

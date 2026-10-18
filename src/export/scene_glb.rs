@@ -42,6 +42,9 @@ use crate::resources::sub_mesh_data::IndexFormat;
 use crate::resources::vertex_data_blob::{EndianType, UnityVersion};
 use crate::serialized_file::object::SerializedValue;
 use crate::serialized_file::object_workspace::ObjectWorkspace;
+use crate::serialized_file::reference_graph::{
+    MultiFilePPtrResolution, MultiFileReferenceGraph,
+};
 use crate::serialized_file::workspace::LoadedSerializedFile;
 
 /// Why a scene-level GLB export could not be produced.
@@ -295,6 +298,8 @@ impl SceneCollectionGraph for MaterializedSceneGraphView<'_> {
 pub struct SceneMeshResolution<'a> {
     /// The decoded object payloads.
     pub objects: &'a ObjectWorkspace,
+    /// The source-scoped PPtr results for every loaded SerializedFile.
+    pub references: &'a MultiFileReferenceGraph<'a>,
     /// The workspace files, for each file's Unity version and endianness.
     pub files: &'a [LoadedSerializedFile],
     /// The packed-vector decode bounds the mesh reader uses.
@@ -308,9 +313,8 @@ pub struct SceneMeshResolution<'a> {
 /// `Renderer` for geometry to be attached at all. The materialized collection records the component
 /// slots but not their fields, which is why the payloads are read here rather than in the scene pass.
 ///
-/// **A mesh referenced from another file is not resolved and yields no facts.** The reference reaches
-/// such a mesh through the bundle; this path does not, and returning `None` keeps the node without
-/// geometry instead of inventing one. That is a caller-visible gap rather than a silent one.
+/// External mesh pointers use the workspace's source-ordered collection lookup and reference graph;
+/// missing or ambiguous targets do not produce geometry.
 pub fn resolve_scene_meshes(
     collection: &MaterializedSceneCollection,
     context: &SceneMeshResolution<'_>,
@@ -361,13 +365,34 @@ fn resolve_one(
     let mesh_filter_index = component_object_index(mesh_filter)?;
     let mesh_filter_root = payload(context, collection.file_index, mesh_filter_index)?;
     let (file_id, path_id) = pptr_field(mesh_filter_root, "m_Mesh")?;
-    if file_id != 0 {
-        // Another file's mesh needs the bundle, which this path does not walk.
-        return None;
-    }
-    let mesh_index = find_object_by_path_id(context, collection.file_index, path_id)?;
-    let mesh_root = payload(context, collection.file_index, mesh_index)?;
-    let file = context.files.get(collection.file_index)?;
+    let (mesh_file_index, mesh_index) = if file_id == 0 {
+        (
+            collection.file_index,
+            find_object_by_path_id(context, collection.file_index, path_id)?,
+        )
+    } else {
+        let mut edges = context
+            .references
+            .references_from_object(collection.file_index, mesh_filter_index)
+            .filter(|edge| {
+                edge.file_id == file_id
+                    && edge.path_id == path_id
+                    && edge.field_path.ends_with("m_Mesh")
+            });
+        let edge = edges.next()?;
+        if edges.next().is_some() {
+            return None;
+        }
+        match &edge.resolution {
+            MultiFilePPtrResolution::Object {
+                target_file_index,
+                target_object_index,
+            } => (*target_file_index, *target_object_index),
+            _ => return None,
+        }
+    };
+    let mesh_root = payload(context, mesh_file_index, mesh_index)?;
+    let file = context.files.get(mesh_file_index)?;
     let version = file
         .metadata
         .prefix
