@@ -304,8 +304,8 @@ pub(crate) type SpriteRenderDataTexturePointer = (String, i32, i64);
 /// rules while resolving AtlasData.texture in the Atlas object's file scope. Source file version
 /// and endianness select the render-data geometry decoder. When sprite-sheet export is enabled,
 /// malformed outline, physics-shape, or bone geometry is an error rather than a silently omitted
-/// field. Bone geometry decodes inline bytes or the resolved stream selected by
-/// `SpriteRenderData.m_StreamData`.
+/// field. Bone geometry reads only inline `VertexData`; an empty `Data` array follows the frozen
+/// `VertexDataBlob.ReadData` early return and does not consume `SpriteRenderData.m_StreamData`.
 #[allow(clippy::too_many_arguments)]
 pub fn collect_sprite_facts_for_texture(
     workspace: &SerializedFileWorkspace,
