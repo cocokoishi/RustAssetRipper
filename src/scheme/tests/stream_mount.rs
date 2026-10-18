@@ -261,25 +261,16 @@ fn source_unityraw_nested_unityfs_routes_through_the_common_stream_mount() {
     );
     assert_eq!(
         filesystem
-            .read_all_bytes(
-                "/tree/nested.bundle/data/file.bin",
-                expected_payload.len(),
-            )
+            .read_all_bytes("/tree/nested.bundle/data/file.bin", expected_payload.len(),)
             .unwrap(),
         expected_payload,
     );
     assert_eq!(
         filesystem
-            .read_all_bytes(
-                "/tree/nested.bundle/data/file.bin",
-                expected_payload.len(),
-            )
+            .read_all_bytes("/tree/nested.bundle/data/file.bin", expected_payload.len(),)
             .unwrap(),
         legacy_filesystem
-            .read_all_bytes(
-                "/tree/nested.bundle/data/file.bin",
-                expected_payload.len(),
-            )
+            .read_all_bytes("/tree/nested.bundle/data/file.bin", expected_payload.len(),)
             .unwrap(),
     );
 }
