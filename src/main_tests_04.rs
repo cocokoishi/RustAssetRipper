@@ -1716,6 +1716,14 @@
             normalized.into_bytes()
         }
 
+        fn is_text_output(relative_path: &str) -> bool {
+            std::path::Path::new(relative_path)
+                .extension()
+                .is_some_and(|extension| {
+                    matches!(extension.to_str(), Some("meta" | "asset" | "json" | "txt"))
+                })
+        }
+
         fn collect_files(path: &std::path::Path, files: &mut Vec<PathBuf>) {
             for entry in fs::read_dir(path).unwrap() {
                 let entry = entry.unwrap();
@@ -1777,8 +1785,9 @@
             output_root.clone().into_os_string(),
             source_path.clone().into_os_string(),
         ];
-        super::run(arguments.into_iter())
-            .unwrap_or_else(|error| panic!("export-project failed for source SpriteAtlas fixture: {error}"));
+        super::run(arguments.into_iter()).unwrap_or_else(|error| {
+            panic!("export-project failed for source SpriteAtlas fixture: {error}")
+        });
 
         let mut expected_paths = Vec::new();
         for row in fixture
@@ -1795,23 +1804,20 @@
             let expected = decode_hex(hex);
             let actual = fs::read(&output_path)
                 .unwrap_or_else(|error| panic!("could not read {relative_path}: {error}"));
-            let expected = if Path::new(relative_path)
-                .extension()
-                .is_some_and(|extension| matches!(extension.to_str(), Some("meta" | "asset" | "json" | "txt")))
-            {
+            let expected = if is_text_output(relative_path) {
                 normalize_text(&expected)
             } else {
                 expected
             };
-            let actual = if Path::new(relative_path)
-                .extension()
-                .is_some_and(|extension| matches!(extension.to_str(), Some("meta" | "asset" | "json" | "txt")))
-            {
+            let actual = if is_text_output(relative_path) {
                 normalize_text(&actual)
             } else {
                 actual
             };
-            assert_eq!(actual, expected, "source output differs for {relative_path}");
+            assert_eq!(
+                actual, expected,
+                "source output differs for {relative_path}"
+            );
             expected_paths.push(relative_path.replace('\\', "/"));
         }
 
@@ -1829,28 +1835,29 @@
             .collect::<Vec<_>>();
         actual_paths.sort();
         expected_paths.sort();
-        assert_eq!(actual_paths, expected_paths, "the entire SpriteAtlas project file inventory matches AssetRipper");
+        assert_eq!(
+            actual_paths, expected_paths,
+            "the entire SpriteAtlas project file inventory matches AssetRipper"
+        );
 
-        let sprite_yaml = fs::read_to_string(
-            output_root.join("Assets/Sprite/PackedSpriteFixture.asset"),
-        )
-        .unwrap();
-        assert!(sprite_yaml.contains("m_Rect:\n    serializedVersion: 2\n    x: 8\n    y: 10\n    width: 48\n    height: 32"));
+        let sprite_yaml =
+            fs::read_to_string(output_root.join("Assets/Sprite/PackedSpriteFixture.asset"))
+                .unwrap();
+        assert!(sprite_yaml.contains(
+            "m_Rect:\n    serializedVersion: 2\n    x: 8\n    y: 10\n    width: 48\n    height: 32"
+        ));
         assert!(sprite_yaml.contains("m_Offset: {x: -12, y: 16}"));
         assert!(sprite_yaml.contains("m_Border: {x: 1, y: 2, z: 8, w: 8}"));
         assert!(sprite_yaml.contains("m_Pivot: {x: 0.25, y: 1}"));
-        assert!(sprite_yaml.contains(
-            "m_RenderDataKey:\n    00000000000000000000000000000000: 91"
-        ));
+        assert!(sprite_yaml.contains("m_RenderDataKey:\n    00000000000000000000000000000000: 91"));
         assert!(sprite_yaml.contains("settingsRaw: 37"));
         assert!(sprite_yaml.contains("uvTransform: {x: 0.5, y: 0.25, z: 0.125, w: 0.0625}"));
         assert!(sprite_yaml.contains("downscaleMultiplier: 1.5"));
         assert!(sprite_yaml.contains("m_AtlasTags: []"));
         assert!(sprite_yaml.contains("m_SpriteAtlas: {fileID: 0}"));
-        let texture_meta = fs::read_to_string(
-            output_root.join("Assets/Texture2D/AtlasTextureFixture.bmp.meta"),
-        )
-        .unwrap();
+        let texture_meta =
+            fs::read_to_string(output_root.join("Assets/Texture2D/AtlasTextureFixture.bmp.meta"))
+                .unwrap();
         let texture_meta_guid = texture_meta
             .lines()
             .find_map(|line| line.strip_prefix("guid: "))
