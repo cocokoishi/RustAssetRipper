@@ -702,6 +702,7 @@ static void Author(string rowsPath)
 		"patch_retry_light",
 		"patch_retry_light_failed",
 		"patch_retry_graphics_settings_failed",
+		"patch_retry_font_failed",
 		"patch_retry_light_editor",
 	];
 	string scratch = Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, "target", "ser-factory-probe"));
@@ -828,6 +829,8 @@ static (string, SerializedFile) BuildCase(string name)
 			return ("patch_retry_light_failed.assets", BuildPatchRetryFile("patch_retry_light_failed.assets", "2017.1.0p0", "2017.1.1f0", 108, true));
 		case "patch_retry_graphics_settings_failed":
 			return ("patch_retry_graphics_settings_failed.assets", BuildPatchRetryFile("patch_retry_graphics_settings_failed.assets", "2017.1.0p0", "2017.1.1f0", 30, true));
+		case "patch_retry_font_failed":
+			return ("patch_retry_font_failed.assets", BuildPatchRetryFile("patch_retry_font_failed.assets", "2017.1.1p0", "2017.1.2f0", 128, true));
 		case "patch_retry_light_editor":
 			return ("patch_retry_light_editor.unity", BuildPatchRetryFile("patch_retry_light_editor.unity", "2017.1.0p0", "2017.1.1f0", 108, editorMode: true));
 		default:

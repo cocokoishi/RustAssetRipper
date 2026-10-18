@@ -153,7 +153,9 @@ fn assert_case(case: &FixtureCase, layouts: &ReferenceClassLayouts) {
         assert_eq!(asset.log_level, FactoryLogLevel::Error, "{} log", case.name);
         if matches!(
             case.name.as_str(),
-            "patch_retry_light_failed" | "patch_retry_graphics_settings_failed"
+            "patch_retry_light_failed"
+                | "patch_retry_graphics_settings_failed"
+                | "patch_retry_font_failed"
         ) {
             let actual = asset
                 .log_message
@@ -181,6 +183,10 @@ fn assert_case(case: &FixtureCase, layouts: &ReferenceClassLayouts) {
                 "patch_retry_graphics_settings_failed" => {
                     assert!(expected.contains("System.IndexOutOfRangeException"));
                     assert!(expected.contains("Index was outside the bounds of the array"));
+                }
+                "patch_retry_font_failed" => {
+                    assert!(expected.contains("System.ArgumentOutOfRangeException"));
+                    assert!(expected.contains("Parameter 'length'"));
                 }
                 _ => unreachable!("only Patch retry failures reach this branch"),
             }
@@ -484,13 +490,16 @@ fn assert_case(case: &FixtureCase, layouts: &ReferenceClassLayouts) {
             );
             assert!(workspace_asset.is_fully_materialized());
         }
-        "patch_retry_light_failed" | "patch_retry_graphics_settings_failed" => {
+        "patch_retry_light_failed"
+        | "patch_retry_graphics_settings_failed"
+        | "patch_retry_font_failed" => {
             assert_eq!(asset.kind, FactoryAssetKind::Unreadable);
             assert!(asset.payload.is_none());
-            let expected_raw_len = if case.name == "patch_retry_light_failed" {
-                151
-            } else {
-                229
+            let expected_raw_len = match case.name.as_str() {
+                "patch_retry_light_failed" => 151,
+                "patch_retry_graphics_settings_failed" => 229,
+                "patch_retry_font_failed" => 95,
+                _ => unreachable!("only Patch retry failures reach this branch"),
             };
             assert_eq!(asset.raw.len(), expected_raw_len);
             let workspace_asset = materialize_object_for_workspace(
@@ -551,7 +560,7 @@ fn factory_differential_replays_every_reference_case() {
     let fixture = include_str!("../../asset_factory_fixture.txt");
     let layouts = reference_class_layouts();
     let cases = fixture_cases(fixture);
-    assert_eq!(cases.len(), 26, "all probe cases are replayed");
+    assert_eq!(cases.len(), 27, "all probe cases are replayed");
     for case in &cases {
         assert_case(case, layouts);
     }

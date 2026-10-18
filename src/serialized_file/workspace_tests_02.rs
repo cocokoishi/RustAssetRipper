@@ -662,6 +662,7 @@
             ("textasset_bad_tail", 25),
             ("patch_retry_light_failed", 151),
             ("patch_retry_graphics_settings_failed", 229),
+            ("patch_retry_font_failed", 95),
         ] {
             let hex = fixture
                 .lines()
@@ -716,6 +717,7 @@
                 "textasset_bad_tail"
                     | "patch_retry_light_failed"
                     | "patch_retry_graphics_settings_failed"
+                    | "patch_retry_font_failed"
             ) {
                 assert!(!workspace.files()[0].reference_graph.is_complete());
                 assert!(!workspace.files()[0]
@@ -773,6 +775,12 @@
                             source_exception.contains("Index was outside the bounds of the array")
                         );
                     }
+                    "patch_retry_font_failed" => {
+                        assert!(source_path.starts_with("  "));
+                        let source_exception = source_path.trim_start();
+                        assert!(source_exception.contains("System.ArgumentOutOfRangeException"));
+                        assert!(source_exception.contains("Parameter 'length'"));
+                    }
                     _ => unreachable!("only malformed source rows carry Error logs"),
                 }
                 let actual_message = object
@@ -802,6 +810,14 @@
                             .expect("Rust retry failure retains the path and read error");
                         assert_eq!(actual_file_path, virtual_path.as_str());
                         assert!(actual_error.contains("truncated input"));
+                    }
+                    "patch_retry_font_failed" => {
+                        let (actual_file_path, actual_error) = actual_path
+                            .split_once('\n')
+                            .expect("Rust retry failure retains the path and read error");
+                        assert_eq!(actual_file_path, virtual_path.as_str());
+                        assert!(actual_error.contains("truncated input"));
+                        assert!(!actual_message.contains("2017.1.2f0"));
                     }
                     _ => unreachable!("only malformed source rows carry Error logs"),
                 }
