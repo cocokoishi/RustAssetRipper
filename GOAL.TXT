@@ -1,59 +1,190 @@
-RustAssetRipper Product Convergence
-==================================
+RustAssetRipper — Master Goal: Complete Behavioral Replica
+=========================================================
 
-Objective
----------
-Continue the full Rust port and acceptance work defined by the project's `AGENTS.md` and the user's Product Convergence task. The current local AssetRipper source snapshot is the authoritative behavior baseline. The delivered product core must be Rust-owned; it must not delegate parsing, object construction, reference resolution, resource restoration, scene/Prefab/animation handling, or export to AssetRipper, UABEA, C# DLLs, or .NET processes.
+Purpose of this file
+--------------------
+This file defines the durable end state and execution protocol for RustAssetRipper. It MUST remain valid as HEAD changes. Do not put a current commit SHA, a current sample name, a current output directory, or a single transient blocker here. Dynamic state belongs in `docs/next-agent-handoff.md`, `docs/validation-log.md`, `docs/differential-findings.md`, and the parity ledger.
 
-Do not declare completion until the full in-scope product surface is implemented and validated, the Rust product builds and runs independently, every authorized VRChat sample has a traceable final result, correctness-critical differences are resolved, and required regressions and hand-off documentation are complete. Any required behavior or check that is unimplemented, failed, externally blocked, or not run keeps the overall goal open.
+Mission
+-------
+Build a production-usable, Rust-owned behavioral replica of the frozen AssetRipper source baseline recorded in `docs/baseline.md` and its manifest. The final program must independently load the same in-scope Unity inputs, construct and resolve the same meaningful asset graph, perform the same relevant processing, and expose/export equivalent observable results through the product surfaces represented by that baseline.
 
-Execution discipline (mandatory)
--------------------------------
-1. **Work one concrete blocker at a time.** Reproduce it, identify affected input objects and source behavior, establish expected semantics, make one generic fix, run focused and affected tests, rebuild the actual product, replay the same real input into a fresh output directory, compare the affected semantics and previously fixed slices, record evidence, then commit coherent progress before taking the next blocker.
-2. **Investigate before editing.** Trace each difference through input bytes/SerializedFile fields, source implementation or TypeTree, Rust decoding/routing, references, and output representation. Class IDs, versions, file scope, PathID/local fileID, field order, array order, and external references matter. Do not infer correctness from names, counts, folder sizes, or one reference tool's output.
-3. **Use evidence-backed normalization only.** Pair documents by stable identity such as source file, class ID, and local fileID. Normalize an output GUID only after both projects' `.meta` files resolve it to the same relative asset path. Keep array order, curve tangents, bindings, LOD membership, renderer references, and runtime-relevant values intact. Do not widen numeric tolerances after seeing a difference.
-4. **Never turn a partial check into a pass.** A passing unit test does not prove product behavior. A successful CLI exit or generated file does not prove semantic correctness. A check not actually run must be recorded as “not run”; a failed command must retain its real exit code and cause. Keep static validation separate from Unity import/runtime validation.
-5. **Do not hide unsupported or failed data.** No sample-name/hash/PathID special cases; no skipped resources, dropped fields, null substitution for unresolved references, default/zero replacement, raw-byte dump as a substitute for structured export, relaxed assertions, or deleted failing tests to make a report green.
-6. **Treat comparison tools as evidence, not truth.** Investigate Rust/source/UABEA differences against original bytes, format rules, stable object identities, and actual exported references. Two tools failing alike does not establish that Rust may omit support.
-7. **Protect the workspace.** At each continuation, read this file, `docs/next-agent-handoff.md`, the latest relevant `docs/validation-log.md` entry, and `git status`. Preserve user edits and untracked files. Never alter/move/delete original bundles, frozen source, or UABEA. Never run destructive reset/clean or force-push commands. Stage explicit paths only.
-8. **Keep the hand-off truthful and actionable.** Record source symbol, Rust location, exact command, exit code, input identity, fresh output path, semantic result, limitations, and the single next blocker. Update the difference log, validation log, continuation notes, and hand-off when a blocker changes state. Never write expected or inferred results as executed results.
-9. **Commit only coherent, reviewed progress.** Before commit, inspect the diff and staged file list; run relevant checks; verify user-owned scratch is excluded. Use a normal push only, then compare local HEAD with `origin/main`. If push fails, diagnose it without force. If the user explicitly requests a checkpoint before a required build or real-sample replay, commit only with the missing validation clearly marked pending and exact next steps recorded; never describe that implementation as resolved.
-10. **Continue autonomously.** Do not stop after each small fix to ask whether to continue. Ask only when missing user data, authorization, or an external-state change genuinely prevents progress; continue independent work meanwhile.
+The production path must not delegate correctness-critical work to AssetRipper, UABEA, C# DLLs, .NET processes, or another external ripper. Reference tools may be used only as differential or diagnostic oracles during development.
 
-Repository checkpoint
+“Complete” means behavioral parity, not merely compilation, broad file coverage, a successful exit code, or the existence of output files. Where the reference result is deterministic, prefer exact equality. Where the frozen reference intentionally creates nondeterministic values (for example generated identifiers), normalize only after proving the nondeterminism and comparing the underlying semantic identity.
+
+Authority and scope
+-------------------
+1. `docs/baseline.md` and the frozen source snapshot/manifest define the implementation target. Do not silently chase current upstream AssetRipper. If the baseline is intentionally updated, update the baseline record first and reopen the affected parity audit explicitly.
+2. Observed behavior of the frozen baseline on controlled inputs outranks assumptions and comments. Frozen source semantics are the next authority. The repository ledger and audits describe current evidence; they do not override observed source behavior.
+3. `docs/feature-parity.md` is the authoritative row-level completeness ledger. `docs/project-coverage.md` and repository-wide gap audits are coarser cross-checks and must not be used to hide an open row.
+4. A feature may be marked `已验证` only when the evidence actually exercises the shipped Rust product behavior at the appropriate layer. A unit test can prove a unit; it cannot by itself prove an end-to-end product surface.
+5. Keep legal/license obligations of the frozen GPL baseline and incorporated third-party components correct and traceable.
+
+Definition of DONE — all gates are mandatory
+---------------------------------------------
+Do not declare the port complete until ALL of the following are true at the same revision:
+
+A. Ledger closure
+- `pwsh -NoProfile -File ./tools/parity-report.ps1` exits 0.
+- There are zero rows in `未调查`, `已调查`, `实现中`, `已实现但未验证`, or `受外部条件阻塞`.
+- There are zero duplicate IDs, malformed rows, placeholder statuses, or evidence-free claims.
+
+B. Repository-wide closure
+- The latest repository/project coverage audit has no unresolved required baseline project, product surface, exporter, processor, format family, configuration surface, localization surface, or runtime/native behavior gap.
+- No required behavior is represented only by a constant table, route list, parser fragment, raw-byte fallback, TODO, stub, synthetic placeholder, or documentation claim when the baseline executes real behavior.
+
+C. Self-contained Rust product
+- Normal production parsing, object construction, TypeTree/version handling, resource restoration, dependency/reference resolution, processing, scene/Prefab/animation handling, exporters, project generation, CLI/API/Web flows, and relevant native/runtime helpers are Rust-owned.
+- The product works without the frozen source tree, .NET, C# helper executables, UABEA, or AssetRipper installed.
+
+D. Differential behavioral acceptance
+- Representative public/synthetic fixtures cover every major subsystem and important version/format branch that can be exercised without private user data.
+- Authorized private real-world samples are used locally only as an additional end-to-end acceptance corpus.
+- For the same input, compare stable identities and semantics: parsed object/type inventory, version decisions, dependency graph, PPtr targets, processed object relationships, exported paths/types, serialized fields, array/order-sensitive data, scene/Prefab/animation bindings, meshes/materials/textures/audio/shaders/scripts/meta/project configuration, and Web/CLI behavior where applicable.
+- Do not reduce a mismatch to counts, file sizes, or names when a deeper semantic comparison is possible.
+- Previously closed acceptance slices must remain regression-clean.
+
+E. Product-surface acceptance
+- Every baseline user-facing workflow represented by the frozen snapshot is either behaviorally implemented and verified or explicitly proven outside the chosen frozen baseline scope.
+- CLI and Web/API behavior must be exercised as real end-to-end product flows, including error behavior and configuration effects, not just presence of route/command definitions.
+- Exported Unity projects must be structurally coherent and reference-consistent. Unity Editor import/runtime validation is required when an authorized environment is available; absence of an external environment never converts “not run” into “passed”.
+
+F. Reproducible CI/release closure
+- GitHub Actions is green for the final revision on all required jobs.
+- A dedicated strict replica-ready/parity-closure job must fail when the parity report is non-zero. During migration the ordinary ledger job may report an open gate without failing, but final completion requires an uncompromising strict gate.
+- CI produces downloadable release artifacts for the platforms needed by private local acceptance so the normal workflow does not require local compilation.
+- Final acceptance records identify the CI revision/artifact used; private input identities are never published.
+
+Privacy wall — never upload private VRChat/Unity inputs
+------------------------------------------------------
+Private acceptance inputs are LOCAL-ONLY. This includes `.vrca`, `.vrcw`, `.assetbundle`, non-public `.bundle`, `.unity3d`, `.unitypackage`, private extracted assets, raw dumps, proprietary game data, and any derivative artifact that reconstructs or materially exposes private content.
+
+Hard rules:
+1. Never `git add`, commit, push, attach to an issue/PR, upload as a GitHub Actions artifact/cache, paste into CI logs, or otherwise transmit a private acceptance input or private extracted payload.
+2. Keep private corpora outside the repository (prefer a sibling directory or another explicitly ignored local location). Never copy them under a tracked repository path “temporarily”.
+3. Public docs/logs must use anonymous sample labels (for example `private-world-A`) and sanitized aggregate/structural evidence. Do not publish original sample filenames, avatar/world names, local absolute paths, content hashes, user identifiers, or raw asset strings merely for traceability.
+4. Before EVERY push, inspect the exact outgoing commits and tracked names. Run the existing metadata-only guard locally AFTER creating the commit but BEFORE pushing:
+   `python3 tools/check_public_repository.py`
+   This local privacy guard is mandatory and is intentionally not a compile/test step.
+5. Also inspect staged/outgoing paths (`git diff --cached --name-only` before commit; `git diff --name-only origin/main...HEAD` before push when applicable). If a protected suffix, corpus directory, unexpected binary, generated dump, or private path appears, stop and remove it from the commit before any network operation.
+6. GitHub Actions privacy checks are defense in depth only. They run after upload and therefore MUST NOT be treated as the first privacy barrier.
+7. Never rewrite or force-push public history merely to make progress. If private material is ever actually pushed, stop normal work and treat it as an incident requiring deliberate credential/data-removal handling rather than casually continuing.
+
+Actions-first development policy
+--------------------------------
+The default development loop is commit/push/Actions, NOT repeated local full builds.
+
+Allowed/preferred local work before push:
+- inspect/read/edit source and docs;
+- targeted non-compiling scripts that do not expose private data;
+- formatting when needed;
+- `git diff`, `git status`, staged-path review, and the mandatory privacy guard;
+- local execution of a CI-built binary against private inputs after the binary has been downloaded from GitHub Actions.
+
+By default DO NOT spend local resources on `cargo build`, full `cargo test`, full release tests, or full Clippy if the same validation is available in GitHub Actions. Make a coherent atomic commit, push normally, and use the Actions result/logs as the build/test oracle. If CI is red, fix that failure before starting a different product gap.
+
+A local Rust build/test is justified only when it is required to diagnose a failure that cannot reasonably be reproduced from Actions logs/artifacts, or when an authorized private-sample check specifically requires a binary not yet available from CI. Record why the local build was necessary. Return to Actions-first operation afterward.
+
+Infrastructure priority: if the current CI builds release binaries but does not make the required binaries downloadable, add a privacy-safe artifact-upload step/job early. Artifacts may contain only the built Rust product and public test outputs — never private acceptance inputs or outputs.
+
+Every-session bootstrap — discover current truth, never trust stale handoff prose
+-------------------------------------------------------------------------------
+At the start of every continuation:
+1. Check branch, `git status`, local HEAD, and `origin/main`; preserve unrelated user work and untracked files.
+2. Read this file, `docs/baseline.md`, `docs/next-agent-handoff.md`, `docs/feature-parity.md`, `docs/project-coverage.md`, and the newest relevant repository gap/closure audit.
+3. Run or inspect the current parity report. Treat its live non-verified IDs as candidates; do not use a blocker copied from an old GOAL revision.
+4. Check the latest GitHub Actions state for the current pushed HEAD. A pre-existing red CI job is normally the first blocker.
+5. Select ONE highest-leverage open gap backed by current evidence. Prefer gaps that unblock multiple ledger rows, product workflows, or acceptance comparisons.
+
+Measured convergence rule
+-------------------------
+Every implementation iteration must reduce a named, reproducible gap. Before editing, state the observable mismatch and the evidence that will close it. After editing, the evidence must show at least one of:
+- a current parity row legitimately advances toward `已验证`;
+- a repository-wide required gap closes;
+- a reproducible Rust/reference mismatch disappears without regressing closed behavior;
+- a missing end-to-end product workflow becomes executable and verified;
+- CI/release/privacy infrastructure removes a concrete acceptance blocker.
+
+If an iteration cannot name such a delta, it is probably motion rather than convergence. Do not spend cycles on speculative refactors, cosmetic hardening, duplicate tests, or already-verified areas merely because they are easy to touch.
+
+No-spin rules
+-------------
+1. One primary gap at a time. Do not scatter changes across unrelated modules.
+2. Reproduce before rewriting. Trace a difference from input bytes/source behavior through Rust decode/processing/export/output before inventing a fix.
+3. Never reopen a verified gap without new reproducible evidence of regression or incomplete coverage.
+4. Never mark a row verified merely because code exists, a unit test passes, output is non-empty, or the reference tool also fails.
+5. Never special-case a private sample name/hash/PathID just to make acceptance green. Fix the general format/version/semantic rule.
+6. Never hide missing data by dropping fields/resources, substituting null/default/zero, dumping raw bytes in place of structured behavior, relaxing assertions/tolerances after observing a failure, or deleting a failing test.
+7. Preserve order and identity when behavior depends on them. Normalize only fields proven semantically irrelevant or reference-nondeterministic, and document the normalization rule.
+8. If two consecutive attempts on the same gap produce no new evidence and no narrower root cause, stop editing that area and re-derive the mismatch from the frozen source/input format before trying another patch.
+9. Dynamic “next blocker” notes belong only in the handoff. Keep this GOAL invariant.
+
+Atomic execution loop
 ---------------------
-Repository: C:\Users\koishi\Desktop\RustAssetripper\RustAssetRipper
-Branch: main
-Remote: origin/main
-Latest pushed checkpoint before this prompt upgrade: `ab8cacd461ab47c9130c837f14c3784a7458f005` (`origin/main` matched HEAD).
-Reference source: C:\Users\koishi\Desktop\RustAssetripper\AssetRipper
-Reference manifest: `docs/baseline-files.sha256` (1,449 entries). The full-tree guard reports unlisted `Source/**/obj` artifacts; a direct hash check found all 1,449 listed files present and unchanged. Do not delete reference-tree files to silence the guard; report the full-tree check as non-clean.
+For the selected gap:
+1. Reproduce/locate the gap with the smallest trustworthy evidence.
+2. Read the exact frozen-source path/symbol and the corresponding Rust path.
+3. Define the expected observable semantics before changing code.
+4. Implement one generic fix with focused regression coverage.
+5. Review the diff and explicit staged paths. Do not stage unrelated/user-owned files.
+6. Create a coherent commit. Prefer small commits that make one claim and are easy to bisect/revert.
+7. Run the local metadata-only privacy guard and inspect outgoing paths BEFORE network push.
+8. Push normally to the working branch/main as appropriate. Never force-push as a normal workflow.
+9. Inspect GitHub Actions. Use job logs to repair failures; commit/push the repair rather than falling back to repeated local full builds.
+10. When CI is green, use the CI-built artifact for any required LOCAL-ONLY private-sample replay. Keep inputs and generated private outputs outside git and GitHub.
+11. Compare Rust/reference behavior at the semantic layer appropriate to the gap. Record only sanitized evidence publicly.
+12. Update the ledger, validation/differential docs, and handoff truthfully. “Not run”, “blocked”, and “failed” remain distinct from “passed”.
+13. Commit/push the evidence/doc closure if it is separate, confirm Actions again, then select the next live gap.
 
-Latest validated world export
+Differential acceptance requirements
+------------------------------------
+Use stable identity rather than presentation coincidence. Depending on the subsystem, pair/compare by source file identity, class ID, PathID/local fileID, resolved relative asset path, logical resource key, route/command identity, or another source-backed stable key.
+
+Comparison should progressively cover, where applicable:
+- container/bundle/serialized-file parsing and version/platform metadata;
+- TypeTree/schema selection and object payload decoding;
+- external files/resources and streamed data restoration;
+- object/reference/dependency graph resolution;
+- processing passes and generated collections;
+- scene hierarchy, Prefab links, transforms, renderers, colliders, LODs, lighting, animation/controllers/blend trees;
+- Mesh geometry/topology/skin/blend shapes; textures/sprites; materials/shaders; audio/video/text/font assets;
+- scripts/assemblies/MonoBehaviour-facing data to the extent represented by the frozen baseline;
+- native-format YAML/binary exports, `.meta`/GUID/reference semantics, project settings/packages and path selection;
+- primary-content exports such as image/audio/model/GLB where the baseline exposes them;
+- configuration/defaults and their observable effect;
+- Web/API routes, commands, responses, redirects/downloads, localization and error paths;
+- CLI flows, exit behavior, overwrite/delete policy and failure reporting.
+
+A comparator itself is not an oracle. When Rust and reference differ, trace the discrepancy to source behavior and original format data. When a comparator normalizes a field, that normalization must have a documented semantic justification.
+
+Evidence and handoff discipline
+-------------------------------
+Public evidence should make the next agent able to continue without leaking private data. Record:
+- stable feature/gap ID;
+- frozen reference symbol/path and Rust symbol/path;
+- sanitized command shape (with private paths/names replaced by placeholders);
+- exit/result state;
+- semantic comparison summary and normalization rules;
+- CI run/revision and relevant public fixture/test names;
+- limitations or external blockers;
+- exactly one primary next blocker plus any independent secondary work.
+
+Do not paste private filenames, local user paths, private content hashes, raw asset payloads, or confidential strings into repository docs, commits, issue text, CI variables, or Actions logs.
+
+Final replica-ready procedure
 -----------------------------
-Input: ..\青岚山河卷
-SHA-256: 100338C82E934B51357CE143106DE8EC43C4389DD50727E0674BFD3CC137267A
-Latest fully built/exported Rust result: target\real-acceptance-current-青岚山河卷-r5
-Result: 2 SerializedFiles, 72,350 objects, 1,087 asset files, 242,984,898 asset bytes.
-Verified scene slices: class 258 LightProbes; 3,997 class 65 BoxColliders; 629 class 64 MeshColliders; 86 class 136 CapsuleColliders. For class 64, generated GUIDs were normalized only when each project's `.meta` mapped them to the same relative asset path; all 11 referenced Mesh `.asset` files were byte-identical.
-Limits: the world is not accepted. Unity Editor import/runtime is blocked by the missing Editor license. UABEA was not run. Other scene/project differences and baseline non-exportable empty collections remain open.
+When the live ledger first reaches zero open rows, do not immediately declare victory. Perform a final closure pass:
+1. Run the strict parity gate and repository/project coverage audit from a clean checkout of the candidate revision.
+2. Run the complete public CI matrix and release-mode suite through GitHub Actions.
+3. Produce downloadable CI-built release artifacts.
+4. Locally replay the authorized private acceptance corpus using those CI-built artifacts without uploading the corpus or outputs.
+5. Re-run the sanitized semantic comparators and all regression slices; investigate every unexplained mismatch.
+6. Where available, perform Unity Editor import/runtime acceptance on exported projects and record failures honestly.
+7. Re-run the local pre-push public-repository metadata guard before the final push/tag.
+8. Verify the final pushed revision is exactly the revision whose Actions and acceptance evidence passed.
+9. Only then may documentation state that the frozen AssetRipper baseline has been completely replicated for its defined scope.
 
-Current in-progress item: class 205 LODGroup
--------------------------------------------
-The prior world scene audit paired 2,739 class-205 documents and found differences in all of them. A source/Rust example omitted four editor base fields in Rust; nested m_LODs values, order, and renderer references still need comparison.
-
-Pushed commit `ab8cacd` adds class 205 to the Unity 2022.3 editor-TypeTree route and both regression lists. `cargo test --release --lib --locked unity_2022_3_ -- --nocapture` passed 8/8, including the selector and editor-base-field tests. This is not a full export result: the release CLI has not been rebuilt after the class-205 edit, and the LODGroup replay is pending.
-
-Next actions
-------------
-1. Recheck branch, HEAD, remote, and `git status`; preserve the two user-owned untracked paths listed below.
-2. Rebuild: `cargo build --release --locked --bin assetripper-rs`.
-3. Confirm the output directory is absent, then export to a fresh directory: `target\release\assetripper-rs.exe export-project target\real-acceptance-current-青岚山河卷-r6 ..\青岚山河卷`.
-4. Pair every source and Rust class-205 document by local fileID. Compare every nested LOD value, ordering, renderer set, and pointer target. Normalize GUIDs only through matching `.meta` relative paths. Recheck classes 64, 65, 136, and 258 in r6.
-5. If differences remain, trace them to input objects and source behavior before changing code. Add focused regression coverage; rerun the affected test group, release build, full real-sample export, and semantic comparison.
-6. Record commands, exit codes, hashes, output statistics, exact matches/differences, and external limits in `docs/differential-findings.md`, `docs/validation-log.md`, `docs/continuation.md`, and `docs/next-agent-handoff.md`. Do not mark LODGroup resolved until r6 has been compared.
-7. Inspect staged paths and diffs, commit the coherent validated increment, normal-push it, verify remote HEAD, then continue with the next actual blocker.
-
-Preservation
-------------
-Do not remove or stage the user-owned untracked `cleanup_manifest.txt` or `tools/probes/anim-convert/packages/`. Do not modify the frozen AssetRipper source or original bundles. Do not use `git reset --hard`, `git clean`, or forced pushes. Do not claim world, avatar, first-stage, or product-wide acceptance from these component-level results.
+Success criterion
+-----------------
+The project is finished only when there is no remaining evidence-backed difference within the frozen baseline scope, no unverified ledger/gap item, no required workflow represented only by a stub or proxy, all required CI/release gates pass, the Rust product runs independently, and the private acceptance corpus has never entered GitHub or public Git history.
