@@ -7,6 +7,7 @@ use std::fmt;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct EngineResourceData {
     text_assets: Vec<TextAssetEntry>,
+    mesh_assets: Vec<MeshEntry>,
     material_assets: Vec<MaterialEntry>,
     shader_assets: Vec<ShaderEntry>,
     texture_2d_assets: Vec<Texture2DEntry>,
@@ -19,6 +20,14 @@ struct TextAssetEntry {
     name: String,
     length: i32,
     hash: u128,
+    target: PredefinedEngineAssetTarget,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MeshEntry {
+    name: String,
+    vertex_count: i32,
+    sub_mesh_count: i32,
     target: PredefinedEngineAssetTarget,
 }
 
@@ -105,8 +114,8 @@ struct RawEngineResourceData {
 }
 
 impl EngineResourceData {
-    /// Parses the supported TextAsset, Material, Shader, Texture2D, Cubemap, and AudioClip subsets
-    /// of the Mining EngineResourceData model.
+    /// Parses the supported TextAsset, Mesh, Material, Shader, Texture2D, Cubemap, and AudioClip
+    /// subsets of the Mining EngineResourceData model.
     ///
     /// A missing, null, malformed, or otherwise non-deserializable nullable value means the
     /// frozen serializer produced `null` and the exporter falls back to embedded TPK data. A
@@ -122,6 +131,7 @@ impl EngineResourceData {
         };
 
         let mut text_assets = Vec::new();
+        let mut mesh_assets = Vec::new();
         let mut material_assets = Vec::new();
         let mut shader_assets = Vec::new();
         let mut texture_2d_assets = Vec::new();
@@ -163,6 +173,43 @@ impl EngineResourceData {
                     material_assets.push(MaterialEntry {
                         name: name.to_owned(),
                         shader_name,
+                        target: PredefinedEngineAssetTarget { file_id, guid },
+                    });
+                    continue;
+                }
+                if kind == "Mesh" {
+                    let Some(name) = object.get("Name").and_then(Value::as_str) else {
+                        return Ok(None);
+                    };
+                    let Some(vertex_count) = object
+                        .get("VertexCount")
+                        .and_then(Value::as_i64)
+                        .and_then(|count| i32::try_from(count).ok())
+                    else {
+                        return Ok(None);
+                    };
+                    let Some(sub_mesh_count) = object
+                        .get("SubMeshCount")
+                        .and_then(Value::as_i64)
+                        .and_then(|count| i32::try_from(count).ok())
+                    else {
+                        return Ok(None);
+                    };
+                    let Some(local_aabb) = object.get("LocalAABB").and_then(Value::as_object)
+                    else {
+                        return Ok(None);
+                    };
+                    if ["Center", "Extent"].into_iter().any(|field| {
+                        local_aabb
+                            .get(field)
+                            .is_some_and(|value| !value.is_object())
+                    }) {
+                        return Ok(None);
+                    }
+                    mesh_assets.push(MeshEntry {
+                        name: name.to_owned(),
+                        vertex_count,
+                        sub_mesh_count,
                         target: PredefinedEngineAssetTarget { file_id, guid },
                     });
                     continue;
@@ -284,13 +331,12 @@ impl EngineResourceData {
                             | "Component"
                             | "GameObject"
                             | "NamedObject"
-                            | "Mesh"
                             | "MonoBehaviour"
                             | "MonoScript"
                             | "Sprite"
                     ) {
                         return Err(super::invalid_project(format!(
-                            "stored EngineResourceData contains unsupported {kind} cache entries; only TextAsset, Material, Shader, Texture2D, Cubemap, and AudioClip matching is currently wired"
+                            "stored EngineResourceData contains unsupported {kind} cache entries; only TextAsset, Mesh, Material, Shader, Texture2D, Cubemap, and AudioClip matching is currently wired"
                         )));
                     }
                     return Ok(None);
@@ -322,6 +368,7 @@ impl EngineResourceData {
         }
         Ok(Some(Self {
             text_assets,
+            mesh_assets,
             material_assets,
             shader_assets,
             texture_2d_assets,
@@ -343,6 +390,29 @@ impl EngineResourceData {
         self.text_assets
             .iter()
             .find(|entry| entry.name == name && entry.length == length && entry.hash == hash)
+            .map(|entry| entry.target)
+    }
+
+    /// The frozen Web serializer reads System.Numerics.Vector3 public fields as empty objects,
+    /// so every stored Mesh LocalAABB reaches the cache as a zero center and extent. Mesh inputs
+    /// still compare their actual bounds against that zero-valued key.
+    pub(super) fn mesh_target(
+        &self,
+        name: &str,
+        vertex_count: i32,
+        sub_mesh_count: usize,
+        center: [f32; 3],
+        extent: [f32; 3],
+    ) -> Option<PredefinedEngineAssetTarget> {
+        self.mesh_assets
+            .iter()
+            .find(|entry| {
+                entry.name == name
+                    && entry.vertex_count == vertex_count
+                    && usize::try_from(entry.sub_mesh_count).ok() == Some(sub_mesh_count)
+                    && center == [0.0; 3]
+                    && extent == [0.0; 3]
+            })
             .map(|entry| entry.target)
     }
 
@@ -455,6 +525,40 @@ mod tests {
                 .is_none(),
             "the serialized Length participates in the source TextAsset cache key"
         );
+    }
+
+    #[test]
+    fn engine_resource_data_mesh_matches_name_counts_and_source_zero_bounds() {
+        let data = EngineResourceData::parse(Some(
+            r#"{"DefaultResources":{"777":{"$type":"Mesh","Name":"LightmappedMesh","VertexCount":0,"SubMeshCount":0,"LocalAABB":{"Center":{"X":1,"Y":2,"Z":3},"Extent":{"X":4,"Y":5,"Z":6}}}},"ExtraResources":{"779":{"$type":"Mesh","Name":"ExtraMesh","VertexCount":2,"SubMeshCount":1,"LocalAABB":{"Center":{},"Extent":{}}}}}"#,
+        ))
+        .expect("Mesh resource entries parse")
+        .expect("valid object selects a stored cache");
+        let target = data
+            .mesh_target("LightmappedMesh", 0, 0, [0.0; 3], [0.0; 3])
+            .expect("the source Web serializer drops Vector3 public fields");
+        assert_eq!(target.file_id, 777);
+        assert_eq!(target.guid[8..12], 14u32.to_le_bytes());
+        let extra_target = data
+            .mesh_target("ExtraMesh", 2, 1, [0.0; 3], [0.0; 3])
+            .expect("ExtraResources meshes retain their resource identity");
+        assert_eq!(extra_target.file_id, 779);
+        assert_eq!(extra_target.guid[8..12], 15u32.to_le_bytes());
+        assert!(data
+            .mesh_target("LightmappedMesh", 1, 0, [0.0; 3], [0.0; 3])
+            .is_none());
+        assert!(data
+            .mesh_target("LightmappedMesh", 0, 1, [0.0; 3], [0.0; 3])
+            .is_none());
+        assert!(data
+            .mesh_target("LightmappedMesh", 0, 0, [1.0, 0.0, 0.0], [0.0; 3])
+            .is_none());
+        assert!(data
+            .mesh_target("LightmappedMesh", 0, 0, [0.0; 3], [0.0, 1.0, 0.0])
+            .is_none());
+        assert!(data
+            .mesh_target("OtherMesh", 0, 0, [0.0; 3], [0.0; 3])
+            .is_none());
     }
 
     #[test]

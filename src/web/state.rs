@@ -1701,6 +1701,83 @@ mod tests {
     }
 
     #[test]
+    fn web_project_export_redirects_stored_mesh_engine_resource_data() {
+        let _source_layouts = crate::SourceFactoryLayoutGuard::use_source_factory();
+        let fixture = include_str!("../export/lightmap_project_source_5_6_meshfilter_fixture.txt");
+        let hex = fixture
+            .lines()
+            .find_map(|line| line.strip_prefix("INPUT_HEX|LightmapFixture.assets|"))
+            .expect("source fixture includes its SerializedFile input");
+        let source_bytes = hex
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                u8::from_str_radix(std::str::from_utf8(pair).expect("hex is ASCII"), 16)
+                    .expect("fixture hex is valid")
+            })
+            .collect::<Vec<_>>();
+        let directory = test_directory("engine-resource-mesh");
+        let source_path = directory.join("LightmapFixture.assets");
+        std::fs::write(&source_path, &source_bytes).expect("write source-generated fixture");
+        let source_path_text = source_path.to_string_lossy().into_owned();
+
+        let mut state = state(true);
+        state
+            .load(&[source_path_text])
+            .expect("load source-generated MeshFilter and Mesh");
+        state
+            .set_singleton_data(
+                "EngineResourceData",
+                r#"{"DefaultResources":{"777":{"$type":"Mesh","Name":"LightmappedMesh","VertexCount":0,"SubMeshCount":0,"LocalAABB":{"Center":{"X":1,"Y":0,"Z":0},"Extent":{"X":0,"Y":0,"Z":0}}}},"ExtraResources":{}}"#,
+            )
+            .expect("store source-shaped Mesh resource data");
+
+        let matching_output = directory.join("project-matching");
+        let matching_output_text = matching_output.to_string_lossy().into_owned();
+        state
+            .export_unity_project(&matching_output_text, false)
+            .expect("a matching stored Mesh redirects to the configured builtin identity");
+        let matching_project = matching_output.join("ExportedProject");
+        assert!(!matching_project
+            .join("Assets/Mesh/LightmappedMesh.asset")
+            .exists());
+        let matching_scene = std::fs::read_to_string(
+            matching_project.join("Assets/Scenes/lightmapfixture.assets.unity"),
+        )
+        .expect("scene YAML is exported");
+        assert!(matching_scene
+            .contains("m_Mesh: {fileID: 777, guid: 0000000000000000e000000000000000, type: 0}"));
+
+        state
+            .set_singleton_data(
+                "EngineResourceData",
+                r#"{"DefaultResources":{"777":{"$type":"Mesh","Name":"LightmappedMesh","VertexCount":1,"SubMeshCount":0,"LocalAABB":{"Center":{"X":1,"Y":0,"Z":0},"Extent":{"X":0,"Y":0,"Z":0}}}},"ExtraResources":{}}"#,
+            )
+            .expect("store a Mesh resource with a mismatching vertex count");
+        let mismatching_output = directory.join("project-mismatching");
+        let mismatching_output_text = mismatching_output.to_string_lossy().into_owned();
+        state
+            .export_unity_project(&mismatching_output_text, false)
+            .expect("a nonmatching stored Mesh remains normally exportable");
+        let mismatching_project = mismatching_output.join("ExportedProject");
+        let mesh_asset = mismatching_project.join("Assets/Mesh/LightmappedMesh.asset");
+        assert!(mesh_asset.is_file());
+        let mesh_meta = std::fs::read_to_string(mesh_asset.with_extension("asset.meta"))
+            .expect("normal Mesh export has metadata");
+        let mesh_guid = mesh_meta
+            .lines()
+            .find_map(|line| line.strip_prefix("guid: "))
+            .expect("Mesh metadata contains its generated GUID");
+        let mismatching_scene = std::fs::read_to_string(
+            mismatching_project.join("Assets/Scenes/lightmapfixture.assets.unity"),
+        )
+        .expect("scene YAML is exported for the cache miss");
+        assert!(mismatching_scene.contains(&format!(
+            "m_Mesh: {{fileID: 4300000, guid: {mesh_guid}, type: 2}}"
+        )));
+    }
+
+    #[test]
     fn typed_configuration_singletons_update_and_reset_the_live_settings() {
         let mut state = state(false);
         state

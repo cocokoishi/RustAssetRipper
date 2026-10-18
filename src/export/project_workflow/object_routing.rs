@@ -1354,6 +1354,27 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
             } else {
                 None
             };
+            let predefined_stored_engine_mesh = if context.engine_asset_source
+                == EngineAssetSource::StoredResourceData
+                && source_engine_guid.is_none()
+                && class_id == crate::export::res_wiring::MESH_CLASS_ID
+            {
+                payload
+                    .and_then(|payload| predefined_engine_mesh_key(&payload.root))
+                    .and_then(|key| {
+                        context.engine_resource_data.and_then(|data| {
+                            data.mesh_target(
+                                &key.name,
+                                key.vertex_count,
+                                key.sub_mesh_count,
+                                key.center,
+                                key.extent,
+                            )
+                        })
+                    })
+            } else {
+                None
+            };
             let predefined_engine_text_asset = if context.engine_asset_source
                 == EngineAssetSource::StoredResourceData
                 && source_engine_guid.is_none()
@@ -1376,6 +1397,7 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                 .or(predefined_engine_audio_clip)
                 .or(predefined_engine_cubemap)
                 .or(predefined_engine_texture)
+                .or(predefined_stored_engine_mesh)
                 .or(predefined_engine_mesh)
                 .or(predefined_engine_text_asset);
             let engine_guid =
