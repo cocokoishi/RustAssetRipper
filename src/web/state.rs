@@ -1343,6 +1343,7 @@ mod tests {
 
     #[test]
     fn project_export_uses_stored_textasset_engine_resource_data() {
+        let _source_layouts = crate::SourceFactoryLayoutGuard::use_source_factory();
         let fixture = include_str!("../processing/asset_factory_fixture.txt");
         let hex = fixture
             .lines()
@@ -1357,7 +1358,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let directory = test_directory("engine-resource-textasset");
-        let source_path = directory.join("textasset.assets");
+        let source_path = directory.join("textasset_notree.assets");
         std::fs::write(&source_path, &source_bytes).expect("write generated fixture");
         let source_path_text = source_path.to_string_lossy().into_owned();
 
