@@ -534,8 +534,7 @@
         let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
         let source_fixture =
             include_str!("export/managed_reference_missing_nested_dependency_fixture.txt");
-        assert!(source_fixture
-            .contains("MISSING|source.bundle/managed.assets|missing.assets"));
+        assert!(source_fixture.contains("MISSING|source.bundle/managed.assets|missing.assets"));
         assert!(source_fixture.contains(
             "POINTER|m_Asset: {fileID: 0, guid: 0000000deadbeef15deadf00d0000000, type: 2}"
         ));
@@ -548,7 +547,8 @@
 
         let directory = TestInputDirectory::new_root();
         let bundle_path = directory.join("workspace.bundle");
-        fs::write(&bundle_path, bundled_fixture).expect("nested missing-dependency UnityFS fixture");
+        fs::write(&bundle_path, bundled_fixture)
+            .expect("nested missing-dependency UnityFS fixture");
         let input = TestInputDirectory {
             directory: directory.clone(),
             files: vec![bundle_path.clone()],

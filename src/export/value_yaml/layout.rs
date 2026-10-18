@@ -22,9 +22,7 @@ pub(super) const TRANSFER_USING_FLOW_MAPPING_STYLE: u32 = 0x0020_0000;
 pub(super) const TRANSFER_IGNORE_IN_META_FILES: u32 = 0x0008_0000;
 
 fn pptr_target_class_id(type_name: &str) -> Option<i32> {
-    let target_type_name = type_name
-        .strip_prefix("PPtr<")?
-        .strip_suffix('>')?;
+    let target_type_name = type_name.strip_prefix("PPtr<")?.strip_suffix('>')?;
     crate::serialized_file::object::class_id_from_type_name(target_type_name)
 }
 
@@ -1099,14 +1097,15 @@ impl<'a> UnityYamlTypeTreeLayout<'a> {
 
         for child_index in self.child_indices(node_index)? {
             let child = self.node(child_index)?;
-            let field_name = child.name.as_deref().ok_or(
-                UnityYamlObjectConversionError::InvalidTypeTree {
-                    node_index: child_index,
-                    reason: "field name is unresolved",
-                },
-            )?;
-            let child_path =
-                child_field_path(field_path, field_name, limits.max_field_path_bytes)?;
+            let field_name =
+                child
+                    .name
+                    .as_deref()
+                    .ok_or(UnityYamlObjectConversionError::InvalidTypeTree {
+                        node_index: child_index,
+                        reason: "field name is unresolved",
+                    })?;
+            let child_path = child_field_path(field_path, field_name, limits.max_field_path_bytes)?;
             self.collect_pointer_target_class_ids(
                 child_index,
                 &child_path,

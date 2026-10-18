@@ -1223,13 +1223,12 @@ fn read_entry(
         let payload_tree = if let Some(tree) = resolved_tree {
             tree
         } else {
-            let matched = reference_type_index.ok_or_else(|| {
-                ManagedRegistryReadError::UnresolvableType {
-                        entry_index,
-                        unique_name: script.unique_name(),
-                        reason: TYPE_REFERENCE_NOT_FOUND.to_owned(),
-                    }
-            })?;
+            let matched =
+                reference_type_index.ok_or_else(|| ManagedRegistryReadError::UnresolvableType {
+                    entry_index,
+                    unique_name: script.unique_name(),
+                    reason: TYPE_REFERENCE_NOT_FOUND.to_owned(),
+                })?;
             let tree = references[matched].type_tree.as_ref().ok_or_else(|| {
                 ManagedRegistryReadError::UnresolvableType {
                     entry_index,

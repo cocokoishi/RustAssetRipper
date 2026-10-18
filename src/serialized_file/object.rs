@@ -17,8 +17,8 @@ pub use read_flags::{
     DEFAULT_RESOURCE_NAME_2, EDITOR_RESOURCE_NAME,
 };
 pub use recovery::{
-    class_id_from_type_name, class_id_type_name, classify_type_tree_usability,
-    raw_data_class_name, version_is_unsupported, TypeTreeUsability,
+    class_id_from_type_name, class_id_type_name, classify_type_tree_usability, raw_data_class_name,
+    version_is_unsupported, TypeTreeUsability,
 };
 pub use value::{
     ParsedObjectPayload, SerializedFieldValue, SerializedValue, SerializedValueLookupError,

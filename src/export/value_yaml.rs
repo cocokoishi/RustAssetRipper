@@ -7,6 +7,8 @@ mod object_document;
 mod paths;
 mod type_rules;
 
+pub(crate) use layout::pointer_target_class_ids_from_type_tree;
+pub(crate) use managed_reference_hints::add_managed_reference_pointer_target_hints;
 pub use model::{
     UnityYamlDictionaryRepresentation, UnityYamlEmptyArrayKind, UnityYamlGuidSchema,
     UnityYamlHash128Schema, UnityYamlObjectConversionError, UnityYamlObjectConversionHints,
@@ -15,8 +17,6 @@ pub use model::{
     UnityYamlSceneObjectIdentifierSchema,
 };
 pub use object_document::serialized_object_value_to_unity_yaml_document;
-pub(crate) use layout::pointer_target_class_ids_from_type_tree;
-pub(crate) use managed_reference_hints::add_managed_reference_pointer_target_hints;
 
 #[cfg(test)]
 mod tests;
