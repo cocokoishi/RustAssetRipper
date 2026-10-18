@@ -1,13 +1,13 @@
 # RustAssetRipper hand-off — 2026-10-17
 
-## Latest current checkpoint - 2026-10-17 (source-pinned UnityFS-to-WebData stream mount)
+## Latest current checkpoint - 2026-10-17 (UnityRaw wrapping frozen UnityWeb stream coverage)
 
-- Latest verified code revision: `aad76c3cae2851f41928945e82086216192d0287` on `main`. GitHub Actions run 39099303754 completed successfully across all eight jobs.
-- `source_unityfs_nested_webdata_routes_through_the_common_stream_mount` replays the frozen `ufs_nested_webdata` row through a UnityFS root, asserts the expected tree, compares the complete report with the legacy mount, and runs with a zero nested-byte budget. After dropping the source it checks both file-backed WebData resources, paths, and exact payload bytes.
-- Ubuntu passed 1,939 library tests and 215 CLI tests; Windows passed 1,941 library tests and 215 CLI tests; Ubuntu release-mode tests passed 1,939 library tests and 215 CLI tests. Both Clippy jobs, formatting, ledger audit, and public-repository hygiene passed.
-- `IO-STREAM-001` remains `实现中`. The parity report remains open at 409 rows: 380 verified, 29 non-verified, zero duplicate IDs, and zero malformed rows. Focused streaming coverage now includes frozen UnityRaw-to-UnityFS, UnityWeb-to-WebData, and UnityFS-to-WebData roots plus generated UnityRaw-to-WebData.
+- Latest verified code revision: `d72b9696864134f296d3eef1f31ee7de87e7ef9b` on `main`. GitHub Actions run 39100108385 completed successfully across all eight jobs.
+- `unityraw_routes_source_unityweb_through_the_common_stream_mount` wraps the frozen `web_nested_webdata` UnityWeb bytes in a generated UnityRaw envelope. It asserts the frozen child tree, budgets the decoded scene, compares the full stream report with the legacy route, then drops the source and checks all three container scopes plus both file-backed resource payloads.
+- Ubuntu passed 1,940 library tests and 215 CLI tests; Windows passed 1,942 library tests and 215 CLI tests; Ubuntu release-mode tests passed 1,940 library tests and 215 CLI tests. Both Clippy jobs, formatting, ledger audit, and public-repository hygiene passed.
+- `IO-STREAM-001` remains `实现中`. The parity report remains open at 409 rows: 380 verified, 29 non-verified, zero duplicate IDs, and zero malformed rows. Focused stream coverage includes frozen UnityRaw-to-UnityFS, UnityWeb-to-WebData and UnityFS-to-WebData roots, plus generated UnityRaw-to-WebData and UnityRaw-to-UnityWeb compositions.
 - CI release artifacts remain available from run 39096214403: Windows executable and a Linux tar archive preserving executable mode. The downloaded Windows binary returned `--help`; the Linux archive contained `assetripper-rs` with executable mode.
-- **Primary next gap:** verify UnityRaw wrapping a frozen UnityWeb bundle through the streaming mount, comparing the generated outer fixture's full report with the legacy route and checking the nested WebData resources after dropping the source.
+- **Primary next gap:** stream the generated three-level UnityRaw-to-UnityRaw-to-WebData fixture through `mount_stream_container_tree`; compare its report with the legacy mount and verify all three scopes and exact leaf bytes after dropping the source.
 
 ## Previous checkpoint - 2026-10-17 (the primary-content export is verified end to end)
 
