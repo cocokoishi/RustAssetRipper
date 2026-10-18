@@ -577,6 +577,51 @@
             .iter()
             .position(|file| file.virtual_path.ends_with("source.bundle/managed.assets"))
             .expect("missing requester stays nested under source.bundle");
+        let node_a_type_index = workspace.files()[requester_file_index]
+            .metadata
+            .reference_types
+            .iter()
+            .position(|reference| reference.class_name.as_deref() == Some("NodeA"))
+            .expect("serialized reference table retains NodeA's TypeTree");
+        assert!(workspace.files()[requester_file_index]
+            .metadata
+            .reference_types[node_a_type_index]
+            .type_tree
+            .as_ref()
+            .expect("NodeA TypeTree is available")
+            .nodes
+            .iter()
+            .any(|node| node.type_name.as_deref() == Some("PPtr<$Object>")));
+        let object_workspace = super::load_object_workspace(
+            &filesystem,
+            &workspace,
+            super::ObjectWorkspaceLimits::default(),
+        )
+        .expect("nested managed registry is decoded");
+        let managed_root = object_workspace
+            .objects_for_file(requester_file_index)
+            .iter()
+            .find(|object| object.path_id == 42)
+            .expect("nested workspace contains ManagedRoot");
+        let managed_root_payload = managed_root
+            .payload
+            .as_ref()
+            .expect("ManagedRoot payload is decoded");
+        let assetripper::serialized_file::object::SerializedValue::ManagedReferenceRegistry(
+            registry,
+        ) = managed_root_payload
+            .root
+            .unique_field("references")
+            .unwrap()
+            .expect("ManagedRoot retains its reference registry")
+        else {
+            panic!("ManagedRoot references field is a managed registry");
+        };
+        assert_eq!(
+            registry.entries[0].reference_type_index,
+            Some(node_a_type_index),
+            "each managed registry entry retains its serialized TypeTree identity"
+        );
         assert!(dependency_report.requests.iter().any(|request| {
             request.source_file_index == requester_file_index
                 && request.dependency_name == "missing.assets"

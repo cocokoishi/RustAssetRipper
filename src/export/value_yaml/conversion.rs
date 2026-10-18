@@ -300,11 +300,15 @@ where
             }
         }
         SerializedValue::PPtr { file_id, path_id } => {
-            let expected_class_id = if field_path.contains('[') {
+            let expected_class_id = if let Some(class_id) =
+                hints.pointer_target_class_ids.get(field_path).copied()
+            {
+                Some(class_id)
+            } else if field_path.contains('[') {
                 let canonical_path = canonical_array_path(field_path, limits.max_field_path_bytes)?;
                 hints.pointer_target_class_ids.get(&canonical_path).copied()
             } else {
-                hints.pointer_target_class_ids.get(field_path).copied()
+                None
             };
             let resolution = if *path_id == 0 {
                 ProjectPointerResolution::Null
