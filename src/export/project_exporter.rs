@@ -1086,7 +1086,12 @@ fn execute_project_export_with_streams_with_layout(
             if support.before_file_index != index {
                 break;
             }
-            write_new_project_file(&project_root, &support.relative_path, &support.bytes, limits)?;
+            write_new_project_file(
+                &project_root,
+                &support.relative_path,
+                &support.bytes,
+                limits,
+            )?;
             support_file_count += 1;
             next_support_file += 1;
         }
@@ -1136,7 +1141,12 @@ fn execute_project_export_with_streams_with_layout(
             }
             .into());
         }
-        write_new_project_file(&project_root, &support.relative_path, &support.bytes, limits)?;
+        write_new_project_file(
+            &project_root,
+            &support.relative_path,
+            &support.bytes,
+            limits,
+        )?;
         support_file_count += 1;
         next_support_file += 1;
     }
@@ -1154,13 +1164,18 @@ fn execute_project_export_with_streams_with_layout(
         limits,
     )?;
     for directory in &streamed_post_exports.directories {
-        let path_root = project_export_path_root(directory, output_root, &project_root, output_layout);
+        let path_root =
+            project_export_path_root(directory, output_root, &project_root, output_layout);
         create_project_directory(path_root, directory, limits)?;
     }
     for file in &streamed_post_exports.files {
         let (mut stream, _) = file.stream.create_partial_file_backed(0, file.byte_count)?;
-        let path_root =
-            project_export_path_root(&file.relative_path, output_root, &project_root, output_layout);
+        let path_root = project_export_path_root(
+            &file.relative_path,
+            output_root,
+            &project_root,
+            output_layout,
+        );
         write_new_project_stream(
             path_root,
             &file.relative_path,
@@ -1170,8 +1185,12 @@ fn execute_project_export_with_streams_with_layout(
         )?;
     }
     for file in &plan.post_export_files {
-        let path_root =
-            project_export_path_root(&file.relative_path, output_root, &project_root, output_layout);
+        let path_root = project_export_path_root(
+            &file.relative_path,
+            output_root,
+            &project_root,
+            output_layout,
+        );
         write_new_project_file(path_root, &file.relative_path, &file.bytes, limits)?;
     }
     events.push(ProjectExportEvent::ExportFinished);

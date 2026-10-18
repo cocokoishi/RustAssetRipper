@@ -605,9 +605,9 @@ pub use self::export::{
     export_workspace_yaml_project_with_serialized_settings_and_engine_resource_data,
     export_workspace_yaml_project_with_serialized_settings_and_engine_resource_data_at_export_root,
 };
-pub use super::project_exporter::ProjectExportOutputLayout;
 /// The decoded display-name helper, shared with the web tree pages.
 pub use self::workspace_identity::object_asset_name;
+pub use super::project_exporter::ProjectExportOutputLayout;
 
 #[cfg(test)]
 #[path = "project_workflow/tests/mod.rs"]
