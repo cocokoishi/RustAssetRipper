@@ -1056,6 +1056,17 @@ mod tests {
         ];
 
         for (name, texture_format, unity_version, data, expected_hash) in cases {
+            let mut info = CrnTextureInfo::default();
+            assert!(
+                info.crnd_get_texture_info(data, data.len() as u32),
+                "{name} CRN header"
+            );
+            assert_eq!(
+                (info.width, info.height, info.levels, info.faces),
+                (512, 512, 10, 1),
+                "{name} fixture dimensions, mip count, and face count"
+            );
+
             let image = TextureImage {
                 texture_format,
                 graphics_format: 0,

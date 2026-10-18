@@ -136,18 +136,18 @@ public static class Program
 
     private delegate bool TryDecompressSpan(ReadOnlySpan<byte> data, out byte[]? decoded);
 
-    /// The CRN header: magic, then the level and face counts the format stores.
+    /// The CRN header's big-endian dimensions and single-byte level/face counts.
     private static (int Width, int Height, int Levels, int Faces) ReadCrnHeader(byte[] data)
     {
-        if (data.Length < 16)
+        if (data.Length < 18)
         {
             return (-1, -1, -1, -1);
         }
-        // Bytes 0-1 are the 'Hx' magic; 2-3 are the header size; 4-5 and 6-7 are the CRC16s; the
-        // level count is a little-endian u16 at 8, the face count at 10.
-        int levels = BitConverter.ToUInt16(data, 8);
-        int faces = BitConverter.ToUInt16(data, 10);
-        return (BitConverter.ToUInt16(data, 12), BitConverter.ToUInt16(data, 14), levels, faces);
+        // CRN stores width and height as big-endian u16 values at offsets 12 and 14, followed by
+        // one-byte level and face counts at offsets 16 and 17.
+        int width = (data[12] << 8) | data[13];
+        int height = (data[14] << 8) | data[15];
+        return (width, height, data[16], data[17]);
     }
 
     private static Assembly? Load(string root, string file)
