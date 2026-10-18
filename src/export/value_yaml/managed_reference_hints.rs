@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::serialized_file::managed_registry::ManagedRegistryEntryData;
 use crate::serialized_file::metadata::SerializedTypeReference;
 use crate::serialized_file::object::SerializedValue;
@@ -7,6 +9,15 @@ use super::model::{
     UnityYamlObjectConversionError, UnityYamlObjectConversionHints, UnityYamlObjectConversionLimits,
 };
 use super::paths::{child_field_path, indexed_field_path, try_copy_string, ConversionBudget};
+
+struct TypedPointerHintContext<'a> {
+    data_root_path: &'a str,
+    targets: &'a HashMap<String, i32>,
+    reference_types: &'a [SerializedTypeReference],
+    hints: &'a mut UnityYamlObjectConversionHints,
+    limits: UnityYamlObjectConversionLimits,
+    budget: &'a mut ConversionBudget,
+}
 
 pub(crate) fn add_managed_reference_pointer_target_hints(
     root: &SerializedValue,
@@ -84,17 +95,15 @@ fn collect_pointer_hints(
                 } else {
                     Default::default()
                 };
-                collect_typed_pointer_hints(
-                    data,
-                    &data_path,
-                    &data_path,
-                    &targets,
-                    depth + 2,
+                let mut context = TypedPointerHintContext {
+                    data_root_path: &data_path,
+                    targets: &targets,
                     reference_types,
                     hints,
                     limits,
                     budget,
-                )?;
+                };
+                collect_typed_pointer_hints(data, &data_path, depth + 2, &mut context)?;
             }
         }
         _ => {}
@@ -105,66 +114,41 @@ fn collect_pointer_hints(
 fn collect_typed_pointer_hints(
     value: &SerializedValue,
     field_path: &str,
-    data_root_path: &str,
-    targets: &std::collections::HashMap<String, i32>,
     depth: usize,
-    reference_types: &[SerializedTypeReference],
-    hints: &mut UnityYamlObjectConversionHints,
-    limits: UnityYamlObjectConversionLimits,
-    budget: &mut ConversionBudget,
+    context: &mut TypedPointerHintContext<'_>,
 ) -> Result<(), UnityYamlObjectConversionError> {
-    budget.visit(depth)?;
-    budget.check_field_path(field_path)?;
+    context.budget.visit(depth)?;
+    context.budget.check_field_path(field_path)?;
 
     match value {
         SerializedValue::Struct(fields) => {
             for field in fields {
                 let child_path =
-                    child_field_path(field_path, &field.name, limits.max_field_path_bytes)?;
-                collect_typed_pointer_hints(
-                    &field.value,
-                    &child_path,
-                    data_root_path,
-                    targets,
-                    depth + 1,
-                    reference_types,
-                    hints,
-                    limits,
-                    budget,
-                )?;
+                    child_field_path(field_path, &field.name, context.limits.max_field_path_bytes)?;
+                collect_typed_pointer_hints(&field.value, &child_path, depth + 1, context)?;
             }
         }
         SerializedValue::Array(values) => {
             for (index, element) in values.iter().enumerate() {
                 let element_path =
-                    indexed_field_path(field_path, index, limits.max_field_path_bytes)?;
-                collect_typed_pointer_hints(
-                    element,
-                    &element_path,
-                    data_root_path,
-                    targets,
-                    depth + 1,
-                    reference_types,
-                    hints,
-                    limits,
-                    budget,
-                )?;
+                    indexed_field_path(field_path, index, context.limits.max_field_path_bytes)?;
+                collect_typed_pointer_hints(element, &element_path, depth + 1, context)?;
             }
         }
         SerializedValue::PPtr { .. } => {
-            let relative_path = if field_path == data_root_path {
+            let relative_path = if field_path == context.data_root_path {
                 ""
             } else {
                 let Some(relative_path) = field_path
-                    .strip_prefix(data_root_path)
+                    .strip_prefix(context.data_root_path)
                     .and_then(|path| path.strip_prefix('.'))
                 else {
                     return Ok(());
                 };
                 relative_path
             };
-            if let Some(class_id) = target_class_id_for_path(relative_path, targets)? {
-                insert_pointer_target_hint(hints, field_path, class_id)?;
+            if let Some(class_id) = target_class_id_for_path(relative_path, context.targets)? {
+                insert_pointer_target_hint(context.hints, field_path, class_id)?;
             }
         }
         SerializedValue::ManagedReferenceRegistry(_) => {
@@ -172,10 +156,10 @@ fn collect_typed_pointer_hints(
                 value,
                 field_path,
                 depth,
-                reference_types,
-                hints,
-                limits,
-                budget,
+                context.reference_types,
+                context.hints,
+                context.limits,
+                context.budget,
             )?;
         }
         _ => {}
