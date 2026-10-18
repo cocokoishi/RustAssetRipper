@@ -1,12 +1,12 @@
 # RustAssetRipper Agent Rules
 
-## Workspace
+## 1. Workspace
 
-The current working directory `.` **is the RustAssetRipper repository root**. Do not look for or create `main-work/`, another checkout, or another Rust implementation.
+`.` is the **RustAssetRipper repository root and working directory**. Do not look for `main-work/`, create another checkout, or start another implementation.
 
-Only this repository is a write target. Local reference directories such as `../AssetRipper` and `../UABEA` are **read-only development oracles**. Private VRChat/Unity inputs and their derived outputs stay local and outside Git.
+Only this repository is writable. `../AssetRipper` and `../UABEA` are local **read-only reference oracles** when present. Private VRChat/Unity samples and derived outputs stay outside Git.
 
-At session start, inspect only current truth:
+Start from current truth:
 
 ```text
 git status
@@ -15,118 +15,99 @@ git rev-parse HEAD
 git fetch origin
 ```
 
-Then read `GOAL.TXT`, the live parity report, the relevant rows of `docs/feature-parity.md`, the latest relevant handoff/evidence, and the Actions state for the current pushed revision. Do not blindly follow stale handoff prose.
+Then read `GOAL.TXT`, the live parity report, only the relevant parity/handoff/evidence entries, and the Actions state for current HEAD. Never obey a stale blocker just because an old handoff mentions it.
 
-## Mission
+## 2. Mission
 
-Drive RustAssetRipper to the complete behavioral-replica goal in `GOAL.TXT`. Compilation, broad parsing, successful export, many passing tests, or support for current samples are **progress, not completion**.
+Drive RustAssetRipper to the complete behavioral replica defined by `GOAL.TXT`. Compiling, exporting something, supporting current samples, or having most tests pass is not completion.
 
-The shipping implementation must be Rust-owned. AssetRipper, UABEA, .NET/C# helpers, and other rippers may guide development but must never be required at runtime.
+Shipping behavior must be Rust-owned. AssetRipper, UABEA, .NET/C# helpers, and other tools are development oracles only.
 
-## Oracle model
+## 3. Three-way differential oracle
 
-Use all available evidence instead of treating one tool as infallible:
+Use the strongest available evidence:
 
-- **Frozen AssetRipper** is the primary behavioral target.
-- **UABEA** is an independent differential oracle and should be used whenever it can expose parsing, object, field, resource, or export discrepancies.
-- **Original Unity bytes/format semantics** arbitrate disagreements between tools.
+- **Frozen AssetRipper** = primary behavioral target.
+- **UABEA** = independent cross-check, especially for containers, objects, fields, resources, and serialized data.
+- **Original Unity bytes / format semantics** = arbiter when tools disagree.
 
-For useful cases, compare the same input through **RustAssetRipper vs AssetRipper vs UABEA**, not Rust vs AssetRipper only. A match between two tools is evidence, not proof; investigate meaningful disagreements before changing Rust.
+Where useful, run the same input through **RustAssetRipper + AssetRipper + UABEA** and compare semantics, not just filenames/counts. Never copy a UABEA quirk that contradicts the frozen AssetRipper target or the underlying data.
 
-Never change Rust merely to imitate a UABEA quirk that conflicts with the frozen AssetRipper baseline or the underlying format.
+## 4. Forward-only convergence
 
-## Forward-only convergence
+Every cycle must close or materially narrow **one named reproducible gap**.
 
-Every engineering cycle must close or materially narrow **one named, reproducible gap**.
+Before editing, know:
 
-Before editing, know four things:
+1. the observable mismatch;
+2. the reference behavior/source;
+3. the Rust path;
+4. the exact evidence that means “closed”.
 
-1. what observable behavior is wrong or missing;
-2. where the frozen reference behavior comes from;
-3. where the Rust path is;
-4. what evidence will prove the gap closed.
+Priority: current CI failure → blocker affecting many rows/workflows → missing baseline behavior → implemented-but-unverified behavior → isolated gap.
 
-Choose work in this order:
+Do **not** spend sessions rewriting plans, repeating broad audits, polishing verified code, adding duplicate tests, or refactoring without parity impact.
 
-1. CI failure on current HEAD;
-2. blocker affecting multiple parity rows/workflows;
-3. real missing baseline behavior;
-4. implemented-but-unverified behavior that can now be proven;
-5. isolated low-impact gaps.
+If two attempts on the same gap produce no new evidence and no narrower root cause, stop guessing. Retrace from original bytes, AssetRipper, UABEA, and format rules before editing again.
 
-Do not spend a session rewriting plans, repeating broad audits, polishing verified areas, adding duplicate tests, or refactoring without parity impact.
-
-**One strong vertical slice beats ten partial edits.**
-
-If two consecutive attempts on the same gap produce neither new evidence nor a narrower root cause, stop patching blindly. Retrace from original bytes / AssetRipper / UABEA / format rules, then make the next change.
-
-## Implementation loop
-
-For the selected gap:
+## 5. Execution loop
 
 ```text
-locate/reproduce mismatch
-→ inspect AssetRipper + UABEA where useful
-→ trace original data semantics
+pick highest-leverage live gap
+→ reproduce/locate it
+→ inspect AssetRipper and UABEA where useful
+→ trace original semantics
 → implement the smallest general Rust fix
 → add focused regression evidence
-→ inspect diff
+→ review diff
 → commit
-→ run privacy guard / inspect outgoing paths
+→ python3 tools/check_public_repository.py
+→ inspect outgoing paths
 → push
 → inspect GitHub Actions
 → fix CI if needed
-→ record only useful evidence
+→ update only necessary evidence/handoff
 → immediately take the next live gap
 ```
 
-Do not wait for user confirmation after normal commits. Continue until genuinely blocked or the full goal is reached.
+Do not ask whether to continue after normal engineering steps. Continue until genuinely blocked or `GOAL.TXT` is satisfied.
 
-Fix general Unity/version/serialization/export rules. Never special-case private filenames, hashes, PathIDs, object names, avatars, worlds, or one output directory.
+Never special-case a private filename/hash/PathID/object/avatar/world. Fix the general Unity version/serialization/resource/export rule.
 
-Never fake parity by dropping fields/resources, substituting null/default/zero, returning success from an incomplete path, raw-dumping data that requires structured export, weakening assertions, widening tolerances after seeing a failure, deleting failing tests, or calling unrun validation passed.
+Never fake parity by dropping data, substituting defaults/null/zero, raw-dumping instead of structured behavior, weakening assertions/tolerances, deleting failing tests, or calling unrun validation passed.
 
-## Actions-first
+## 6. Actions-first
 
-Use GitHub Actions for heavy build/test/release work by default. Locally prefer source inspection, editing, targeted lightweight checks, formatting, diff review, privacy checks, and private acceptance with CI-built binaries.
+Use GitHub Actions for heavy build/test/release work. Locally prefer inspection, editing, targeted cheap checks, diff/privacy review, and private acceptance with CI-built binaries.
 
-Do not repeatedly run full local `cargo build`, `cargo test`, release builds, Clippy, or large integration suites when Actions already covers them. If CI is red because of the current change, repair it before starting unrelated work.
+Do not repeatedly run full local builds/tests/Clippy when Actions already covers them. If current CI is red, fix it before unrelated work.
 
-Make coherent, bisectable commits frequently. Do not accumulate a huge rewrite.
+Commit and push coherent progress frequently; do not accumulate a giant rewrite. Never force-push or destructive-clean unrelated user work.
 
-Before commit/push, review explicit paths and run the repository privacy guard. Never force-push as normal workflow, never destructive-clean user work, and never stage unrelated files.
+## 7. Private data wall
 
-## Private VRChat / Unity data
+Private `.vrca`, `.vrcw`, bundles, extracted assets, dumps, derived Unity projects, private names, hashes, and reconstructive outputs must never enter Git, GitHub, Actions, artifacts, caches, issues, PRs, commit messages, public docs, or CI logs.
 
-Private `.vrca`, `.vrcw`, bundles, extracted assets, dumps, derived Unity projects, proprietary resources, private names, and reconstructive outputs must never enter Git, GitHub, Actions, artifacts, caches, issues, PRs, commit messages, public docs, or CI logs.
-
-Private differential acceptance is local-only:
+Private acceptance stays local:
 
 ```text
-CI-built Rust binary
-+ local private input
-+ local frozen AssetRipper
-+ local UABEA
-→ semantic comparison
-→ sanitized conclusions only
+CI-built Rust binary + private input
+        ↕
+local AssetRipper + local UABEA
+        ↓
+sanitary semantic conclusions only
 ```
 
-Use anonymous labels in public evidence. Do not publish private filenames, absolute paths, content hashes, object names, or raw payloads.
+A private sample may reveal a bug; the committed fix must be general and, when feasible, receive a public/synthetic regression.
 
-A private sample may reveal a bug; the fix must become a general implementation rule and, when feasible, a public/synthetic regression.
+## 8. Evidence and done
 
-## Evidence
+Compare the deepest stable semantics available: type/object identity, PPtrs/dependencies, resources, scene/Prefab/animation structure, meshes, textures/materials/shaders/audio/video, exported fields, `.meta`/GUID/local-fileID relations, project config, CLI/Web/API behavior, and errors. Normalize only proven nondeterminism.
 
-Compare semantics, not appearance or counts. Depending on the gap, compare containers, SerializedFiles, TypeTrees, ClassID/PathID identity, PPtrs, dependencies, resources, scenes/Prefabs, animation, meshes, textures/materials/shaders/audio/video, exported fields, `.meta`/GUID/local-fileID relations, project config, CLI, Web/API, and error behavior.
+`docs/feature-parity.md` is the status authority. Validation/differential docs store evidence; `docs/next-agent-handoff.md` stores current continuation state. Do not create more roadmaps unless existing structures truly cannot represent the result.
 
-Normalize only values proven nondeterministic or semantically irrelevant.
+Progress means a real gap closes/narrows, a parity row advances, a workflow becomes executable, or a concrete CI/privacy/release blocker disappears — not merely more code or more notes.
 
-Keep documentation short and useful. `docs/feature-parity.md` is the authoritative status ledger; validation/differential docs store evidence; `docs/next-agent-handoff.md` stores only current continuation truth. Do not create new roadmaps or session diaries when existing structures suffice.
+Do not declare completion until `GOAL.TXT` is satisfied on one revision: zero required parity gaps, strict closure passes, required Actions are green, release artifacts exist, public differential coverage passes, and local private acceptance passes without private data entering GitHub.
 
-A session is progress only if a parity row advances, required behavior lands, a real mismatch disappears, a product flow becomes executable, CI/privacy/release blocking is removed, or a root cause becomes materially narrower.
-
-## Done
-
-Do not call the project complete until `GOAL.TXT` is satisfied at one revision: no required parity gaps remain, strict closure checks pass, required Actions are green, release artifacts exist, public differential coverage passes, and authorized private acceptance is clean locally without private data entering GitHub.
-
-Until then: **take the highest-leverage live gap, close it, commit, push, verify, and move forward.**
+**Until then: choose the highest-leverage live gap, close it, commit, push, verify, and keep moving.**
