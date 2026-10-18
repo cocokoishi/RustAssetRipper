@@ -46,6 +46,7 @@ fn should_use_scene_editor_type_tree(class_id: i32, unity_version_text: Option<&
     let Some(version) = unity_version_text.and_then(FactoryUnityVersion::parse) else {
         return false;
     };
+    let supported_2019_4_texture = version.major == 2019 && version.minor == 4 && class_id == 28;
     let supported_version =
         (version.major == 5 && version.minor == 6) || (version.major == 2022 && version.minor == 3);
     let supported_class = matches!(class_id, 1 | 4 | 23 | 28 | 33 | 108)
@@ -157,7 +158,7 @@ fn should_use_scene_editor_type_tree(class_id: i32, unity_version_text: Option<&
                     | 1_183_024_399
                     | 1_818_360_610
             ));
-    supported_version && supported_class
+    supported_2019_4_texture || (supported_version && supported_class)
 }
 
 fn should_preserve_type_tree_field_names(
@@ -4926,6 +4927,70 @@ mod tests {
         assert!(should_preserve_type_tree_field_names(
             28,
             &FactoryAssetKind::Generated("Texture2D_5_5".to_owned()),
+            true,
+            false,
+            false,
+        ));
+    }
+
+    #[test]
+    fn unity_2019_4_texture2d_uses_editor_tree_fields_and_hash_schema() {
+        let version = FactoryUnityVersion::parse("2019.4.40f1").unwrap();
+        let (release, editor) = reference_class_layouts()
+            .tpk_trees(28, &version)
+            .unwrap()
+            .expect("Unity 2019.4 source TPK must contain the Texture2D layout");
+
+        assert!(should_use_scene_editor_type_tree(28, Some("2019.4.40f1")));
+        assert!(!should_use_scene_editor_type_tree(1, Some("2019.4.40f1")));
+        assert!(!should_use_scene_editor_type_tree(28, Some("2019.3.0f1")));
+        assert_eq!(editor.nodes[0].type_name.as_deref(), Some("Texture2D"));
+        for field in [
+            "m_ObjectHideFlags",
+            "m_CorrespondingSourceObject",
+            "m_PrefabInstance",
+            "m_PrefabAsset",
+            "m_ImageContentsHash",
+            "m_AlphaIsTransparency",
+        ] {
+            assert!(
+                editor
+                    .nodes
+                    .iter()
+                    .any(|node| node.name.as_deref() == Some(field)),
+                "Unity 2019.4 Texture2D editor tree must contain {field}"
+            );
+            assert!(
+                !release
+                    .nodes
+                    .iter()
+                    .any(|node| node.name.as_deref() == Some(field)),
+                "Unity 2019.4 Texture2D release tree must omit {field}"
+            );
+        }
+        for field in ["m_TextureFormat", "m_TextureDimension"] {
+            assert!(editor
+                .nodes
+                .iter()
+                .any(|node| node.name.as_deref() == Some(field)));
+        }
+
+        let hints = UnityYamlObjectConversionHints::from_type_tree(
+            &editor,
+            SceneUnityVersion::parse("2019.4.40f1").unwrap(),
+            UnityYamlObjectConversionLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            hints
+                .hash128_schemas
+                .get("m_ImageContentsHash")
+                .map(|schema| schema.serialized_version),
+            Some(2)
+        );
+        assert!(should_preserve_type_tree_field_names(
+            28,
+            &FactoryAssetKind::Generated("Texture2D_2017".to_owned()),
             true,
             false,
             false,

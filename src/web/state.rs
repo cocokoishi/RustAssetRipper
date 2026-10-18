@@ -1787,6 +1787,47 @@ mod tests {
     }
 
     #[test]
+    fn web_project_export_matches_2019_4_texture2d_yaml() {
+        let _source_layouts = crate::SourceFactoryLayoutGuard::use_source_factory();
+        let fixture = include_str!("../export/lightmap_project_source_2019_4_fixture.txt");
+        let hex = fixture
+            .lines()
+            .find_map(|line| line.strip_prefix("INPUT_HEX|LightmapFixture.assets|"))
+            .expect("source fixture includes its SerializedFile input");
+        let source_bytes = hex
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                u8::from_str_radix(std::str::from_utf8(pair).expect("hex is ASCII"), 16)
+                    .expect("fixture hex is valid")
+            })
+            .collect::<Vec<_>>();
+        let directory = test_directory("texture-yaml-2019-4");
+        let source_path = directory.join("LightmapFixture.assets");
+        std::fs::write(&source_path, &source_bytes).expect("write source-generated fixture");
+        let source_path_text = source_path.to_string_lossy().into_owned();
+
+        let mut state = state(true);
+        state
+            .load(&[source_path_text])
+            .expect("load the source-generated Lightmap Texture2D");
+        let output = directory.join("project");
+        state
+            .export_unity_project(&output.to_string_lossy(), false)
+            .expect("export the project through the Web default settings");
+
+        let texture_path = output
+            .join("ExportedProject/Assets/Scenes/lightmapfixture.assets/LightmapFixture.texture2D");
+        let texture = std::fs::read_to_string(&texture_path)
+            .expect("the Web YAML route exports the Lightmap Texture2D");
+        assert_eq!(
+            texture,
+            include_str!("../export/lightmap_project_web_texture2d_source_2019_4.yaml"),
+            "Unity 2019.4 Texture2D YAML differs from frozen source"
+        );
+    }
+
+    #[test]
     fn web_project_export_applies_stored_sprite_texture_group_gate() {
         let _source_layouts = crate::SourceFactoryLayoutGuard::use_source_factory();
         let fixture = include_str!("../export/sprite_atlas_project_source_2019_4_fixture.txt");
