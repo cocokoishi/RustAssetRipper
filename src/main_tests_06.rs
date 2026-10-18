@@ -672,11 +672,10 @@
     }
 
     #[test]
-    fn export_project_keeps_nested_missing_array_dependency_pointers_as_source_missing_references() {
+    fn export_project_preserves_nested_missing_array_pointers() {
         let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
-        let source_fixture = include_str!(
-            "export/managed_reference_missing_nested_array_dependency_fixture.txt"
-        );
+        let source_fixture =
+            include_str!("export/managed_reference_missing_nested_array_dependency_fixture.txt");
         assert!(source_fixture.contains("MISSING|source.bundle/managed.assets|missing.assets"));
         assert!(source_fixture.contains(
             "POINTERS|- {fileID: 0, guid: 0000000deadbeef15deadf00d0000000, type: 2}|- {fileID: 0, guid: 0000000deadbeef15deadf00d0000000, type: 2}"
@@ -733,8 +732,7 @@
             .as_ref()
             .expect("NodeA TypeTree is available");
         assert!(node_a_tree.nodes.iter().any(|node| {
-            node.type_name.as_deref() == Some("vector")
-                && node.name.as_deref() == Some("m_Assets")
+            node.type_name.as_deref() == Some("vector") && node.name.as_deref() == Some("m_Assets")
         }));
         assert!(node_a_tree.nodes.iter().any(|node| {
             node.type_name.as_deref() == Some("Array") && node.name.as_deref() == Some("Array")
@@ -793,7 +791,9 @@
             .iter()
             .filter(|reference| {
                 reference.source_file_index == requester_file_index
-                    && reference.field_path.starts_with("references.RefIds[0].data.m_Assets[")
+                    && reference
+                        .field_path
+                        .starts_with("references.RefIds[0].data.m_Assets[")
             })
             .collect::<Vec<_>>();
         assert_eq!(managed_array_pointers.len(), 2);
@@ -802,7 +802,9 @@
             let pointer = managed_array_pointers
                 .iter()
                 .find(|reference| reference.field_path == expected_path)
-                .unwrap_or_else(|| panic!("managed array pointer path {expected_path} is retained"));
+                .unwrap_or_else(|| {
+                    panic!("managed array pointer path {expected_path} is retained")
+                });
             assert_eq!(
                 pointer.resolution,
                 assetripper::serialized_file::reference_graph::MultiFilePPtrResolution::MissingDependency {
@@ -827,7 +829,8 @@
         assert_eq!(source_root_yaml.trim_end(), root_yaml.trim_end());
         assert_eq!(fs::read(&bundle_path).unwrap(), bundled_fixture);
 
-        fs::remove_dir_all(&output_root).expect("remove nested missing array dependency project output");
+        fs::remove_dir_all(&output_root)
+            .expect("remove nested missing array dependency project output");
         drop(input);
     }
 
