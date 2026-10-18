@@ -652,52 +652,111 @@
     }
 
     #[test]
-    fn object_workspace_keeps_unknown_no_tree_objects_unresolved() {
+    fn object_workspace_replays_source_unknown_object_raw_fallbacks() {
         let fixture = crate::processing::asset_factory::PROBE_FIXTURE;
-        let hex = fixture
-            .lines()
-            .find_map(|line| line.strip_prefix("SF_HEX|unknown_class|"))
-            .expect("the source-factory fixture includes an unknown class");
-        let bytes = hex
-            .as_bytes()
-            .chunks_exact(2)
-            .map(|pair| {
-                let digits = std::str::from_utf8(pair).expect("fixture hex is ASCII");
-                u8::from_str_radix(digits, 16).expect("fixture hex is valid")
-            })
-            .collect::<Vec<_>>();
-        let filesystem = virtual_file_system("/game/unknown_class.assets", &bytes);
-        let workspace = SerializedFileWorkspace::load_from_vfs(
-            &filesystem,
-            &[input("/game/unknown_class.assets")],
-            SerializedFileWorkspaceLimits::default(),
-        )
-        .expect("workspace retains an unknown serialized class");
+        for case in ["unknown_class", "unknown_no_tree"] {
+            let hex = fixture
+                .lines()
+                .find_map(|line| line.strip_prefix(&format!("SF_HEX|{case}|")))
+                .unwrap_or_else(|| panic!("the source-factory fixture includes {case}"));
+            let bytes = hex
+                .as_bytes()
+                .chunks_exact(2)
+                .map(|pair| {
+                    let digits = std::str::from_utf8(pair).expect("fixture hex is ASCII");
+                    u8::from_str_radix(digits, 16).expect("fixture hex is valid")
+                })
+                .collect::<Vec<_>>();
+            let source_asset = fixture
+                .lines()
+                .find(|line| line.starts_with(&format!("SF_READ|{case}|ASSET|")))
+                .unwrap_or_else(|| panic!("the source-factory fixture records {case}"));
+            let source_fields: Vec<_> = source_asset.split('|').collect();
+            let source_field = |name: &str| {
+                source_fields
+                    .iter()
+                    .find_map(|field| field.strip_prefix(&format!("{name}=")))
+                    .unwrap_or_else(|| panic!("{case} source row has {name}"))
+            };
+            assert_eq!(source_field("type"), "UnknownObject");
+            let expected_class_id = source_field("class")
+                .parse::<i32>()
+                .expect("source class ID is an integer");
+            let expected_class_name = source_field("classname");
+            let expected_name = source_field("name");
+            let virtual_path = format!("/game/{case}.assets");
+            let filesystem = virtual_file_system(&virtual_path, &bytes);
+            let workspace = SerializedFileWorkspace::load_from_vfs(
+                &filesystem,
+                &[input(&virtual_path)],
+                SerializedFileWorkspaceLimits::default(),
+            )
+            .unwrap_or_else(|error| panic!("{case}: workspace load failed: {error}"));
 
-        assert!(!workspace.files()[0].reference_graph.is_complete());
-        assert!(!workspace.files()[0]
-            .reference_graph
-            .object_scan_is_complete(0));
-        let objects = ObjectWorkspace::load_from_vfs(
-            &filesystem,
-            &workspace,
-            ObjectWorkspaceLimits::default(),
-        )
-        .expect("unknown objects remain raw-retained rather than aborting the workspace");
-        assert!(!objects.report().is_complete());
-        assert_eq!(objects.report().decoded_objects, 0);
-        assert_eq!(objects.report().undecoded_objects, 1);
-        assert!(matches!(
-            objects.objects()[0].payload.as_ref().unwrap_err().kind(),
-            crate::serialized_file::file::SerializedFileErrorKind::Object(object_error)
-                if matches!(
-                    object_error.kind(),
-                    crate::serialized_file::object::ObjectDecodeErrorKind::FactoryObjectOutcome {
-                        class_id: 7,
-                        ..
-                    }
-                )
-        ));
+            assert!(!workspace.files()[0].reference_graph.is_complete());
+            assert!(!workspace.files()[0]
+                .reference_graph
+                .object_scan_is_complete(0));
+            let objects = ObjectWorkspace::load_from_vfs(
+                &filesystem,
+                &workspace,
+                ObjectWorkspaceLimits::default(),
+            )
+            .unwrap_or_else(|error| panic!("{case}: ObjectWorkspace load failed: {error}"));
+            assert!(!objects.report().is_complete());
+            assert_eq!(objects.report().object_count, 1);
+            assert_eq!(objects.report().decoded_objects, 0);
+            assert_eq!(objects.report().undecoded_objects, 1);
+            assert_eq!(objects.report().total_undecoded_raw_bytes, 8);
+
+            let object = &objects.objects()[0];
+            assert_eq!(
+                object.factory.kind,
+                crate::processing::asset_factory::FactoryAssetKind::Unknown
+            );
+            assert_eq!(object.factory.class_id, expected_class_id);
+            assert_eq!(object.factory.class_name, expected_class_name);
+            assert_eq!(object.factory.name, expected_name);
+            assert_eq!(
+                object.factory.log_level,
+                crate::processing::asset_factory::FactoryLogLevel::Silent
+            );
+            assert!(object.factory.log_message.is_none());
+            assert!(!object.is_fully_materialized());
+
+            let error = object.payload.as_ref().unwrap_err();
+            assert!(matches!(
+                error.kind(),
+                crate::serialized_file::file::SerializedFileErrorKind::Object(object_error)
+                    if matches!(
+                        object_error.kind(),
+                        crate::serialized_file::object::ObjectDecodeErrorKind::FactoryObjectOutcome {
+                            class_id,
+                            outcome,
+                            diagnostic: None,
+                            ..
+                        } if *class_id == expected_class_id && outcome == "UnknownObject raw fallback"
+                    )
+            ));
+            let file_bytes = filesystem
+                .read_all_bytes(&virtual_path, usize::MAX)
+                .expect("source fixture remains mounted");
+            let payload_start =
+                usize::try_from(object.raw_payload_range.start).expect("payload start fits usize");
+            let payload_end =
+                usize::try_from(object.raw_payload_range.end).expect("payload end fits usize");
+            assert_eq!(
+                file_bytes.get(payload_start..payload_end),
+                Some([1, 2, 3, 4, 5, 6, 7, 8].as_slice()),
+                "{case}: exact raw payload survives ObjectWorkspace"
+            );
+            assert!(
+                !fixture
+                    .lines()
+                    .any(|line| line.starts_with(&format!("SF_READ|{case}|LOG|"))),
+                "{case}: the source UnknownObject fallback is silent"
+            );
+        }
     }
 
     #[test]
