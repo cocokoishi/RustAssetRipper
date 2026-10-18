@@ -304,7 +304,7 @@ fn make_prefab_hierarchy_file() -> Vec<u8> {
 }
 
 pub(crate) fn make_existing_prefab_instance_file() -> Vec<u8> {
-    make_prefab_mesh_instance_file(None)
+    make_prefab_mesh_instance_file(None, None)
 }
 
 /// Combine the Prefab hierarchy fixture with a production-layout class-43 Mesh object.
@@ -313,18 +313,7 @@ pub(crate) fn make_existing_prefab_instance_file() -> Vec<u8> {
 /// payload are copied into the hierarchy file; the external-mesh variant leaves the object in its
 /// own SerializedFile and writes a source-table PPtr plus external-file record. Both variants use
 /// the same production Mesh payload and minimal MeshFilter/MeshRenderer objects.
-pub(crate) fn make_prefab_mesh_instance_file(mesh_file: Option<&[u8]>) -> Vec<u8> {
-    make_prefab_mesh_instance_file_inner(mesh_file, None)
-}
-
-pub(crate) fn make_prefab_mesh_instance_file_with_external_mesh(
-    mesh_file: &[u8],
-    dependency_name: &str,
-) -> Vec<u8> {
-    make_prefab_mesh_instance_file_inner(Some(mesh_file), Some(dependency_name))
-}
-
-fn make_prefab_mesh_instance_file_inner(
+pub(crate) fn make_prefab_mesh_instance_file(
     mesh_file: Option<&[u8]>,
     external_mesh_file_name: Option<&str>,
 ) -> Vec<u8> {

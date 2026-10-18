@@ -42,9 +42,7 @@ use crate::resources::sub_mesh_data::IndexFormat;
 use crate::resources::vertex_data_blob::{EndianType, UnityVersion};
 use crate::serialized_file::object::SerializedValue;
 use crate::serialized_file::object_workspace::ObjectWorkspace;
-use crate::serialized_file::reference_graph::{
-    MultiFilePPtrResolution, MultiFileReferenceGraph,
-};
+use crate::serialized_file::reference_graph::{MultiFilePPtrResolution, MultiFileReferenceGraph};
 use crate::serialized_file::workspace::LoadedSerializedFile;
 
 /// Why a scene-level GLB export could not be produced.

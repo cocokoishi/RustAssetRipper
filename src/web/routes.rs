@@ -1535,8 +1535,11 @@ mod tests {
         std::fs::create_dir_all(&directory).expect("the probe directory is created");
         let input = directory.join("prefab-mesh-2019.4.unity");
         let mesh_file = make_production_mesh_file();
-        std::fs::write(&input, make_prefab_mesh_instance_file(Some(&mesh_file)))
-            .expect("the synthetic Prefab and Mesh SerializedFile is written");
+        std::fs::write(
+            &input,
+            make_prefab_mesh_instance_file(Some(&mesh_file), None),
+        )
+        .expect("the synthetic Prefab and Mesh SerializedFile is written");
 
         let mut state = state();
         state
@@ -1715,7 +1718,7 @@ mod tests {
     /// hierarchy GLB exercises the workspace reference graph rather than a local PathID lookup.
     #[test]
     fn the_primary_content_export_resolves_prefab_mesh_from_an_external_file() {
-        use crate::test_fixtures::make_prefab_mesh_instance_file_with_external_mesh;
+        use crate::test_fixtures::make_prefab_mesh_instance_file;
         use crate::tests::make_production_mesh_file;
 
         let directory = PathBuf::from("target/primary-content-prefab-cross-file-mesh-e2e")
@@ -1726,7 +1729,7 @@ mod tests {
         let mesh_file = make_production_mesh_file();
         std::fs::write(
             &input,
-            make_prefab_mesh_instance_file_with_external_mesh(&mesh_file, "mesh.assets"),
+            make_prefab_mesh_instance_file(Some(&mesh_file), Some("mesh.assets")),
         )
         .expect("the Prefab with an external Mesh PPtr is written");
         std::fs::write(&mesh_path, &mesh_file).expect("the target Mesh file is written");
@@ -1778,7 +1781,8 @@ mod tests {
         let primitive = &document["meshes"][0]["primitives"][0];
         let position_accessor = &document["accessors"][primitive["attributes"]["POSITION"]
             .as_u64()
-            .expect("the resolved Mesh has a POSITION attribute") as usize];
+            .expect("the resolved Mesh has a POSITION attribute")
+            as usize];
         assert_eq!(position_accessor["componentType"], 5126);
         assert_eq!(position_accessor["type"], "VEC3");
         assert_eq!(position_accessor["count"], 3);
@@ -1790,7 +1794,8 @@ mod tests {
         let binary = &bytes[bin_header + 8..bin_header + 8 + bin_length];
         let position_view = &document["bufferViews"][position_accessor["bufferView"]
             .as_u64()
-            .expect("the POSITION accessor has a bufferView") as usize];
+            .expect("the POSITION accessor has a bufferView")
+            as usize];
         let position_base = position_view["byteOffset"].as_u64().unwrap_or(0) as usize
             + position_accessor["byteOffset"].as_u64().unwrap_or(0) as usize;
         let position_stride = position_view["byteStride"].as_u64().unwrap_or(12) as usize;
@@ -1821,10 +1826,12 @@ mod tests {
 
         let index_accessor = &document["accessors"][primitive["indices"]
             .as_u64()
-            .expect("the resolved Mesh has an index accessor") as usize];
+            .expect("the resolved Mesh has an index accessor")
+            as usize];
         let index_view = &document["bufferViews"][index_accessor["bufferView"]
             .as_u64()
-            .expect("the index accessor has a bufferView") as usize];
+            .expect("the index accessor has a bufferView")
+            as usize];
         let index_base = index_view["byteOffset"].as_u64().unwrap_or(0) as usize
             + index_accessor["byteOffset"].as_u64().unwrap_or(0) as usize;
         let component_type = index_accessor["componentType"].as_u64().unwrap();

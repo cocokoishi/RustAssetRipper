@@ -142,9 +142,7 @@ pub(super) fn export_loaded_primary_content<W: io::Write>(
         note: scene_note,
     } = main_asset_classification(
         game,
-        scene_processing
-            .as_ref()
-            .map(|(processing, _)| processing),
+        scene_processing.as_ref().map(|(processing, _)| processing),
     );
     if let Some(note) = &scene_note {
         writeln!(status_output, "{note}")?;
@@ -386,7 +384,7 @@ pub(super) fn export_loaded_primary_content<W: io::Write>(
                 export_settings,
                 limits,
                 &SceneState {
-                    processing: scene_processing.as_ref(),
+                    processing: scene_processing.as_ref().map(|(processing, _)| processing),
                     hierarchy_file: &hierarchy_file,
                     resolved_by_file: &resolved_by_file,
                 },
