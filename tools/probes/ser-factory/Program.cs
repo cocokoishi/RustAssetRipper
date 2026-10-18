@@ -701,6 +701,7 @@ static void Author(string rowsPath)
 		"engine_builtin_extra_underscore_shader",
 		"patch_retry_light",
 		"patch_retry_light_failed",
+		"patch_retry_graphics_settings_failed",
 		"patch_retry_light_editor",
 	];
 	string scratch = Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, "target", "ser-factory-probe"));
@@ -825,6 +826,8 @@ static (string, SerializedFile) BuildCase(string name)
 			return ("patch_retry_light.assets", BuildPatchRetryFile("patch_retry_light.assets", "2017.1.0p0", "2017.1.1f0", 108));
 		case "patch_retry_light_failed":
 			return ("patch_retry_light_failed.assets", BuildPatchRetryFile("patch_retry_light_failed.assets", "2017.1.0p0", "2017.1.1f0", 108, true));
+		case "patch_retry_graphics_settings_failed":
+			return ("patch_retry_graphics_settings_failed.assets", BuildPatchRetryFile("patch_retry_graphics_settings_failed.assets", "2017.1.0p0", "2017.1.1f0", 30, true));
 		case "patch_retry_light_editor":
 			return ("patch_retry_light_editor.unity", BuildPatchRetryFile("patch_retry_light_editor.unity", "2017.1.0p0", "2017.1.1f0", 108, editorMode: true));
 		default:

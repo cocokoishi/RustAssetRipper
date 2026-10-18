@@ -151,27 +151,39 @@ fn assert_case(case: &FixtureCase, layouts: &ReferenceClassLayouts) {
     if let Some(expected) = reference_logs.first() {
         let expected = expected.replace('␠', " ");
         assert_eq!(asset.log_level, FactoryLogLevel::Error, "{} log", case.name);
-        if case.name == "patch_retry_light_failed" {
-            let context = "Error during reading of asset type Light. V: 2017.1.0p0 P: StandaloneWin64Player N: patch_retry_light_failed.assets Path: ";
+        if matches!(
+            case.name.as_str(),
+            "patch_retry_light_failed" | "patch_retry_graphics_settings_failed"
+        ) {
             let actual = asset
                 .log_message
                 .as_deref()
-                .expect("failed Patch diagnostic");
-            assert!(
-                expected.starts_with(context),
-                "source diagnostic context: {expected}"
-            );
-            assert!(
-                actual.starts_with(context),
-                "Rust diagnostic context: {actual}"
-            );
-            assert!(expected.contains("System.ArgumentOutOfRangeException"));
-            assert!(expected.contains("Parameter 'length'"));
+                .expect("failed Patch retry diagnostic");
+            let source_context = expected
+                .split_once(" Path:")
+                .map(|(context, _)| context)
+                .expect("source diagnostic carries the original context");
+            let actual_context = actual
+                .split_once(" Path:")
+                .map(|(context, _)| context)
+                .expect("Rust diagnostic carries the original context");
+            assert_eq!(actual_context, source_context);
             assert!(actual.contains("truncated input"));
             assert!(
                 !actual.contains("2017.1.1f0"),
                 "retry diagnostic must not replace the original failure"
             );
+            match case.name.as_str() {
+                "patch_retry_light_failed" => {
+                    assert!(expected.contains("System.ArgumentOutOfRangeException"));
+                    assert!(expected.contains("Parameter 'length'"));
+                }
+                "patch_retry_graphics_settings_failed" => {
+                    assert!(expected.contains("System.IndexOutOfRangeException"));
+                    assert!(expected.contains("Index was outside the bounds of the array"));
+                }
+                _ => unreachable!("only Patch retry failures reach this branch"),
+            }
         } else {
             assert_eq!(
                 asset.log_message.as_deref(),
@@ -472,10 +484,15 @@ fn assert_case(case: &FixtureCase, layouts: &ReferenceClassLayouts) {
             );
             assert!(workspace_asset.is_fully_materialized());
         }
-        "patch_retry_light_failed" => {
+        "patch_retry_light_failed" | "patch_retry_graphics_settings_failed" => {
             assert_eq!(asset.kind, FactoryAssetKind::Unreadable);
             assert!(asset.payload.is_none());
-            assert_eq!(asset.raw.len(), 151);
+            let expected_raw_len = if case.name == "patch_retry_light_failed" {
+                151
+            } else {
+                229
+            };
+            assert_eq!(asset.raw.len(), expected_raw_len);
             let workspace_asset = materialize_object_for_workspace(
                 &file,
                 &facts,
