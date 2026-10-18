@@ -1070,11 +1070,6 @@ impl WebState {
         self.scene_definitions.as_ref()
     }
 
-    /// The named configuration texts, for the configuration-files handlers.
-    pub fn singleton_data(&mut self) -> &mut SingletonData {
-        &mut self.singleton_data
-    }
-
     /// The named configuration lists, for the configuration-files handlers.
     pub fn list_data(&mut self) -> &mut ListData {
         &mut self.list_data
