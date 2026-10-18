@@ -1,13 +1,12 @@
 # RustAssetRipper hand-off — 2026-10-17
 
-## Latest current checkpoint - 2026-10-17 (cross-file Prefab Mesh geometry through primary content)
+## Latest current checkpoint - 2026-10-17 (UnityRaw-to-WebData stream mount coverage)
 
-- Current revision: 94ea4d0dcd329e9ee22886e9d63d2a5d4e3a0e67 on main, matching origin/main; the worktree was clean at inspection.
-- The frozen `GlbLevelBuilder.Build` reads `MeshFilter.MeshP`; Rust previously declined every nonzero `m_Mesh.file_id`. The route now reuses `MultiFileReferenceGraph` and resolves a unique external Mesh object before decoding it with the target file’s version and endianness.
-- `web::routes::tests::the_primary_content_export_resolves_prefab_mesh_from_an_external_file` sends separate Prefab and Mesh SerializedFiles through `/Export/PrimaryContent`. It compares hierarchy node/primitive, POSITION Float32 bits, and triangle index order against `src/resources/glb_level_mesh_fixture.txt`, captured from the frozen runtime.
-- GitHub Actions run 39094484787 for this revision completed successfully across all eight jobs. The route regression passed; Ubuntu reported 1,935 library and 215 CLI tests, Windows reported 1,937 library and 215 CLI tests, and Ubuntu release-mode tests passed.
-- The live parity report remains open: 409 rows, 380 verified, 29 non-verified, zero duplicate IDs, and zero malformed rows. The GLB/model and primary-content rows stay unverified because this slice covers one Unity 2019.4 triangle only.
-- **Primary next gap:** the CI builds Linux and Windows release binaries but uploads no artifacts; run 39094484787 has zero artifacts. Add a privacy-safe upload of only the Rust release executable for each platform, then use those CI-built binaries for local acceptance.
+- Latest verified code revision: `302bcc7f7b03807004152a5b7bc2065afc9e752f` on `main`. GitHub Actions run 39096793988 completed successfully across all eight jobs.
+- `unityraw_routes_nested_webdata_through_the_common_stream_mount` exercises `mount_stream_container_tree` with a generated UnityRaw envelope containing UnityWebData. It compares the full mount report against the legacy `SchemeReader::read` path, uses a zero nested-byte budget, drops the source stream, and checks the exact nested resource bytes. Ubuntu passed 1,936 library tests and 215 CLI tests; Windows passed 1,938 library tests and 215 CLI tests; Ubuntu release-mode tests passed 1,936 library tests and 215 CLI tests.
+- `IO-STREAM-001` remains `实现中`. The parity report remains open at 409 rows: 380 verified, 29 non-verified, zero duplicate IDs, and zero malformed rows. This test verifies one generated UnityRaw-to-WebData streaming composition; it does not close the stream feature row.
+- CI release artifacts are now available: run 39096214403 published the Windows executable and a Linux tar archive preserving executable mode. The downloaded Windows binary returned `--help`; the Linux archive contained the executable `assetripper-rs`.
+- **Primary next gap:** run the frozen `raw_nested_unityfs` source fixture through `mount_stream_container_tree`, then compare the mount report and retained leaf bytes after dropping the source. This will pin another UnityRaw nested-container branch to AssetRipper behavior.
 
 ## Previous checkpoint - 2026-10-17 (the primary-content export is verified end to end)
 
