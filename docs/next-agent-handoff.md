@@ -2,15 +2,15 @@
 
 ## Latest verified checkpoint
 
-- Latest validated revision: 1ced2d04adf1390ae4e5fd5f0177251c355f5baa.
-- GitHub Actions run 39164813775 passed all eight jobs and uploaded Windows/Linux release artifacts.
-- DIFF-OBJ-REF-NESTED-MISSING-ARRAY-001 verifies two unresolved PPtrs inside an array-valued managed-reference entry in a nested UnityFS collection. The reference graph preserves concrete [0]/[1] paths and exact missing targets; the final-run Windows CLI artifact emits full root YAML byte-for-byte equal to the frozen source.
-- OBJ-REF-001 remains in progress. The ledger remains 409 rows: 381 verified and 28 non-verified.
+- Latest validated product-code revision: e67456582a3ec69c441e7ed57a17a70f1906651b.
+- GitHub Actions run [39167413223](https://github.com/cocokoishi/RustAssetRipper/actions/runs/39167413223) passed all eight jobs and uploaded Windows/Linux release artifacts.
+- DIFF-OBJ-REF-NESTED-RESOLVED-ARRAY-001 verifies two PPtrs in an array-valued managed-reference entry resolving to loaded target PathID 900 in nested source.bundle/target.assets. The graph preserves [0] and [1] paths to the target object; the Windows CI artifact root and target YAML match the frozen-source goldens with only the documented generated-GUID and line-ending normalization.
+- OBJ-REF-001 remains in progress. The ledger remains 409 rows: 381 verified and 28 non-verified (7 in progress, 2 externally blocked, 19 implemented but unverified).
 - Preserve the existing untracked tools/__pycache__/ directory.
 
 ## Primary next gap
 
-Exercise resolved PPtrs inside an array-valued managed-reference entry. Generate a public nested UnityFS fixture with at least one array element resolving to a loaded target object; compare the frozen source and Rust graph target file/PathID, dependency-collection choice, complete exported root/target YAML, and relevant metadata using the exact CI-built artifact. Keep OBJ-REF-001 open until broader identity and reference branches are covered.
+Probe an array-valued managed-reference field whose elements resolve to two distinct loaded target objects. Compare each graph edge requester path, target file identity, and target PathID against frozen source, then compare the full exported root and both target YAML documents with the exact CI artifact. Keep OBJ-REF-001 open; this current slice only repeats PathID 900.
 
 ## External limitation
 
