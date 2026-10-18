@@ -551,7 +551,7 @@ fn factory_differential_replays_every_reference_case() {
     let fixture = include_str!("../../asset_factory_fixture.txt");
     let layouts = reference_class_layouts();
     let cases = fixture_cases(fixture);
-    assert_eq!(cases.len(), 25, "all probe cases are replayed");
+    assert_eq!(cases.len(), 26, "all probe cases are replayed");
     for case in &cases {
         assert_case(case, layouts);
     }
