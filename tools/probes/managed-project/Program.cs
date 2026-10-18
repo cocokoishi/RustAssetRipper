@@ -65,9 +65,14 @@ if (args.Length == 1 && args[0] == "describe-lightmap")
     return DescribeLightmap();
 }
 
-if (args.Length is 4 or 5 && args[0] == "export-sprite-atlas-project")
+if (args.Length is >= 4 and <= 6 && args[0] == "export-sprite-atlas-project")
 {
-    return ExportSpriteAtlasProject(args[1], args[2], args[3], args.Length == 5 ? args[4] : "Yaml");
+    return ExportSpriteAtlasProject(
+        args[1],
+        args[2],
+        args[3],
+        args.Length >= 5 ? args[4] : "Yaml",
+        args.Length == 6 ? int.Parse(args[5], System.Globalization.CultureInfo.InvariantCulture) : 1);
 }
 
 if (args.Length == 1 && args[0] == "describe-lighting-assets")

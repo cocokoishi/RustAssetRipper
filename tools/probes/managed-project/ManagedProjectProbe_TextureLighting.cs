@@ -185,8 +185,13 @@ ObjectData = textureBody,
         string inputRootValue,
         string outputRootValue,
         string rowsValue,
-        string spriteExportModeName)
+        string spriteExportModeName,
+        int spriteCount = 1)
     {
+        if (spriteCount is < 1 or > 2)
+        {
+            throw new ArgumentOutOfRangeException(nameof(spriteCount), spriteCount, "The probe supports one or two Sprites.");
+        }
         string inputRoot = Path.GetFullPath(inputRootValue);
         string outputRoot = Path.GetFullPath(outputRootValue);
         string rowsPath = Path.GetFullPath(rowsValue);
@@ -214,9 +219,19 @@ ObjectData = textureBody,
         object sprite = MakeGenerated(
             "AssetRipper.SourceGenerated.Classes.ClassID_213.Sprite",
             213,
-            303,
+            spriteCount == 1 ? 303 : 305,
             collection,
             version);
+        List<object> sprites = [sprite];
+        if (spriteCount == 2)
+        {
+            sprites.Add(MakeGenerated(
+                "AssetRipper.SourceGenerated.Classes.ClassID_213.Sprite",
+                213,
+                303,
+                collection,
+                version));
+        }
         object atlas = MakeGenerated(
             "AssetRipper.SourceGenerated.Classes.ClassID_687078895.SpriteAtlas",
             687078895,
@@ -242,52 +257,78 @@ ObjectData = textureBody,
         SetGeneratedProperty(texture, "Format_C28E", 4); // RGBA32
         SetGeneratedProperty(texture, "ImageData_C28", imageBytes);
 
-        SetGeneratedProperty(sprite, "Name", "PackedSpriteFixture");
+        SetGeneratedProperty(sprite, "Name", spriteCount == 1 ? "PackedSpriteFixture" : "ZetaSpriteFixture");
         SetGeneratedProperty(sprite, "AtlasName", "AtlasFixture");
         SetGeneratedProperty(sprite, "SpriteID", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         SetGeneratedProperty(sprite, "PixelsToUnits", 16.0f);
-        SetRect(sprite, "Rect", 0, 0, 64, 48);
+        SetRect(sprite, "Rect", 0, 0, spriteCount == 1 ? 64 : 32, spriteCount == 1 ? 48 : 24);
         SetVector2(sprite, "Pivot", 0.25f, 0.75f);
         SetVector2(sprite, "Offset", 0, 0);
         SetVector4(sprite, "Border", 5, 6, 20, 20);
         AddGeneratedString(sprite, "AtlasTags", "AtlasFixtureTag");
+        if (spriteCount == 2)
+        {
+            object secondSprite = sprites[1];
+            SetGeneratedProperty(secondSprite, "Name", "AlphaSpriteFixture");
+            SetGeneratedProperty(secondSprite, "AtlasName", "AtlasFixture");
+            SetGeneratedProperty(secondSprite, "SpriteID", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+            SetGeneratedProperty(secondSprite, "PixelsToUnits", 32.0f);
+            SetRect(secondSprite, "Rect", 32, 24, 32, 24);
+            SetVector2(secondSprite, "Pivot", 0.75f, 0.25f);
+            SetVector2(secondSprite, "Offset", 1, -1);
+            SetVector4(secondSprite, "Border", 1, 2, 3, 4);
+            AddGeneratedString(secondSprite, "AtlasTags", "AtlasFixtureTag");
+        }
 
         SetGeneratedProperty(atlas, "Name", "AtlasFixture");
 
         MethodInfo addAsset = collection.GetType().GetMethod("AddAsset", BindingFlags.NonPublic | BindingFlags.Instance)
             ?? throw new MissingMethodException(collection.GetType().FullName, "AddAsset");
-        foreach (object asset in new[] { texture, sprite, atlas })
+        foreach (object asset in new object[] { texture }.Concat(sprites).Append(atlas))
         {
             addAsset.Invoke(collection, new[] { asset });
         }
-        SetGeneratedAssetPointer(sprite, "SpriteAtlas", collection, atlas);
-        object spriteRenderData = FindGeneratedProperty(sprite, "RD").GetValue(sprite)
-            ?? throw new InvalidOperationException("generated Sprite has no RD");
-        SetGeneratedAssetPointer(spriteRenderData, "Texture", collection, texture);
-        AddGeneratedTypedAssetPointer(atlas, "PackedSprites", collection, sprite);
+        foreach (object targetSprite in sprites)
+        {
+            SetGeneratedAssetPointer(targetSprite, "SpriteAtlas", collection, atlas);
+            object spriteRenderData = FindGeneratedProperty(targetSprite, "RD").GetValue(targetSprite)
+                ?? throw new InvalidOperationException("generated Sprite has no RD");
+            SetGeneratedAssetPointer(spriteRenderData, "Texture", collection, texture);
+        }
+        foreach (object targetSprite in sprites.AsEnumerable().Reverse())
+        {
+            AddGeneratedTypedAssetPointer(atlas, "PackedSprites", collection, targetSprite);
+        }
 
         object renderDataMap = FindGeneratedProperty(atlas, "RenderDataMap").GetValue(atlas)
             ?? throw new InvalidOperationException("generated SpriteAtlas has no RenderDataMap");
         MethodInfo addNew = renderDataMap.GetType().GetMethods(BindingFlags.Public | BindingFlags.Instance)
             .Single(method => method.Name == "AddNew" && method.GetParameters().Length == 0
                 && method.ReturnType.Name.StartsWith("AccessPair`", StringComparison.Ordinal));
-        object mapEntry = addNew.Invoke(renderDataMap, null)
-            ?? throw new InvalidOperationException("SpriteAtlas.RenderDataMap.AddNew returned null");
-        object atlasRenderDataKey = FindGeneratedProperty(mapEntry, "Key").GetValue(mapEntry)
-            ?? throw new InvalidOperationException("SpriteAtlas render-data entry has no key");
-        object atlasData = FindGeneratedProperty(mapEntry, "Value").GetValue(mapEntry)
-            ?? throw new InvalidOperationException("SpriteAtlas render-data entry has no value");
-        object renderDataKey = FindGeneratedProperty(sprite, "RenderDataKey").GetValue(sprite)
-            ?? throw new InvalidOperationException("generated Sprite has no RenderDataKey");
-        SetGeneratedProperty(renderDataKey, "Value", 91L);
-        SetGeneratedProperty(atlasRenderDataKey, "Value", 91L);
-        SetGeneratedAssetPointer(atlasData, "Texture", collection, texture);
-        SetRect(atlasData, "TextureRect", 8, 10, 48, 32);
-        SetVector2(atlasData, "TextureRectOffset", 4, 4);
-        SetVector2(atlasData, "AtlasRectOffset", 5, 6);
-        SetGeneratedProperty(atlasData, "SettingsRaw", 37);
-        SetVector4(atlasData, "UvTransform", 0.5f, 0.25f, 0.125f, 0.0625f);
-        SetGeneratedProperty(atlasData, "DownscaleMultiplier", 1.5f);
+        for (int index = 0; index < sprites.Count; index++)
+        {
+            long key = 91 + index;
+            object targetSprite = sprites[index];
+            object mapEntry = addNew.Invoke(renderDataMap, null)
+                ?? throw new InvalidOperationException("SpriteAtlas.RenderDataMap.AddNew returned null");
+            object atlasRenderDataKey = FindGeneratedProperty(mapEntry, "Key").GetValue(mapEntry)
+                ?? throw new InvalidOperationException("SpriteAtlas render-data entry has no key");
+            object atlasData = FindGeneratedProperty(mapEntry, "Value").GetValue(mapEntry)
+                ?? throw new InvalidOperationException("SpriteAtlas render-data entry has no value");
+            object renderDataKey = FindGeneratedProperty(targetSprite, "RenderDataKey").GetValue(targetSprite)
+                ?? throw new InvalidOperationException("generated Sprite has no RenderDataKey");
+            SetGeneratedProperty(renderDataKey, "Value", key);
+            SetGeneratedProperty(atlasRenderDataKey, "Value", key);
+            SetGeneratedAssetPointer(atlasData, "Texture", collection, texture);
+            SetRect(atlasData, "TextureRect", index == 0 ? 8 : 36, index == 0 ? 10 : 26,
+                index == 0 ? 48 : 24, index == 0 ? 32 : 16);
+            SetVector2(atlasData, "TextureRectOffset", index == 0 ? 4 : 2, index == 0 ? 4 : 1);
+            SetVector2(atlasData, "AtlasRectOffset", index == 0 ? 5 : 3, index == 0 ? 6 : 4);
+            SetGeneratedProperty(atlasData, "SettingsRaw", index == 0 ? 37 : 19);
+            SetVector4(atlasData, "UvTransform", index == 0 ? 0.5f : 0.25f, index == 0 ? 0.25f : 0.5f,
+                index == 0 ? 0.125f : 0.375f, index == 0 ? 0.0625f : 0.125f);
+            SetGeneratedProperty(atlasData, "DownscaleMultiplier", index == 0 ? 1.5f : 2.0f);
+        }
 
         SerializedFileBuilder builder = new()
         {
@@ -297,7 +338,7 @@ ObjectData = textureBody,
             EndianType = EndianType.LittleEndian,
             HasTypeTree = false,
         };
-        foreach (object asset in new[] { texture, sprite, atlas })
+        foreach (object asset in new object[] { texture }.Concat(sprites).Append(atlas))
         {
             int classId = (int)asset.GetType().GetProperty("ClassID")!.GetValue(asset)!;
             long pathId = (long)asset.GetType().GetProperty("PathID")!.GetValue(asset)!;
@@ -321,9 +362,10 @@ ObjectData = textureBody,
         }
 
         SerializedFile serializedFile = builder.Build();
-        serializedFile.FilePath = "SpriteAtlasFixture.assets";
+        string inputName = spriteCount == 1 ? "SpriteAtlasFixture.assets" : "SpriteAtlasMultiFixture.assets";
+        serializedFile.FilePath = inputName;
         byte[] inputBytes = serializedFile.ToByteArray();
-        string inputPath = Path.Combine(inputRoot, "SpriteAtlasFixture.assets");
+        string inputPath = Path.Combine(inputRoot, inputName);
         File.WriteAllBytes(inputPath, inputBytes);
 
         SpriteExportMode spriteExportMode = Enum.Parse<SpriteExportMode>(spriteExportModeName, false);
@@ -346,21 +388,32 @@ ObjectData = textureBody,
         }
         if (spriteExportMode == SpriteExportMode.Yaml)
         {
-            string spriteYamlPath = Path.Combine(exportedProjectRoot, "Assets", "Sprite", "PackedSpriteFixture.asset");
-            string spriteTextureGuid = Regex.Match(
-                File.ReadAllText(spriteYamlPath),
-                @"\bguid:\s*([0-9a-fA-F]{32})\b").Groups[1].Value;
-            if (spriteTextureGuid.Length != 32 || spriteTextureGuid != textureMetaGuid)
+            string spriteDirectory = Path.Combine(exportedProjectRoot, "Assets", "Sprite");
+            string[] spriteYamlPaths = Directory.GetFiles(spriteDirectory, "*.asset", SearchOption.TopDirectoryOnly);
+            if (spriteYamlPaths.Length != spriteCount)
             {
-                throw new InvalidDataException("source Sprite texture PPtr does not match the exported Texture2D meta GUID");
+                throw new InvalidDataException($"source project exported {spriteYamlPaths.Length} Sprite assets, expected {spriteCount}");
+            }
+            foreach (string spriteYamlPath in spriteYamlPaths)
+            {
+                string spriteTextureGuid = Regex.Match(
+                    File.ReadAllText(spriteYamlPath),
+                    @"\bguid:\s*([0-9a-fA-F]{32})\b").Groups[1].Value;
+                if (spriteTextureGuid.Length != 32 || spriteTextureGuid != textureMetaGuid)
+                {
+                    throw new InvalidDataException($"source Sprite texture PPtr in {Path.GetFileName(spriteYamlPath)} does not match the exported Texture2D meta GUID");
+                }
             }
         }
 
         using StreamWriter rows = new(rowsPath, false, new UTF8Encoding(false)) { NewLine = "\n" };
-        rows.WriteLine($"# Source-generated SpriteAtlas project export with SpriteExportMode={spriteExportModeName}.");
+        rows.WriteLine(spriteCount == 1
+            ? $"# Source-generated SpriteAtlas project export with SpriteExportMode={spriteExportModeName}."
+            : $"# Source-generated SpriteAtlas project export with SpriteExportMode={spriteExportModeName} and multiple Sprites.");
         rows.WriteLine("UNITY_VERSION|2019.4.40f1");
         rows.WriteLine($"MODE|{spriteExportModeName}");
-        rows.WriteLine($"INPUT|SpriteAtlasFixture.assets|{inputBytes.Length}|{Convert.ToHexString(SHA256.HashData(inputBytes))}");
+        rows.WriteLine($"INPUT|{inputName}|{inputBytes.Length}|{Convert.ToHexString(SHA256.HashData(inputBytes))}");
+        rows.WriteLine($"INPUT_HEX|{inputName}|{Convert.ToHexString(inputBytes)}");
         bool fullOutput = spriteExportMode == SpriteExportMode.Yaml;
         foreach (string outputPath in Directory.EnumerateFiles(outputRoot, "*", SearchOption.AllDirectories)
             .OrderBy(path => Path.GetRelativePath(outputRoot, path), StringComparer.Ordinal))

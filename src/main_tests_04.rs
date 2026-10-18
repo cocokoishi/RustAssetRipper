@@ -1815,7 +1815,7 @@
         fs::write(&source_path, &input_bytes).unwrap();
         fs::write(&settings_path, settings.as_bytes()).unwrap();
         let mut input = TestInputDirectory {
-            directory,
+            directory: directory.clone(),
             files: vec![source_path.clone(), settings_path.clone()],
             subdirectories: Vec::new(),
         };
@@ -2047,4 +2047,246 @@
         collect_directories(&output_root, &mut actual_directories);
         actual_directories.sort_by_key(|path| path.components().count());
         input.subdirectories.extend(actual_directories);
+
+        // The Sprite encounter order is deliberately unrelated to both names and PathIDs:
+        // Zeta (PathID 305) precedes Alpha (PathID 303), while Atlas.PackedSprites is reversed.
+        // Compare the shipped project workflow against the frozen export in every sprite mode.
+        let multi_yaml_fixture =
+            include_str!("export/sprite_atlas_project_multi_2019_4_yaml_fixture.txt");
+        let multi_source_input_identity = multi_yaml_fixture
+            .lines()
+            .find_map(|line| line.strip_prefix("INPUT|"))
+            .expect("multi-Sprite source fixture records the SerializedFile identity");
+        let multi_input_row = multi_yaml_fixture
+            .lines()
+            .find_map(|line| line.strip_prefix("INPUT_HEX|"))
+            .expect("multi-Sprite source fixture records the SerializedFile");
+        let (multi_file_name, multi_hex) = multi_input_row
+            .split_once('|')
+            .expect("multi-Sprite input row contains a path and hex bytes");
+        assert_eq!(multi_file_name, "SpriteAtlasMultiFixture.assets");
+        let multi_input_bytes = decode_hex(multi_hex);
+        let multi_expected_texture_bytes = multi_yaml_fixture
+            .lines()
+            .find_map(|line| {
+                let row = line.strip_prefix(
+                    "SOURCE_OUTPUT|ExportedProject/Assets/Texture2D/AtlasTextureFixture.bmp|",
+                )?;
+                Some(decode_hex(row))
+            })
+            .expect("multi-Sprite source fixture records the exported Texture2D bytes");
+        let multi_source_path = directory.join(multi_file_name);
+        fs::write(&multi_source_path, &multi_input_bytes).unwrap();
+        input.files.push(multi_source_path.clone());
+
+        for (mode, discriminant, mode_fixture) in [
+            ("Yaml", 0, multi_yaml_fixture),
+            (
+                "Native",
+                1,
+                include_str!("export/sprite_atlas_project_multi_2019_4_native_fixture.txt"),
+            ),
+            (
+                "Texture2D",
+                2,
+                include_str!("export/sprite_atlas_project_multi_2019_4_texture2d_fixture.txt"),
+            ),
+        ] {
+            assert!(mode_fixture
+                .lines()
+                .any(|line| line == format!("MODE|{mode}")));
+            let mode_input_identity = mode_fixture
+                .lines()
+                .find_map(|line| line.strip_prefix("INPUT|"))
+                .expect("multi-Sprite mode fixture records the SerializedFile identity");
+            assert_eq!(mode_input_identity, multi_source_input_identity);
+
+            let mode_settings = include_str!("export/settings_file_defaults.json")
+                .replace("\"ImageExportFormat\": 4", "\"ImageExportFormat\": 0")
+                .replace(
+                    "\"PreferOriginalTextureExtension\": true",
+                    "\"PreferOriginalTextureExtension\": false",
+                )
+                .replace(
+                    "\"SpriteExportMode\": 0",
+                    &format!("\"SpriteExportMode\": {discriminant}"),
+                );
+            assert!(mode_settings.contains(&format!("\"SpriteExportMode\": {discriminant}")));
+            fs::write(&settings_path, mode_settings.as_bytes()).unwrap();
+
+            let mode_output_root = output_root.with_file_name(format!(
+                "project-sprite-atlas-multi-{}",
+                mode.to_ascii_lowercase()
+            ));
+            let mode_arguments = vec![
+                std::ffi::OsString::from("export-project"),
+                std::ffi::OsString::from("--settings"),
+                settings_path.clone().into_os_string(),
+                mode_output_root.clone().into_os_string(),
+                multi_source_path.clone().into_os_string(),
+            ];
+            super::run(mode_arguments.into_iter()).unwrap_or_else(|error| {
+                panic!("export-project failed for multi-Sprite source fixture in {mode} mode: {error}")
+            });
+
+            let mut expected_paths = if mode == "Yaml" {
+                mode_fixture
+                    .lines()
+                    .filter_map(|line| line.strip_prefix("SOURCE_OUTPUT|"))
+                    .map(|row| row.split_once('|').expect("source output path and bytes").0)
+                    .map(|path| {
+                        path.strip_prefix("ExportedProject/")
+                            .unwrap_or(path)
+                            .replace('\\', "/")
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                mode_fixture
+                    .lines()
+                    .filter_map(|line| line.strip_prefix("FILE|"))
+                    .map(|path| {
+                        path.strip_prefix("ExportedProject/")
+                            .unwrap_or(path)
+                            .replace('\\', "/")
+                    })
+                    .collect::<Vec<_>>()
+            };
+
+            let mut mode_files = Vec::new();
+            collect_files(&mode_output_root, &mut mode_files);
+            let mut actual_paths = mode_files
+                .iter()
+                .map(|path| {
+                    path.strip_prefix(&mode_output_root)
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .replace('\\', "/")
+                })
+                .collect::<Vec<_>>();
+            expected_paths.sort();
+            actual_paths.sort();
+            assert_eq!(
+                actual_paths, expected_paths,
+                "multi-Sprite {mode} source project inventory"
+            );
+
+            if mode == "Yaml" {
+                for row in mode_fixture
+                    .lines()
+                    .filter_map(|line| line.strip_prefix("SOURCE_OUTPUT|"))
+                {
+                    let (source_relative_path, expected_hex) = row
+                        .split_once('|')
+                        .expect("source output row contains a path and bytes");
+                    let relative_path = source_relative_path
+                        .strip_prefix("ExportedProject/")
+                        .unwrap_or(source_relative_path);
+                    let actual = fs::read(mode_output_root.join(relative_path))
+                        .unwrap_or_else(|error| panic!("could not read {relative_path}: {error}"));
+                    let expected = decode_hex(expected_hex);
+                    let expected = if is_text_output(relative_path) {
+                        normalize_text(&expected)
+                    } else {
+                        expected
+                    };
+                    let actual = if is_text_output(relative_path) {
+                        normalize_text(&actual)
+                    } else {
+                        actual
+                    };
+                    assert_eq!(actual, expected, "Yaml source output differs for {relative_path}");
+                }
+
+                let texture_meta = fs::read_to_string(
+                    mode_output_root.join("Assets/Texture2D/AtlasTextureFixture.bmp.meta"),
+                )
+                .unwrap();
+                let texture_meta_guid = texture_meta
+                    .lines()
+                    .find_map(|line| line.strip_prefix("guid: "))
+                    .expect("multi-Sprite texture meta has its generated GUID");
+                for sprite_name in ["ZetaSpriteFixture", "AlphaSpriteFixture"] {
+                    let sprite_yaml = fs::read_to_string(mode_output_root.join(format!(
+                        "Assets/Sprite/{sprite_name}.asset"
+                    )))
+                    .unwrap();
+                    let sprite_texture_guid = sprite_yaml
+                        .lines()
+                        .find_map(|line| {
+                            let (_, value) = line.split_once("guid: ")?;
+                            Some(value.split(',').next().unwrap())
+                        })
+                        .expect("multi-Sprite render data points to the exported texture");
+                    assert_eq!(sprite_texture_guid, texture_meta_guid);
+                }
+            } else {
+                assert!(!actual_paths.iter().any(|path| {
+                    path == "Assets/Sprite/ZetaSpriteFixture.asset"
+                        || path == "Assets/Sprite/AlphaSpriteFixture.asset"
+                }));
+
+                for (prefix, normalize) in [
+                    (
+                        "SOURCE_META|",
+                        normalize_sprite_mode_meta as fn(&[u8]) -> Vec<u8>,
+                    ),
+                    ("SOURCE_TEXT|", normalize_text as fn(&[u8]) -> Vec<u8>),
+                ] {
+                    for row in mode_fixture
+                        .lines()
+                        .filter_map(|line| line.strip_prefix(prefix))
+                    {
+                        let (source_relative_path, expected_hex) = row
+                            .split_once('|')
+                            .expect("source output row contains a path and normalized bytes");
+                        let relative_path = source_relative_path
+                            .strip_prefix("ExportedProject/")
+                            .unwrap_or(source_relative_path);
+                        let actual = fs::read(mode_output_root.join(relative_path))
+                            .unwrap_or_else(|error| panic!("could not read {relative_path}: {error}"));
+                        assert_eq!(
+                            normalize(&actual),
+                            decode_hex(expected_hex),
+                            "{mode} source output differs for {relative_path}"
+                        );
+                    }
+                }
+
+                let texture_meta = fs::read_to_string(
+                    mode_output_root.join("Assets/Texture2D/AtlasTextureFixture.bmp.meta"),
+                )
+                .unwrap();
+                let id_table = texture_meta
+                    .split("  externalObjects:")
+                    .next()
+                    .expect("TextureImporter has an internal ID table");
+                let zeta_id = id_table.find("213: 21300000").unwrap();
+                let zeta_name = id_table.find("second: ZetaSpriteFixture").unwrap();
+                let alpha_id = id_table.find("213: 21300002").unwrap();
+                let alpha_name = id_table.find("second: AlphaSpriteFixture").unwrap();
+                assert!(zeta_id < zeta_name && zeta_name < alpha_id && alpha_id < alpha_name);
+
+                let sprite_sheet = texture_meta
+                    .split_once("  spriteSheet:")
+                    .map(|(_, sheet)| sheet)
+                    .expect("TextureImporter has its SpriteSheet");
+                let zeta_sheet = sprite_sheet.find("name: ZetaSpriteFixture").unwrap();
+                let alpha_sheet = sprite_sheet.find("name: AlphaSpriteFixture").unwrap();
+                assert!(zeta_sheet < alpha_sheet, "SpriteSheet preserves first encounter order");
+            }
+
+            let texture_path = mode_output_root.join("Assets/Texture2D/AtlasTextureFixture.bmp");
+            assert_eq!(
+                fs::read(texture_path).unwrap(),
+                multi_expected_texture_bytes,
+                "multi-Sprite {mode} retains the source-matched Texture2D image bytes"
+            );
+
+            input.files.extend(mode_files);
+            let mut mode_directories = vec![mode_output_root.clone()];
+            collect_directories(&mode_output_root, &mut mode_directories);
+            mode_directories.sort_by_key(|path| path.components().count());
+            input.subdirectories.extend(mode_directories);
+        }
     }
