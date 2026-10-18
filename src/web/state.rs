@@ -12,6 +12,7 @@
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
+use assetripper::export::project_workflow::ProjectExportOutputLayout;
 use assetripper::export::settings::{ExportDefaults, ImportDefaults, ProcessingDefaults};
 use assetripper::export::settings_file::{
     decide_settings_persistence, parse_export_settings_text, parse_import_settings_text,
@@ -1143,6 +1144,7 @@ impl WebState {
                 .get("EngineResourceData")
                 .map(String::as_str),
             &mut status,
+            ProjectExportOutputLayout::AssetRipperExportRoot,
         )
         .map_err(|error| error.to_string())?;
         self.push_status(&status);
@@ -1342,7 +1344,7 @@ mod tests {
     }
 
     #[test]
-    fn project_export_uses_stored_textasset_engine_resource_data() {
+    fn web_project_export_uses_source_roots_and_stored_textasset_engine_resource_data() {
         let _source_layouts = crate::SourceFactoryLayoutGuard::use_source_factory();
         let fixture = include_str!("../processing/asset_factory_fixture.txt");
         let hex = fixture
@@ -1372,11 +1374,23 @@ mod tests {
         state
             .export_unity_project(&embedded_output_text, false)
             .expect("the default embedded TPK cache exports the TextAsset");
+        let embedded_project = embedded_output.join("ExportedProject");
         assert_eq!(
-            std::fs::read(embedded_output.join("Assets/TextAsset/Hero.txt"))
+            std::fs::read(embedded_project.join("Assets/TextAsset/Hero.txt"))
                 .expect("embedded cache leaves a nonmatching TextAsset exportable"),
             b"print(1)"
         );
+        assert!(embedded_project
+            .join("ProjectSettings/ProjectVersion.txt")
+            .is_file());
+        assert!(embedded_project.join("Packages/manifest.json").is_file());
+        assert!(embedded_output
+            .join("AuxiliaryFiles/path_id_map.json")
+            .is_file());
+        assert!(!embedded_output.join("Assets").exists());
+        assert!(!embedded_project
+            .join("AuxiliaryFiles/path_id_map.json")
+            .exists());
 
         state
             .set_singleton_data(
@@ -1389,13 +1403,17 @@ mod tests {
         state
             .export_unity_project(&custom_output_text, false)
             .expect("the custom cache redirects a matching TextAsset");
+        let custom_project = custom_output.join("ExportedProject");
         assert!(
-            !custom_output.join("Assets/TextAsset/Hero.txt").exists(),
+            !custom_project.join("Assets/TextAsset/Hero.txt").exists(),
             "a TextAsset matched by name and UInt128 MD5 is redirected"
         );
-        assert!(!custom_output
+        assert!(!custom_project
             .join("Assets/TextAsset/Hero.txt.meta")
             .exists());
+        assert!(custom_output
+            .join("AuxiliaryFiles/path_id_map.json")
+            .is_file());
         assert_eq!(std::fs::read(&source_path).unwrap(), source_bytes);
     }
 

@@ -89,7 +89,8 @@ use super::prefab_collection::{
     PrefabExportIdPlan, PrefabExportPlanLimits, PrefabHierarchyAssetGroups, VersionedPrefabAsset,
 };
 use super::project_exporter::{
-    claim_facts_for_shader_text, execute_project_export_with_streams, export_extension_for,
+    claim_facts_for_shader_text, execute_project_export_with_streams,
+    execute_project_export_with_streams_at_export_root, export_extension_for,
     lighting_data_native_format_importer_for_version, mesh_native_format_importer_for_version,
     native_format_importer_for_version, object_class_facts, object_class_name,
     package_manifest_json, project_version_file, select_collection_with_claim_facts,
@@ -602,7 +603,9 @@ pub use self::export::{
     export_workspace_yaml_project_with_assembly_catalog,
     export_workspace_yaml_project_with_serialized_settings,
     export_workspace_yaml_project_with_serialized_settings_and_engine_resource_data,
+    export_workspace_yaml_project_with_serialized_settings_and_engine_resource_data_at_export_root,
 };
+pub use super::project_exporter::ProjectExportOutputLayout;
 /// The decoded display-name helper, shared with the web tree pages.
 pub use self::workspace_identity::object_asset_name;
 

@@ -331,6 +331,76 @@ pub fn export_workspace_yaml_project_with_serialized_settings_and_engine_resourc
     managed_assemblies: Option<&ManagedAssemblyCatalog>,
     limits: WorkspaceProjectExportLimits,
 ) -> Result<WorkspaceProjectExportReport, Box<dyn Error>> {
+    export_workspace_yaml_project_with_output_layout(
+        output_root,
+        delete_existing,
+        filesystem,
+        root_catalog,
+        resource_provider,
+        workspace,
+        objects,
+        reference_graph,
+        full_settings,
+        engine_resource_data_text,
+        assembly_manager_is_set,
+        managed_assemblies,
+        limits,
+        ProjectExportOutputLayout::Flat,
+    )
+}
+
+/// Project export using AssetRipper's `ExportRootPath` directory layout.
+#[allow(clippy::too_many_arguments)]
+pub fn export_workspace_yaml_project_with_serialized_settings_and_engine_resource_data_at_export_root(
+    output_root: &Path,
+    delete_existing: bool,
+    filesystem: &VirtualFileSystem,
+    root_catalog: &RootResourceFileCatalog,
+    resource_provider: &PlatformResourceProvider<'_>,
+    workspace: &SerializedFileWorkspace,
+    objects: &ObjectWorkspace,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+    full_settings: &SerializedSettingsFile,
+    engine_resource_data_text: Option<&str>,
+    assembly_manager_is_set: bool,
+    managed_assemblies: Option<&ManagedAssemblyCatalog>,
+    limits: WorkspaceProjectExportLimits,
+) -> Result<WorkspaceProjectExportReport, Box<dyn Error>> {
+    export_workspace_yaml_project_with_output_layout(
+        output_root,
+        delete_existing,
+        filesystem,
+        root_catalog,
+        resource_provider,
+        workspace,
+        objects,
+        reference_graph,
+        full_settings,
+        engine_resource_data_text,
+        assembly_manager_is_set,
+        managed_assemblies,
+        limits,
+        ProjectExportOutputLayout::AssetRipperExportRoot,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn export_workspace_yaml_project_with_output_layout(
+    output_root: &Path,
+    delete_existing: bool,
+    filesystem: &VirtualFileSystem,
+    root_catalog: &RootResourceFileCatalog,
+    resource_provider: &PlatformResourceProvider<'_>,
+    workspace: &SerializedFileWorkspace,
+    objects: &ObjectWorkspace,
+    reference_graph: &MultiFileReferenceGraph<'_>,
+    full_settings: &SerializedSettingsFile,
+    engine_resource_data_text: Option<&str>,
+    assembly_manager_is_set: bool,
+    managed_assemblies: Option<&ManagedAssemblyCatalog>,
+    limits: WorkspaceProjectExportLimits,
+    output_layout: ProjectExportOutputLayout,
+) -> Result<WorkspaceProjectExportReport, Box<dyn Error>> {
     let context = validate_workspace_project_export(WorkspaceProjectExportInputs {
         output_root,
         delete_existing,
@@ -616,14 +686,26 @@ pub fn export_workspace_yaml_project_with_serialized_settings_and_engine_resourc
         post_export_base_bytes,
         limits,
     )?;
-    let report = execute_project_export_with_streams(
-        output_root,
-        delete_existing,
-        &plan,
-        &streamed_post_exports,
-        limits.project_output,
-        limits.yaml_write,
-    )?;
+    let report = match output_layout {
+        ProjectExportOutputLayout::Flat => execute_project_export_with_streams(
+            output_root,
+            delete_existing,
+            &plan,
+            &streamed_post_exports,
+            limits.project_output,
+            limits.yaml_write,
+        )?,
+        ProjectExportOutputLayout::AssetRipperExportRoot => {
+            execute_project_export_with_streams_at_export_root(
+                output_root,
+                delete_existing,
+                &plan,
+                &streamed_post_exports,
+                limits.project_output,
+                limits.yaml_write,
+            )?
+        }
+    };
     Ok(WorkspaceProjectExportReport {
         serialized_file_count: workspace.files().len(),
         exported_object_count,

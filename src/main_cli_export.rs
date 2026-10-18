@@ -1396,6 +1396,7 @@ pub(super) fn export_loaded_game<W: io::Write>(
     full_settings: &assetripper::export::settings_file::SerializedSettingsFile,
     engine_resource_data_text: Option<&str>,
     status_output: &mut W,
+    output_layout: assetripper::export::project_workflow::ProjectExportOutputLayout,
 ) -> Result<(), Box<dyn Error>> {
     // The graph borrows the loaded workspace, so it is rebuilt per export rather than
     // stored beside it.
@@ -1409,22 +1410,43 @@ pub(super) fn export_loaded_game<W: io::Write>(
     if let Some(source) = &game.original_streaming_assets {
         provider = provider.with_streaming_assets_filesystem(source);
     }
-    let report = export_workspace_yaml_project_with_serialized_settings_and_engine_resource_data(
-        output_root,
-        delete_existing,
-        &game.filesystem,
-        &game.root_catalog,
-        &provider,
-        &game.workspace,
-        &game.objects,
-        &reference_graph,
-        full_settings,
-        engine_resource_data_text,
-        game.mono_manager_initialized,
-        game.mono_manager_initialized
-            .then_some(&game.managed_assemblies),
-        WorkspaceProjectExportLimits::default(),
-    )?;
+    let report = if output_layout
+        == assetripper::export::project_workflow::ProjectExportOutputLayout::AssetRipperExportRoot
+    {
+        assetripper::export::project_workflow::export_workspace_yaml_project_with_serialized_settings_and_engine_resource_data_at_export_root(
+            output_root,
+            delete_existing,
+            &game.filesystem,
+            &game.root_catalog,
+            &provider,
+            &game.workspace,
+            &game.objects,
+            &reference_graph,
+            full_settings,
+            engine_resource_data_text,
+            game.mono_manager_initialized,
+            game.mono_manager_initialized
+                .then_some(&game.managed_assemblies),
+            WorkspaceProjectExportLimits::default(),
+        )?
+    } else {
+        export_workspace_yaml_project_with_serialized_settings_and_engine_resource_data(
+            output_root,
+            delete_existing,
+            &game.filesystem,
+            &game.root_catalog,
+            &provider,
+            &game.workspace,
+            &game.objects,
+            &reference_graph,
+            full_settings,
+            engine_resource_data_text,
+            game.mono_manager_initialized,
+            game.mono_manager_initialized
+                .then_some(&game.managed_assemblies),
+            WorkspaceProjectExportLimits::default(),
+        )?
+    };
     writeln!(
         status_output,
         "Wrote a Unity project to {:?}: {} SerializedFiles, {} objects in {} asset files ({} with importer metadata; support-file count {}; post-exporter file count {}), {} bytes (project version {}).",
@@ -1518,6 +1540,7 @@ pub(super) fn export_project_to_with_serialized_settings<W: io::Write>(
         full_settings,
         None,
         status_output,
+        assetripper::export::project_workflow::ProjectExportOutputLayout::Flat,
     )
 }
 

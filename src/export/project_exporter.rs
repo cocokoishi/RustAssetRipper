@@ -55,6 +55,19 @@ use crate::processing::scene_naming::SceneUnityVersion;
 /// `TypeTreeObject { IsPlayerSettings: true }` instead.
 pub const PLAYER_SETTINGS_CLASS_ID: i32 = 129;
 
+/// Selects how project-relative paths are rooted on disk.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProjectExportOutputLayout {
+    /// Keep every relative output under the caller's directory.
+    Flat,
+    /// Match `CoreConfiguration`: project content under `ExportedProject`, with auxiliary files
+    /// beside it under the caller's export root.
+    AssetRipperExportRoot,
+}
+
+const ASSETRIPPER_PROJECT_DIRECTORY: &str = "ExportedProject";
+const AUXILIARY_FILES_DIRECTORY: &str = "AuxiliaryFiles";
+
 /// Portable project-relative path of the `ProjectVersionPostExporter` output.
 pub const PROJECT_VERSION_FILE: &str = "ProjectSettings/ProjectVersion.txt";
 /// Portable project-relative path of the `PackageManifestPostExporter` output.
@@ -1005,6 +1018,45 @@ pub(super) fn execute_project_export_with_streams(
     limits: UnityProjectOutputLimits,
     yaml_limits: UnityYamlWriteLimits,
 ) -> Result<ProjectExportReport, Box<dyn Error>> {
+    execute_project_export_with_streams_with_layout(
+        output_root,
+        delete_existing,
+        plan,
+        streamed_post_exports,
+        limits,
+        yaml_limits,
+        ProjectExportOutputLayout::Flat,
+    )
+}
+
+pub(super) fn execute_project_export_with_streams_at_export_root(
+    output_root: &Path,
+    delete_existing: bool,
+    plan: &ProjectExportPlan,
+    streamed_post_exports: &ProjectStreamPostExports,
+    limits: UnityProjectOutputLimits,
+    yaml_limits: UnityYamlWriteLimits,
+) -> Result<ProjectExportReport, Box<dyn Error>> {
+    execute_project_export_with_streams_with_layout(
+        output_root,
+        delete_existing,
+        plan,
+        streamed_post_exports,
+        limits,
+        yaml_limits,
+        ProjectExportOutputLayout::AssetRipperExportRoot,
+    )
+}
+
+fn execute_project_export_with_streams_with_layout(
+    output_root: &Path,
+    delete_existing: bool,
+    plan: &ProjectExportPlan,
+    streamed_post_exports: &ProjectStreamPostExports,
+    limits: UnityProjectOutputLimits,
+    yaml_limits: UnityYamlWriteLimits,
+    output_layout: ProjectExportOutputLayout,
+) -> Result<ProjectExportReport, Box<dyn Error>> {
     plan.validate()?;
     streamed_post_exports.validate(plan, limits)?;
     let post_export_file_count = plan
@@ -1013,6 +1065,12 @@ pub(super) fn execute_project_export_with_streams(
         .checked_add(streamed_post_exports.files.len())
         .ok_or(ProjectExportError::ProjectFileCountOverflow)?;
     prepare_export_root(output_root, delete_existing)?;
+    let project_root = match output_layout {
+        ProjectExportOutputLayout::Flat => output_root.to_path_buf(),
+        ProjectExportOutputLayout::AssetRipperExportRoot => {
+            create_project_directory(output_root, ASSETRIPPER_PROJECT_DIRECTORY, limits)?
+        }
+    };
 
     // `ExportHandler.Export` runs the export loop first and the post-exporters last. Preserve
     // their order so a failed collection write cannot leave post-export output behind.
@@ -1028,7 +1086,7 @@ pub(super) fn execute_project_export_with_streams(
             if support.before_file_index != index {
                 break;
             }
-            write_new_project_file(output_root, &support.relative_path, &support.bytes, limits)?;
+            write_new_project_file(&project_root, &support.relative_path, &support.bytes, limits)?;
             support_file_count += 1;
             next_support_file += 1;
         }
@@ -1036,7 +1094,7 @@ pub(super) fn execute_project_export_with_streams(
         match &file.meta {
             Some(meta) => {
                 let step = export_asset_with_meta(
-                    output_root,
+                    &project_root,
                     AssetExportWithMetaPlan {
                         relative_asset_path: file.relative_path.clone(),
                         guid: file.guid,
@@ -1059,7 +1117,7 @@ pub(super) fn execute_project_export_with_streams(
                 }
             }
             None => {
-                write_new_project_file(output_root, &file.relative_path, bytes, limits)?;
+                write_new_project_file(&project_root, &file.relative_path, bytes, limits)?;
                 asset_file_count += 1;
                 total_asset_bytes += bytes.len();
             }
@@ -1078,30 +1136,33 @@ pub(super) fn execute_project_export_with_streams(
             }
             .into());
         }
-        write_new_project_file(output_root, &support.relative_path, &support.bytes, limits)?;
+        write_new_project_file(&project_root, &support.relative_path, &support.bytes, limits)?;
         support_file_count += 1;
         next_support_file += 1;
     }
 
     write_new_project_file(
-        output_root,
+        &project_root,
         PROJECT_VERSION_FILE,
         plan.project_version_file.as_bytes(),
         limits,
     )?;
     write_new_project_file(
-        output_root,
+        &project_root,
         PACKAGE_MANIFEST_FILE,
         plan.package_manifest.as_bytes(),
         limits,
     )?;
     for directory in &streamed_post_exports.directories {
-        create_project_directory(output_root, directory, limits)?;
+        let path_root = project_export_path_root(directory, output_root, &project_root, output_layout);
+        create_project_directory(path_root, directory, limits)?;
     }
     for file in &streamed_post_exports.files {
         let (mut stream, _) = file.stream.create_partial_file_backed(0, file.byte_count)?;
+        let path_root =
+            project_export_path_root(&file.relative_path, output_root, &project_root, output_layout);
         write_new_project_stream(
-            output_root,
+            path_root,
             &file.relative_path,
             &mut stream,
             file.byte_count,
@@ -1109,7 +1170,9 @@ pub(super) fn execute_project_export_with_streams(
         )?;
     }
     for file in &plan.post_export_files {
-        write_new_project_file(output_root, &file.relative_path, &file.bytes, limits)?;
+        let path_root =
+            project_export_path_root(&file.relative_path, output_root, &project_root, output_layout);
+        write_new_project_file(path_root, &file.relative_path, &file.bytes, limits)?;
     }
     events.push(ProjectExportEvent::ExportFinished);
 
@@ -1139,6 +1202,22 @@ pub(super) fn execute_project_export_with_streams(
         skipped,
         fallbacks,
     })
+}
+
+fn project_export_path_root<'a>(
+    relative_path: &str,
+    output_root: &'a Path,
+    project_root: &'a Path,
+    output_layout: ProjectExportOutputLayout,
+) -> &'a Path {
+    if output_layout == ProjectExportOutputLayout::AssetRipperExportRoot
+        && (relative_path == AUXILIARY_FILES_DIRECTORY
+            || relative_path.starts_with("AuxiliaryFiles/"))
+    {
+        output_root
+    } else {
+        project_root
+    }
 }
 
 /// Write the asset file already created with add-only semantics by `export_asset_with_meta`.
