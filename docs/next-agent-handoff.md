@@ -2,14 +2,14 @@
 
 ## Latest verified checkpoint
 
-- Implementation revision: `444aeb5290e796668b0d7febd8e7fbaa416e3f47`; GitHub Actions run [39128054503](https://github.com/cocokoishi/RustAssetRipper/actions/runs/39128054503) passed all eight jobs and uploaded Linux/Windows release binaries.
-- The bounded `EngineResourceData` nullable serializer slice now matches the frozen Release GUI. Six direct HTTP submissions matched every decoded ConfigurationFiles `<pre>` value exactly; Windows output uses CRLF and Unix output uses LF. Regression `engine_resource_data_json_matches_nullable_and_empty_dictionary_text` passed in both test jobs.
-- The live ledger has 409 rows, 381 verified, and 28 non-verified; Phase 1 remains open. `PRODUCT-CONFIG-001` remains unverified because non-empty EngineResourceData payload/export behavior and generic data serializers are incomplete.
+- Implementation revision: `6cb178bfdf2ebcc9412716bd707fa279ab478431`; GitHub Actions run [39135371359](https://github.com/cocokoishi/RustAssetRipper/actions/runs/39135371359) passed all eight jobs and uploaded Linux/Windows release binaries.
+- Closed `DIFF-WEB-EXPORT-ROOT-LAYOUT-001`: a public synthetic no-TypeTree TextAsset Web export now matches the frozen source's `ExportedProject/` and sibling `AuxiliaryFiles/` layout. The six output paths match; five files are byte-identical, and the `.meta` matches after normalizing only source-generated GUID and wall-clock timestamp fields. Details are in `docs/differential-findings.md` and `docs/validation-log.md`.
+- The live parity report has 409 rows, 381 verified, and 28 non-verified; Phase 1 remains open. `EXPORT-UNITY-001` remains `实现中`.
 - No private input or output was used.
 
 ## Primary next gap
 
-Implement typed handling for non-empty `EngineResourceData` resource dictionaries and apply them to project export. Frozen `ProjectExporter.Overrides` passes a non-null value to `EngineAssetsExporter.CreateFromResourceData`; Rust currently leaves non-empty dictionaries as raw singleton text and does not apply them to engine-asset export. Build a source-generated payload fixture that compares resource-cache resolution and the resulting exported project outputs. Keep `PRODUCT-CONFIG-001` open until this and the generic Parsable/Json DataSet serializer families are covered.
+Implement non-empty `EngineResourceData` dictionary handling through `EngineAssetsExporter` and prove its exported effect against the frozen source. The six nullable/empty JSON HTTP cases are already source-matched, but the Rust configuration path does not map non-empty values into the engine-resource override. Start from the source `FullConfiguration` registration and `EngineAssetsExporter.CreateFromResourceData`, then trace the corresponding Rust configuration and export path. Keep `PRODUCT-CONFIG-001` open until this payload behavior is exercised.
 
 ## External limitation
 
