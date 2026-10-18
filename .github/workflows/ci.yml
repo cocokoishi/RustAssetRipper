@@ -129,7 +129,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            release_artifact: assetripper-rs-linux-x86_64
+            release_binary: target/release/assetripper-rs
+          - os: windows-latest
+            release_artifact: assetripper-rs-windows-x86_64
+            release_binary: target/release/assetripper-rs.exe
     steps:
       - name: Check out source without a persistent token
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -143,6 +149,14 @@ jobs:
       - name: Build release binaries
         if: ${{ always() && steps.rust_toolchain.outcome == 'success' }}
         run: cargo build --workspace --release --locked
+      - name: Upload Rust release binary
+        if: ${{ success() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.release_artifact }}
+          path: ${{ matrix.release_binary }}
+          if-no-files-found: error
+          retention-days: 30
 
   # Release-mode tests run the suite against optimized code, where overflow and
   # debug-assertion behavior differs from the debug profile. This is the heaviest
