@@ -955,8 +955,10 @@ mod tests {
     /// * The ETC payloads cannot go through the classic decoder at all - `unity_etc1.crn` makes it
     ///   **throw** and `unity_etc2a.crn` makes it **fail** - so the format branch prevents a crash,
     ///   not merely a wrong colour.
-    /// * The DXT payloads decode through *both* decoders but to **different bytes**, so the version
-    ///   branch changes the pixels. Getting it wrong there is a silent wrong-image bug.
+    /// * The four 2D DXT payloads decode through *both* decoders but to **different bytes**, so the
+    ///   version branch changes the pixels. Getting it wrong there is a silent wrong-image bug.
+    /// * The six-face DXT1 cubemap decodes through classic Crunch, but UnityCrunch throws. This
+    ///   pins the old-version dispatch for the multi-face path as well.
     #[test]
     fn every_fixture_decodes_only_under_the_decoder_the_gate_selects() {
         let fixture = include_str!("crunch_dispatch_fixture.txt");
@@ -978,6 +980,7 @@ mod tests {
                 "unity_dxt5.crn" => ("2017.3.0f1", 29, "unity"),
                 "unity_etc1.crn" => ("2017.2.0f1", 64, "unity"),
                 "unity_etc2a.crn" => ("2017.2.0f1", 65, "unity"),
+                "multi_face_multimip.crn" => ("2017.2.0f1", 28, "classic"),
                 other => panic!("unexpected fixture {other}"),
             };
             let version = UnityVersion::parse(version).unwrap();
@@ -996,6 +999,9 @@ mod tests {
                         assert_eq!(outcome, "threw NullReferenceException", "{line}")
                     }
                     "unity_etc2a.crn" => assert_eq!(outcome, "failed", "{line}"),
+                    "multi_face_multimip.crn" => {
+                        assert_eq!(outcome, "threw NullReferenceException", "{line}")
+                    }
                     // The DXT payloads are handled by both paths, to different bytes.
                     _ => assert_eq!(outcome, "ok", "{line}"),
                 }
@@ -1005,7 +1011,7 @@ mod tests {
             }
             checked += 1;
         }
-        assert_eq!(checked, 12, "every recorded row is checked");
+        assert_eq!(checked, 14, "every recorded row is checked");
     }
 
     #[test]
@@ -1092,6 +1098,53 @@ mod tests {
                     (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
                 });
             assert_eq!(actual_hash, expected_hash, "{name} full RGBA oracle hash");
+        }
+    }
+
+    #[test]
+    fn mipmapped_crunch_cubemap_matches_reference_pixels_per_face() {
+        let data = &include_bytes!("../../tests/fixtures/crunch/multi_face_multimip.crn")[..];
+        let mut info = CrnTextureInfo::default();
+        assert!(info.crnd_get_texture_info(data, data.len() as u32));
+        assert_eq!((info.width, info.height, info.levels, info.faces), (8, 8, 3, 6));
+
+        let image = TextureImage {
+            texture_format: 28,
+            graphics_format: 0,
+            width: 8,
+            height: 8,
+            depth: 6,
+            image_size: data.len(),
+            data,
+        };
+        let version = UnityVersion::parse("2017.2.0f1").unwrap();
+        let bitmap = convert_to_bitmap_with_unity_version(&image, Some(version))
+            .unwrap_or_else(|error| panic!("multi_face_multimip.crn: {error}"));
+        assert_eq!((bitmap.width, bitmap.height, bitmap.depth), (8, 8, 6));
+        assert_eq!(bitmap.pixels.len(), 8 * 8 * 6 * 4);
+
+        // Full RGBA face hashes from the frozen Crunch v1.04 `-split` output. Each face has a
+        // distinct solid DDS color, so these pin face identity/order without orientation variance.
+        let expected_face_hashes = [
+            0x1503_c643_508e_8ea5,
+            0xc077_82b1_9c57_9525,
+            0xe613_e435_82ac_02a5,
+            0x0955_6317_3747_4925,
+            0xef00_0e77_c8a4_0d25,
+            0xee8f_499e_caa2_f925,
+        ];
+        let pixels_per_face = 8 * 8 * 4;
+        for (face, (pixels, expected_hash)) in bitmap
+            .pixels
+            .chunks_exact(pixels_per_face)
+            .zip(expected_face_hashes)
+            .enumerate()
+        {
+            let actual_hash = pixels.iter().fold(
+                0xcbf2_9ce4_8422_2325_u64,
+                |hash, byte| (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3),
+            );
+            assert_eq!(actual_hash, expected_hash, "cubemap face {face}");
         }
     }
 

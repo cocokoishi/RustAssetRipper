@@ -25,6 +25,7 @@ public static class Program
         "unity_dxt5.crn",
         "unity_etc1.crn",
         "unity_etc2a.crn",
+        "multi_face_multimip.crn",
     };
 
     public static int Main(string[] args)

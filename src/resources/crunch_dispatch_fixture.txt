@@ -26,6 +26,9 @@
 #     wrong side here would be a silent wrong-image bug rather than an error.
 #   * The three `unity_*` fixtures all decode through the Unity decoder, matching the port's gate:
 #     formats 64/65 select UnityCrunch on any version, and 2017.3+ selects it unconditionally.
+#   * `multi_face_multimip.crn` is an 8x8 six-face DXT1 cubemap with three mip levels. The classic
+#     decoder returns all 288 DXT bytes; UnityCrunch throws, so the pre-2017.3 DXT dispatch is also
+#     load-bearing for cubemaps.
 #
 # The port's own 64-bit RGBA oracle hashes are pinned separately in
 # `src/resources/texture_converter.rs`; these rows are the reference-runtime cross-check that the
@@ -42,3 +45,5 @@ OUT|classic|unity_etc1.crn|threw NullReferenceException
 OUT|unity|unity_etc1.crn|ok|174776|7D5B186BEE79AA1A
 OUT|classic|unity_etc2a.crn|failed
 OUT|unity|unity_etc2a.crn|ok|349552|51100FB928E5CD2E
+OUT|classic|multi_face_multimip.crn|ok|288|E321A17C7CFBA23F
+OUT|unity|multi_face_multimip.crn|threw NullReferenceException
