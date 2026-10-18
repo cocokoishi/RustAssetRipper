@@ -1203,7 +1203,9 @@
             "Scene graph: 1 GameObjects, 0 Transforms, 1 relationships, 0 decode issues, complete=false"
         ));
         assert!(summary.contains("Workspace root candidates: 1, root issues: 0"));
-        assert!(summary.contains("Generated Prefab Transforms planned for non-scene GameObjects: 1"));
+        assert!(
+            summary.contains("Generated Prefab Transforms planned for non-scene GameObjects: 1")
+        );
         assert!(summary.contains(
             "hierarchy file 0: 1 GameObjects, 0 Transforms, 0 component candidates, 1 roots, 0 root issues, 1 relationships, complete=false"
         ));
