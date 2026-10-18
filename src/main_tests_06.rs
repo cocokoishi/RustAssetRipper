@@ -331,6 +331,205 @@
     }
 
     #[test]
+    fn export_project_resolves_dependency_from_nested_bundle_scope_like_source() {
+        let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
+        let source_fixture =
+            include_str!("export/managed_reference_nested_sibling_bundle_fixture.txt");
+        assert!(source_fixture
+            .contains("SELECTED|source.bundle/managed.assets|target.assets|FirstTarget|"));
+        let fixture_value = |prefix: &str| {
+            source_fixture
+                .lines()
+                .find_map(|line| line.strip_prefix(prefix))
+                .unwrap_or_else(|| panic!("nested-scope source fixture is missing {prefix}"))
+        };
+        let decode_hex = |hex: &str| {
+            assert!(hex.len().is_multiple_of(2), "fixture hex has even length");
+            hex.as_bytes()
+                .chunks_exact(2)
+                .map(|pair| {
+                    u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16)
+                        .expect("fixture hex is valid")
+                })
+                .collect::<Vec<_>>()
+        };
+        let decode_base64 = |encoded: &str| {
+            fn digit(byte: u8) -> u8 {
+                match byte {
+                    b'A'..=b'Z' => byte - b'A',
+                    b'a'..=b'z' => byte - b'a' + 26,
+                    b'0'..=b'9' => byte - b'0' + 52,
+                    b'+' => 62,
+                    b'/' => 63,
+                    _ => panic!("fixture base64 has an invalid digit"),
+                }
+            }
+            let mut output = Vec::new();
+            let mut buffer = 0u32;
+            let mut bits = 0u8;
+            for byte in encoded.bytes() {
+                if byte == b'=' {
+                    break;
+                }
+                buffer = (buffer << 6) | u32::from(digit(byte));
+                bits += 6;
+                if bits >= 8 {
+                    bits -= 8;
+                    output.push((buffer >> bits) as u8);
+                    buffer &= (1 << bits) - 1;
+                }
+            }
+            output
+        };
+        let source_bundle_hex = fixture_value("INPUT_HEX|workspace.bundle|");
+        let source_bundle_bytes = decode_hex(source_bundle_hex);
+        let bundled_fixture = include_bytes!(
+            "export/managed_reference_project_fixture/nested_source_sibling_reference.bundle"
+        );
+        assert_eq!(bundled_fixture, source_bundle_bytes.as_slice());
+        let source_root_yaml = String::from_utf8(decode_base64(fixture_value("ROOT_YAML|")))
+            .expect("source root YAML is UTF-8");
+
+        let directory = TestInputDirectory::new_root();
+        let bundle_path = directory.join("workspace.bundle");
+        fs::write(&bundle_path, bundled_fixture).expect("nested source-scope UnityFS fixture");
+        let input = TestInputDirectory {
+            directory: directory.clone(),
+            files: vec![bundle_path.clone()],
+            subdirectories: Vec::new(),
+        };
+        let (mut graph_filesystem, selected_paths, mut graph_mount_report) =
+            super::mount_project_inputs(std::slice::from_ref(&bundle_path)).unwrap();
+        let mixed = super::MixedGameStructure::from_vfs_paths(
+            &graph_filesystem,
+            &selected_paths,
+            super::MixedGameStructureLimits::default(),
+        )
+        .unwrap();
+        let (graph_workspace, _) = super::load_workspace_with_mount_report(
+            &mut graph_filesystem,
+            &mixed.serialized_file_inputs,
+            &mixed.registered_files,
+            &mixed.data_paths,
+            super::WorkspaceLoadLimits::default(),
+            &mut graph_mount_report,
+        )
+        .unwrap();
+        let graph = graph_workspace
+            .reference_graph(
+                assetripper::serialized_file::reference_graph::MultiFileReferenceGraphLimits::default(),
+            )
+            .unwrap();
+        let root_file_index = graph_workspace
+            .files()
+            .iter()
+            .position(|file| file.virtual_path.ends_with("source.bundle/managed.assets"))
+            .expect("managed source collection is nested under source.bundle");
+        let root_pointer = graph
+            .references()
+            .iter()
+            .find(|reference| {
+                reference.source_file_index == root_file_index
+                    && reference.field_path == "references.RefIds[0].data.m_Asset"
+            })
+            .expect("managed root has its external m_Asset pointer");
+        let assetripper::serialized_file::reference_graph::MultiFilePPtrResolution::Object {
+            target_file_index,
+            target_object_index: 0,
+        } = root_pointer.resolution
+        else {
+            panic!("the nested source-scope PPtr must resolve to an object");
+        };
+        let target_path = &graph_workspace.files()[target_file_index].virtual_path;
+        assert!(
+            target_path.ends_with("first.bundle/target.assets"),
+            "nested collection resolved to {target_path}"
+        );
+        assert_eq!(
+            graph_workspace.resolve_dependency_collections().unwrap()[root_file_index][0],
+            Some(target_file_index),
+            "collection dependency resolution and the PPtr graph select the same sibling"
+        );
+
+        let output_root = directory.join("project-nested-source-scope");
+        let mut status = Vec::new();
+        super::export_project_to(
+            std::slice::from_ref(&bundle_path),
+            &output_root,
+            false,
+            &default_export_settings(),
+            &mut status,
+        )
+        .expect("nested source-scope dependency resolves like AssetRipper");
+        let status = String::from_utf8(status).expect("export status is UTF-8");
+        assert!(status.contains("3 SerializedFiles"), "{status}");
+        assert!(status.contains("3 objects in 3 asset files"), "{status}");
+
+        let root_path = output_root.join("Assets/MonoBehaviour/ManagedRoot.asset");
+        let first_target_path = output_root.join("Assets/MonoBehaviour/FirstTarget.asset");
+        let second_target_path = output_root.join("Assets/MonoBehaviour/SecondTarget.asset");
+        let first_target_meta_path =
+            output_root.join("Assets/MonoBehaviour/FirstTarget.asset.meta");
+        let second_target_meta_path =
+            output_root.join("Assets/MonoBehaviour/SecondTarget.asset.meta");
+        let root_yaml = fs::read_to_string(&root_path).expect("root YAML is exported");
+        let first_target_yaml =
+            fs::read_to_string(&first_target_path).expect("first sibling target YAML is exported");
+        let second_target_yaml = fs::read_to_string(&second_target_path)
+            .expect("second sibling target YAML is exported");
+        let first_target_guid = meta_guid(&first_target_meta_path);
+        let second_target_guid = meta_guid(&second_target_meta_path);
+        assert_eq!(
+            source_root_yaml.trim_end(),
+            root_yaml
+                .replace(&first_target_guid, "<TARGET_GUID>")
+                .trim_end(),
+            "the source runtime and Rust export resolve from the nested collection identically"
+        );
+        assert!(root_yaml.contains(&format!(
+            "m_Asset: {{fileID: 11400000, guid: {first_target_guid}, type: 2}}"
+        )));
+        assert!(!root_yaml.contains(&second_target_guid));
+        assert_eq!(
+            include_str!(
+                "export/managed_reference_project_fixture/source_sibling_FirstTarget.asset"
+            )
+            .trim_end(),
+            first_target_yaml.trim_end()
+        );
+        assert_eq!(
+            include_str!(
+                "export/managed_reference_project_fixture/source_sibling_SecondTarget.asset"
+            )
+            .trim_end(),
+            second_target_yaml.trim_end()
+        );
+        assert!(first_target_yaml.contains("m_Health: 789"));
+        assert!(second_target_yaml.contains("m_Health: 456"));
+        assert!(root_yaml.contains("        m_Link:\n          rid: 200\n"));
+        assert!(root_yaml.contains("        m_Link:\n          rid: 100\n"));
+
+        let normalize_meta = |path: &std::path::Path| {
+            let normalized = fs::read_to_string(path)
+                .expect("asset metadata is readable")
+                .lines()
+                .filter(|line| !line.starts_with("guid: ") && !line.starts_with("timeCreated: "))
+                .collect::<Vec<_>>()
+                .join("\n");
+            normalized.trim_end_matches(['\r', '\n']).to_owned() + "\n"
+        };
+        let expected_meta = include_str!(
+            "export/managed_reference_project_fixture/source_nested_ReferencedRoot.asset.meta.normalized"
+        );
+        assert_eq!(expected_meta, normalize_meta(&first_target_meta_path));
+        assert_eq!(expected_meta, normalize_meta(&second_target_meta_path));
+        assert_eq!(fs::read(&bundle_path).unwrap(), bundled_fixture);
+
+        fs::remove_dir_all(&output_root).expect("remove nested source-scope project output");
+        drop(input);
+    }
+
+    #[test]
     fn export_project_saves_managed_assembly_and_maps_script_pointer() {
         let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
         let fixture = include_str!("processing/managed_assembly_saved_project_fixture.txt");
