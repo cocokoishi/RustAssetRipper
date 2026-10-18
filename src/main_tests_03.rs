@@ -513,10 +513,9 @@
             name: u32,
             types: (u32, u32, u32),
             size: u32,
-            element_type: u32,
-            element_name: u32,
-            element_size: i32,
+            element: (u32, u32, i32),
         ) {
+            let (element_type, element_name, element_size) = element;
             let (vector_type, array_type, int_type) = types;
             push(nodes, level, vector_type, name, -1);
             push(nodes, level + 1, array_type, array_type, -1);
@@ -583,9 +582,7 @@
                 name,
                 vector_types,
                 f_size,
-                element_type,
-                f_data,
-                element_size,
+                (element_type, f_data, element_size),
             );
             if name == f_bs_vertices {
                 push_vector3(&mut nodes, 5, f_vertex, vector3_types, coords);
@@ -618,9 +615,7 @@
             f_bind_pose,
             vector_types,
             f_size,
-            matrix4x4_type,
-            f_data,
-            64,
+            (matrix4x4_type, f_data, 64),
         );
         for component in matrix_components {
             push(&mut nodes, 4, float_type, component, 4);
@@ -631,9 +626,7 @@
             f_bone_hashes,
             vector_types,
             f_size,
-            uint_type,
-            f_data,
-            4,
+            (uint_type, f_data, 4),
         );
         push(&mut nodes, 1, uint_type, f_root_bone_hash, 4);
         push_empty_vector(
@@ -642,9 +635,7 @@
             f_bones_aabb,
             vector_types,
             f_size,
-            min_max_aabb_type,
-            f_data,
-            24,
+            (min_max_aabb_type, f_data, 24),
         );
         push_vector3(&mut nodes, 4, f_min, vector3_types, coords);
         push_vector3(&mut nodes, 4, f_max, vector3_types, coords);
@@ -655,9 +646,7 @@
             f_data_vec,
             vector_types,
             f_size,
-            uint_type,
-            f_data,
-            4,
+            (uint_type, f_data, 4),
         );
         push(&mut nodes, 1, uint8_type, f_mesh_compression, 1);
         push(&mut nodes, 1, bool_type, f_is_readable, 1);
@@ -724,9 +713,7 @@
             f_baked_convex,
             vector_types,
             f_size,
-            uint8_type,
-            f_data,
-            1,
+            (uint8_type, f_data, 1),
         );
         push_empty_vector(
             &mut nodes,
@@ -734,9 +721,7 @@
             f_baked_tri,
             vector_types,
             f_size,
-            uint8_type,
-            f_data,
-            1,
+            (uint8_type, f_data, 1),
         );
         push(&mut nodes, 1, float_type, f_metric0, 4);
         push(&mut nodes, 1, float_type, f_metric1, 4);
