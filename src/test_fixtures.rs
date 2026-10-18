@@ -53,7 +53,7 @@ fn write_object_record(
     output.extend_from_slice(&0u16.to_le_bytes());
 }
 
-pub(crate) fn make_existing_prefab_instance_file() -> Vec<u8> {
+fn make_prefab_hierarchy_file() -> Vec<u8> {
     const GAME_OBJECT_PATH_ID: i64 = 10;
     const TRANSFORM_PATH_ID: i64 = 11;
     const PREFAB_INSTANCE_PATH_ID: i64 = 12;
@@ -303,6 +303,10 @@ pub(crate) fn make_existing_prefab_instance_file() -> Vec<u8> {
     file
 }
 
+pub(crate) fn make_existing_prefab_instance_file() -> Vec<u8> {
+    make_prefab_mesh_instance_file(None)
+}
+
 /// Combine the Prefab hierarchy fixture with a production-layout class-43 Mesh object.
 ///
 /// `mesh_file` is the existing 2019.4 single-Mesh fixture. Its TypeTree record and payload are
@@ -310,7 +314,7 @@ pub(crate) fn make_existing_prefab_instance_file() -> Vec<u8> {
 /// provide the same local references and empty static-batch range used by the frozen GLB probe.
 /// This lets the product route exercise the full GameObject -> component -> Mesh path without
 /// inventing vertex bytes or a Mesh schema.
-pub(crate) fn make_prefab_mesh_instance_file(mesh_file: &[u8]) -> Vec<u8> {
+pub(crate) fn make_prefab_mesh_instance_file(mesh_file: Option<&[u8]>) -> Vec<u8> {
     const GAME_OBJECT_PATH_ID: i64 = 10;
     const TRANSFORM_PATH_ID: i64 = 11;
     const MESH_FILTER_PATH_ID: i64 = 13;
@@ -436,12 +440,15 @@ pub(crate) fn make_prefab_mesh_instance_file(mesh_file: &[u8]) -> Vec<u8> {
     fn append_aligned_string(output: &mut Vec<u8>, value: &str) {
         output.extend_from_slice(&i32::try_from(value.len()).unwrap().to_le_bytes());
         output.extend_from_slice(value.as_bytes());
-        while output.len() % 4 != 0 {
+        while !output.len().is_multiple_of(4) {
             output.push(0);
         }
     }
 
-    let prefab_file = make_existing_prefab_instance_file();
+    let prefab_file = make_prefab_hierarchy_file();
+    let Some(mesh_file) = mesh_file else {
+        return prefab_file;
+    };
     let prefab_layout = parse_layout(&prefab_file);
     let mesh_layout = parse_layout(mesh_file);
     assert_eq!(prefab_file[8..12], 10_u32.to_be_bytes());
@@ -544,7 +551,7 @@ pub(crate) fn make_prefab_mesh_instance_file(mesh_file: &[u8]) -> Vec<u8> {
     let mut data = Vec::new();
     let mut object_records = Vec::with_capacity(output_objects.len());
     for (path_id, raw_type_id, class_id, object_payload) in output_objects {
-        while data.len() % 4 != 0 {
+        while !data.len().is_multiple_of(4) {
             data.push(0);
         }
         let data_start = data.len();

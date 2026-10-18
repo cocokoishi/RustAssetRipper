@@ -1535,7 +1535,7 @@ mod tests {
         std::fs::create_dir_all(&directory).expect("the probe directory is created");
         let input = directory.join("prefab-mesh-2019.4.unity");
         let mesh_file = make_production_mesh_file();
-        std::fs::write(&input, make_prefab_mesh_instance_file(&mesh_file))
+        std::fs::write(&input, make_prefab_mesh_instance_file(Some(&mesh_file)))
             .expect("the synthetic Prefab and Mesh SerializedFile is written");
 
         let mut state = state();
@@ -1617,9 +1617,9 @@ mod tests {
 
         // Decode the GLB accessors rather than relying on JSON counts or output-file presence.
         let bin_header = 20 + json_length;
-        assert_eq!(&bytes[bin_header..bin_header + 4], b"BIN\0");
+        assert_eq!(&bytes[bin_header + 4..bin_header + 8], b"BIN\0");
         let bin_length =
-            u32::from_le_bytes(bytes[bin_header + 4..bin_header + 8].try_into().unwrap()) as usize;
+            u32::from_le_bytes(bytes[bin_header..bin_header + 4].try_into().unwrap()) as usize;
         let binary = &bytes[bin_header + 8..bin_header + 8 + bin_length];
         let accessor_bytes = |accessor: &serde_json::Value, element_size: usize| {
             let view_index = accessor["bufferView"]

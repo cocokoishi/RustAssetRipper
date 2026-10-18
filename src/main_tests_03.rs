@@ -385,6 +385,7 @@
         let t = |strings: &mut Vec<u8>, value: &str| push_type_tree_string(strings, value);
         let mesh_type = t(&mut strings, "Mesh");
         let empty = t(&mut strings, "");
+        let string_type = t(&mut strings, "string");
         let array_type = t(&mut strings, "Array");
         let int_type = t(&mut strings, "int");
         let uint_type = t(&mut strings, "unsigned int");
@@ -397,6 +398,11 @@
         let aabb_type = t(&mut strings, "AABB");
         let sub_mesh_type = t(&mut strings, "SubMesh");
         let blend_data_type = t(&mut strings, "BlendShapeData");
+        let blend_shape_vertex_type = t(&mut strings, "BlendShapeVertex");
+        let mesh_blend_shape_type = t(&mut strings, "MeshBlendShape");
+        let mesh_blend_shape_channel_type = t(&mut strings, "MeshBlendShapeChannel");
+        let matrix4x4_type = t(&mut strings, "Matrix4x4f");
+        let min_max_aabb_type = t(&mut strings, "MinMaxAABB");
         let channel_info_type = t(&mut strings, "ChannelInfo");
         let vertex_data_type = t(&mut strings, "VertexData");
         let typeless_type = t(&mut strings, "TypelessData");
@@ -406,8 +412,23 @@
         let streaming_type = t(&mut strings, "StreamingInfo");
 
         let f_name = t(&mut strings, "m_Name");
+        let f_channel_name = t(&mut strings, "name");
         let f_size = t(&mut strings, "size");
         let f_data = t(&mut strings, "data");
+        let f_vertex = t(&mut strings, "vertex");
+        let f_normal = t(&mut strings, "normal");
+        let f_tangent = t(&mut strings, "tangent");
+        let f_blend_shape_index = t(&mut strings, "index");
+        let f_name_hash = t(&mut strings, "nameHash");
+        let f_frame_index = t(&mut strings, "frameIndex");
+        let f_frame_count = t(&mut strings, "frameCount");
+        let f_min = t(&mut strings, "m_Min");
+        let f_max = t(&mut strings, "m_Max");
+        let matrix_components = [
+            "e00", "e01", "e02", "e03", "e10", "e11", "e12", "e13", "e20", "e21", "e22", "e23",
+            "e30", "e31", "e32", "e33",
+        ]
+        .map(|name| t(&mut strings, name));
         let f_sub_meshes = t(&mut strings, "m_SubMeshes");
         let f_first_byte = t(&mut strings, "firstByte");
         let f_index_count = t(&mut strings, "indexCount");
@@ -475,28 +496,32 @@
             nodes: &mut Vec<(u8, u32, u32, i32)>,
             level: u8,
             name: u32,
-            types: (u32, u32, u32),
+            types: (u32, u32, u32, u32),
             names: (u32, u32),
         ) {
-            let (array_type, int_type, char_type) = types;
+            let (string_type, array_type, int_type, char_type) = types;
             let (size, data) = names;
-            push(nodes, level, array_type, name, -1);
+            push(nodes, level, string_type, name, -1);
             push(nodes, level + 1, array_type, array_type, -1);
             push(nodes, level + 2, int_type, size, 4);
             push(nodes, level + 2, char_type, data, 1);
         }
-        // An empty `vector`: Array -> size only.
+        // A zero-length `vector` still has the element TypeTree node after its size field.
         fn push_empty_vector(
             nodes: &mut Vec<(u8, u32, u32, i32)>,
             level: u8,
             name: u32,
             types: (u32, u32, u32),
             size: u32,
+            element_type: u32,
+            element_name: u32,
+            element_size: i32,
         ) {
             let (vector_type, array_type, int_type) = types;
             push(nodes, level, vector_type, name, -1);
             push(nodes, level + 1, array_type, array_type, -1);
             push(nodes, level + 2, int_type, size, 4);
+            push(nodes, level + 2, element_type, element_name, element_size);
         }
         // A `Vector3f` of three floats.
         fn push_vector3(
@@ -513,7 +538,7 @@
             }
         }
 
-        let string_types = (array_type, int_type, char_type);
+        let string_types = (string_type, array_type, int_type, char_type);
         let vector_types = (vector_type, array_type, int_type);
         let vector3_types = (vector3_type, float_type);
         let coords = (f_x, f_y, f_z);
@@ -543,17 +568,97 @@
         // m_Shapes: a BlendShapeData with four empty vectors.
         push(&mut nodes, 1, blend_data_type, f_shapes, -1);
         for name in [f_bs_vertices, f_shapes_vec, f_channels, f_full_weights] {
-            push_empty_vector(&mut nodes, 2, name, vector_types, f_size);
+            let (element_type, element_size) = if name == f_bs_vertices {
+                (blend_shape_vertex_type, 40)
+            } else if name == f_shapes_vec {
+                (mesh_blend_shape_type, 10)
+            } else if name == f_channels {
+                (mesh_blend_shape_channel_type, -1)
+            } else {
+                (float_type, 4)
+            };
+            push_empty_vector(
+                &mut nodes,
+                2,
+                name,
+                vector_types,
+                f_size,
+                element_type,
+                f_data,
+                element_size,
+            );
+            if name == f_bs_vertices {
+                push_vector3(&mut nodes, 5, f_vertex, vector3_types, coords);
+                push_vector3(&mut nodes, 5, f_normal, vector3_types, coords);
+                push_vector3(&mut nodes, 5, f_tangent, vector3_types, coords);
+                push(&mut nodes, 5, uint_type, f_blend_shape_index, 4);
+            } else if name == f_shapes_vec {
+                push(&mut nodes, 5, uint_type, f_first_vertex, 4);
+                push(&mut nodes, 5, uint_type, f_vertex_count, 4);
+                push(&mut nodes, 5, bool_type, t(&mut strings, "hasNormals"), 1);
+                push(&mut nodes, 5, bool_type, t(&mut strings, "hasTangents"), 1);
+            } else if name == f_channels {
+                push_string(
+                    &mut nodes,
+                    5,
+                    f_channel_name,
+                    string_types,
+                    (f_size, f_data),
+                );
+                push(&mut nodes, 5, uint_type, f_name_hash, 4);
+                push(&mut nodes, 5, int_type, f_frame_index, 4);
+                push(&mut nodes, 5, int_type, f_frame_count, 4);
+            }
         }
         // Bone data: three empty vectors, a root hash, an empty AABB vector, then the
         // variable-bone-count weights' own empty vector.
-        for name in [f_bind_pose, f_bone_hashes] {
-            push_empty_vector(&mut nodes, 1, name, vector_types, f_size);
+        push_empty_vector(
+            &mut nodes,
+            1,
+            f_bind_pose,
+            vector_types,
+            f_size,
+            matrix4x4_type,
+            f_data,
+            64,
+        );
+        for component in matrix_components {
+            push(&mut nodes, 4, float_type, component, 4);
         }
+        push_empty_vector(
+            &mut nodes,
+            1,
+            f_bone_hashes,
+            vector_types,
+            f_size,
+            uint_type,
+            f_data,
+            4,
+        );
         push(&mut nodes, 1, uint_type, f_root_bone_hash, 4);
-        push_empty_vector(&mut nodes, 1, f_bones_aabb, vector_types, f_size);
+        push_empty_vector(
+            &mut nodes,
+            1,
+            f_bones_aabb,
+            vector_types,
+            f_size,
+            min_max_aabb_type,
+            f_data,
+            24,
+        );
+        push_vector3(&mut nodes, 4, f_min, vector3_types, coords);
+        push_vector3(&mut nodes, 4, f_max, vector3_types, coords);
         push(&mut nodes, 1, variable_type, f_variable, -1);
-        push_empty_vector(&mut nodes, 2, f_data_vec, vector_types, f_size);
+        push_empty_vector(
+            &mut nodes,
+            2,
+            f_data_vec,
+            vector_types,
+            f_size,
+            uint_type,
+            f_data,
+            4,
+        );
         push(&mut nodes, 1, uint8_type, f_mesh_compression, 1);
         push(&mut nodes, 1, bool_type, f_is_readable, 1);
         push(&mut nodes, 1, bool_type, f_keep_vertices, 1);
@@ -613,8 +718,26 @@
         push_vector3(&mut nodes, 2, f_center, vector3_types, coords);
         push_vector3(&mut nodes, 2, f_extent, vector3_types, coords);
         push(&mut nodes, 1, int_type, f_usage_flags, 4);
-        push_empty_vector(&mut nodes, 1, f_baked_convex, vector_types, f_size);
-        push_empty_vector(&mut nodes, 1, f_baked_tri, vector_types, f_size);
+        push_empty_vector(
+            &mut nodes,
+            1,
+            f_baked_convex,
+            vector_types,
+            f_size,
+            uint8_type,
+            f_data,
+            1,
+        );
+        push_empty_vector(
+            &mut nodes,
+            1,
+            f_baked_tri,
+            vector_types,
+            f_size,
+            uint8_type,
+            f_data,
+            1,
+        );
         push(&mut nodes, 1, float_type, f_metric0, 4);
         push(&mut nodes, 1, float_type, f_metric1, 4);
         push(&mut nodes, 1, streaming_type, f_stream_data, -1);
