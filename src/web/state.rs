@@ -1381,7 +1381,7 @@ mod tests {
         state
             .set_singleton_data(
                 "EngineResourceData",
-                r#"{"DefaultResources":{"777":{"$type":"TextAsset","Name":"Hero","Length":7,"Hash":130469715505528193672212848297838865176}},"ExtraResources":{}}"#,
+                r#"{"DefaultResources":{"777":{"$type":"TextAsset","Name":"Hero","Length":8,"Hash":130469715505528193672212848297838865176}},"ExtraResources":{}}"#,
             )
             .expect("store source-shaped custom TextAsset resource data");
         let custom_output = directory.join("project-custom");
