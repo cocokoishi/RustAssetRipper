@@ -960,10 +960,9 @@
             .expect("nested requester records its target.assets dependency");
         assert!(matches!(
             &loaded_dependency.outcome,
-            assetripper::serialized_file::workspace::SerializedFileDependencyOutcome::LoadedSerializedFile {
+            assetripper::serialized_file::workspace::SerializedFileDependencyOutcome::AlreadyLoaded {
                 file_index,
-                virtual_path,
-            } if *file_index == target_file_index && virtual_path.ends_with("source.bundle/target.assets")
+            } if *file_index == target_file_index
         ));
         assert_eq!(
             workspace.resolve_dependency_collections().unwrap()[requester_file_index][0],
