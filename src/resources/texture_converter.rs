@@ -1106,7 +1106,10 @@ mod tests {
         let data = &include_bytes!("../../tests/fixtures/crunch/multi_face_multimip.crn")[..];
         let mut info = CrnTextureInfo::default();
         assert!(info.crnd_get_texture_info(data, data.len() as u32));
-        assert_eq!((info.width, info.height, info.levels, info.faces), (8, 8, 3, 6));
+        assert_eq!(
+            (info.width, info.height, info.levels, info.faces),
+            (8, 8, 3, 6)
+        );
 
         let image = TextureImage {
             texture_format: 28,
@@ -1140,10 +1143,9 @@ mod tests {
             .zip(expected_face_hashes)
             .enumerate()
         {
-            let actual_hash = pixels.iter().fold(
-                0xcbf2_9ce4_8422_2325_u64,
-                |hash, byte| (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3),
-            );
+            let actual_hash = pixels.iter().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+                (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+            });
             assert_eq!(actual_hash, expected_hash, "cubemap face {face}");
         }
     }
