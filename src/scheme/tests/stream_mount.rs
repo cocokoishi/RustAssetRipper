@@ -371,3 +371,90 @@ fn source_unityweb_nested_webdata_routes_through_the_common_stream_mount() {
         );
     }
 }
+
+#[test]
+fn source_unityfs_nested_webdata_routes_through_the_common_stream_mount() {
+    let row = include_str!("../../io/io_differential_stream_fixture.txt")
+        .lines()
+        .find(|line| line.starts_with("SCHEME|ufs_nested_webdata|"))
+        .expect("frozen source UnityFS-with-WebData row");
+    let fields: Vec<&str> = row.split('|').collect();
+    let input = fields
+        .iter()
+        .find_map(|field| field.strip_prefix("in="))
+        .map(decode_hex_fixture)
+        .expect("source UnityFS row includes exact input bytes");
+    let expected_tree = fields
+        .iter()
+        .find_map(|field| field.strip_prefix("tree="))
+        .expect("source UnityFS row includes its frozen mount tree");
+    assert_eq!(
+        expected_tree,
+        "CONTAINER:FileStreamBundleFile:ufs_nested_webdata.bin:res=0:failed=0,CONTAINER:WebFile:inner.webdata:res=2:failed=0,RES:inner.bin:77656221,RES:sub/deep.bin:64656570"
+    );
+    let expected_entries = [
+        ("inner.bin", b"web!".as_slice()),
+        ("sub/deep.bin", b"deep".as_slice()),
+    ];
+
+    let mut legacy_filesystem = VirtualFileSystem::new();
+    let expected = SchemeReader::read(&input)
+        .unwrap()
+        .mount_container_tree_with_source_name(
+            &mut legacy_filesystem,
+            Some("/tree"),
+            Some("ufs_nested_webdata.bin"),
+            ContainerMountLimits::default(),
+        )
+        .unwrap();
+
+    let mut filesystem = VirtualFileSystem::new();
+    let source = SmartStream::from_reader(Box::new(Cursor::new(input))).unwrap();
+    let actual = mount_stream_container_tree(
+        &source,
+        FileKind::UnityFs,
+        Some("ufs_nested_webdata.bin"),
+        &mut filesystem,
+        Some("/tree"),
+        SchemeReaderLimits::default(),
+        ContainerMountLimits {
+            max_active_nested_bytes: 0,
+            ..ContainerMountLimits::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(actual, expected);
+    assert_eq!(actual.container_scopes, ["/tree", "/tree/inner.webdata"]);
+    assert_eq!(actual.container_bundles.len(), 2);
+    assert_eq!(actual.mounted_entries, expected_entries.len());
+    assert!(actual.failed_entries.is_empty());
+    assert_eq!(actual.resource_files.len(), expected_entries.len());
+    drop(source);
+    for (index, (name, expected_bytes)) in expected_entries.iter().enumerate() {
+        let virtual_path = format!("/tree/inner.webdata/{name}");
+        let resource = &actual.resource_files[index];
+        assert_eq!(resource.name, *name);
+        assert_eq!(resource.virtual_path, virtual_path);
+        assert_eq!(resource.entry_index, index);
+        assert_eq!(resource.resource_index, index);
+        assert_eq!(
+            filesystem.open_file(&virtual_path).unwrap().stream_type(),
+            crate::io::stream::SmartStreamType::File
+        );
+        assert_eq!(
+            filesystem
+                .read_all_bytes(&virtual_path, expected_bytes.len())
+                .unwrap(),
+            *expected_bytes,
+        );
+        assert_eq!(
+            filesystem
+                .read_all_bytes(&virtual_path, expected_bytes.len())
+                .unwrap(),
+            legacy_filesystem
+                .read_all_bytes(&virtual_path, expected_bytes.len())
+                .unwrap(),
+        );
+    }
+}
