@@ -1,0 +1,13 @@
+# Frozen source AssetRipper export for distinct resolved PPtrs in an array inside a nested collection.
+VERSION|2019.4.40f1|format=21|platform=StandaloneWin64Player
+DISTINCT_RESOLVED|source.bundle/managed.assets|target.assets|source.bundle/target.assets|900|901
+INPUT|workspace.bundle|3547|84EC1D3B45565D38A497DBC71C0B1D3458F9F01520E4D6E2B8D7D50E35918AEF
+ENTRY|workspace.bundle|source.bundle|3423|500DEF1AECF5B86E8DB865169A6D052C42BAA0659936E730C4DA16734413EB7A
+ENTRY|source.bundle|managed.assets|2360|8727A4B411EE7EF680DDC1B036F0791C26BD83F688D01A58A3619F9C9693759E
+ENTRY|source.bundle|target.assets|904|32390CC4AEABFEFDA80C40305A2ED36EE40B8D17065F87E4274498ED2B86C7B8
+OBJECT|MonoBehaviour|42|ManagedRoot;MonoBehaviour|900|ReferencedRoot;MonoBehaviour|901|AlternateReferencedRoot
+POINTERS|- {fileID: 11400000, guid: <TARGET_900_GUID>, type: 2}|- {fileID: 11400000, guid: <TARGET_901_GUID>, type: 2}
+ROOT_YAML_FILE|source_nested_distinct_resolved_array_reference.asset
+TARGET_900_YAML_FILE|source_nested_distinct_resolved_array_target_900.asset
+TARGET_901_YAML_FILE|source_nested_distinct_resolved_array_target_901.asset
+GUID_NORMALIZATION|AssetExportCollection.GUID uses UnityGuid.NewGuid; replace the target meta GUID for PathID 900 with <TARGET_900_GUID> and the target meta GUID for PathID 901 with <TARGET_901_GUID> when comparing root YAML.

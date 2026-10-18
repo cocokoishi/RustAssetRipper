@@ -482,12 +482,18 @@ internal static partial class ManagedProjectProbe
         return ExportNestedArrayDependencyCore(inputRootArgument, outputRootArgument, rowsArgument, true, true);
     }
 
+    internal static int ExportNestedDistinctResolvedDependencyArray(string inputRootArgument, string outputRootArgument, string rowsArgument)
+    {
+        return ExportNestedArrayDependencyCore(inputRootArgument, outputRootArgument, rowsArgument, true, true, true);
+    }
+
     private static int ExportNestedArrayDependencyCore(
         string inputRootArgument,
         string outputRootArgument,
         string rowsArgument,
         bool arrayAssetPointer,
-        bool resolvedArrayPointer)
+        bool resolvedArrayPointer,
+        bool distinctResolvedArrayTargets = false)
     {
         string inputRoot = Path.GetFullPath(inputRootArgument);
         string outputRoot = Path.GetFullPath(outputRootArgument);
@@ -504,8 +510,18 @@ internal static partial class ManagedProjectProbe
         Directory.CreateDirectory(Path.GetDirectoryName(rowsPath)!);
 
         string externalFileName = resolvedArrayPointer ? "target.assets" : "missing.assets";
-        byte[] managedFile = BuildManagedRootFile(externalFileName, arrayAssetPointer, resolvedArrayPointer);
-        byte[]? targetFile = resolvedArrayPointer ? BuildTargetBehaviourFile() : null;
+        byte[] managedFile = BuildManagedRootFile(
+            externalFileName,
+            arrayAssetPointer,
+            resolvedArrayPointer && !distinctResolvedArrayTargets);
+        byte[]? targetFile = resolvedArrayPointer
+            ? distinctResolvedArrayTargets
+                ? BuildTargetBehaviourFileWithObjects(
+                    "target.assets",
+                    (900, "ReferencedRoot", 789),
+                    (901, "AlternateReferencedRoot", 456))
+                : BuildTargetBehaviourFile()
+            : null;
         byte[] sourceBundle = targetFile is null
             ? BuildUnityFs(("managed.assets", managedFile))
             : BuildUnityFs(("managed.assets", managedFile), ("target.assets", targetFile));
@@ -514,14 +530,18 @@ internal static partial class ManagedProjectProbe
         File.WriteAllBytes(bundlePath, outerBundle);
 
         using StreamWriter rows = new(rowsPath, false, new UTF8Encoding(false)) { NewLine = "\n" };
-        rows.WriteLine(resolvedArrayPointer
-            ? "# Frozen source AssetRipper export for resolved PPtrs in an array inside a nested collection."
+        rows.WriteLine(distinctResolvedArrayTargets
+            ? "# Frozen source AssetRipper export for distinct resolved PPtrs in an array inside a nested collection."
+            : resolvedArrayPointer
+                ? "# Frozen source AssetRipper export for resolved PPtrs in an array inside a nested collection."
             : arrayAssetPointer
                 ? "# Frozen source AssetRipper export for missing PPtrs in an array inside a nested collection."
                 : "# Frozen source AssetRipper export for a missing external requested by a nested collection.");
         rows.WriteLine("VERSION|2019.4.40f1|format=21|platform=StandaloneWin64Player");
-        rows.WriteLine(resolvedArrayPointer
-            ? "RESOLVED|source.bundle/managed.assets|target.assets|source.bundle/target.assets"
+        rows.WriteLine(distinctResolvedArrayTargets
+            ? "DISTINCT_RESOLVED|source.bundle/managed.assets|target.assets|source.bundle/target.assets|900|901"
+            : resolvedArrayPointer
+                ? "RESOLVED|source.bundle/managed.assets|target.assets|source.bundle/target.assets"
             : "MISSING|source.bundle/managed.assets|missing.assets");
         WriteInputRow(rows, bundlePath, outerBundle);
         rows.WriteLine($"ENTRY|workspace.bundle|source.bundle|{sourceBundle.Length}|{Convert.ToHexString(SHA256.HashData(sourceBundle))}");
@@ -535,14 +555,15 @@ internal static partial class ManagedProjectProbe
         ExportHandler handler = new(new FullConfiguration());
         var gameData = handler.LoadAndProcess([inputRoot], LocalFileSystem.Instance);
         string[] sourceObjects = gameData.GameBundle.FetchAssets()
-            .Where(asset => asset.ClassID == 114 && asset.PathID is 42 or 900)
+            .Where(asset => asset.ClassID == 114 && asset.PathID is 42 or 900 or 901)
             .Select(asset => $"{asset.ClassName}|{asset.PathID}|{asset}")
             .Order(StringComparer.Ordinal)
             .ToArray();
-        int expectedObjectCount = resolvedArrayPointer ? 2 : 1;
+        int expectedObjectCount = distinctResolvedArrayTargets ? 3 : resolvedArrayPointer ? 2 : 1;
         if (sourceObjects.Length != expectedObjectCount
             || !sourceObjects.Any(line => line.Contains("ManagedRoot", StringComparison.Ordinal))
-            || (resolvedArrayPointer && !sourceObjects.Any(line => line.Contains("ReferencedRoot", StringComparison.Ordinal))))
+            || (resolvedArrayPointer && !sourceObjects.Any(line => line.Contains("ReferencedRoot", StringComparison.Ordinal)))
+            || (distinctResolvedArrayTargets && !sourceObjects.Any(line => line.Contains("AlternateReferencedRoot", StringComparison.Ordinal))))
         {
             throw new InvalidDataException($"AssetRipper loaded an unexpected object set for the nested array dependency: {string.Join(";", sourceObjects)}");
         }
@@ -561,7 +582,9 @@ internal static partial class ManagedProjectProbe
         string rootYaml = File.ReadAllText(rootYamlPath);
         string normalizedRootYaml = rootYaml.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
         string? normalizedTargetYaml = null;
+        string? normalizedSecondTargetYaml = null;
         string? targetGuid = null;
+        string? secondTargetGuid = null;
         if (resolvedArrayPointer)
         {
             string? targetYamlPath = Directory.GetFiles(projectAssets, "*.asset", SearchOption.AllDirectories)
@@ -577,7 +600,29 @@ internal static partial class ManagedProjectProbe
             normalizedTargetYaml = File.ReadAllText(targetYamlPath)
                 .Replace("\r\n", "\n", StringComparison.Ordinal)
                 .Replace('\r', '\n');
-            normalizedRootYaml = normalizedRootYaml.Replace(targetGuid, "<TARGET_GUID>", StringComparison.Ordinal);
+            if (distinctResolvedArrayTargets)
+            {
+                string? secondTargetYamlPath = Directory.GetFiles(projectAssets, "*.asset", SearchOption.AllDirectories)
+                    .FirstOrDefault(path => File.ReadAllText(path).Contains("m_Name: AlternateReferencedRoot", StringComparison.Ordinal));
+                if (secondTargetYamlPath is null)
+                {
+                    throw new InvalidDataException("AssetRipper export omitted the second distinct resolved array target");
+                }
+                string secondTargetMetaPath = secondTargetYamlPath + ".meta";
+                secondTargetGuid = File.ReadLines(secondTargetMetaPath)
+                    .FirstOrDefault(line => line.StartsWith("guid: ", StringComparison.Ordinal))?[6..]
+                    ?? throw new InvalidDataException("second resolved array target metadata has no GUID");
+                normalizedSecondTargetYaml = File.ReadAllText(secondTargetYamlPath)
+                    .Replace("\r\n", "\n", StringComparison.Ordinal)
+                    .Replace('\r', '\n');
+                normalizedRootYaml = normalizedRootYaml
+                    .Replace(targetGuid, "<TARGET_900_GUID>", StringComparison.Ordinal)
+                    .Replace(secondTargetGuid, "<TARGET_901_GUID>", StringComparison.Ordinal);
+            }
+            else
+            {
+                normalizedRootYaml = normalizedRootYaml.Replace(targetGuid, "<TARGET_GUID>", StringComparison.Ordinal);
+            }
         }
         rows.WriteLine($"OBJECT|{string.Join(";", sourceObjects)}");
         if (arrayAssetPointer)
@@ -605,7 +650,16 @@ internal static partial class ManagedProjectProbe
         if (normalizedTargetYaml is not null)
         {
             rows.WriteLine($"TARGET_YAML|{Convert.ToBase64String(Encoding.UTF8.GetBytes(normalizedTargetYaml))}");
-            rows.WriteLine($"TARGET_GUID|{targetGuid}");
+            if (distinctResolvedArrayTargets)
+            {
+                rows.WriteLine($"TARGET_YAML_901|{Convert.ToBase64String(Encoding.UTF8.GetBytes(normalizedSecondTargetYaml!))}");
+                rows.WriteLine($"SOURCE_TARGET_GUIDS|{targetGuid}|{secondTargetGuid}");
+                rows.WriteLine("TARGET_GUID_NORMALIZATION|AssetExportCollection.GUID uses UnityGuid.NewGuid; target PathIDs 900 and 901 use their own target meta GUID placeholders.");
+            }
+            else
+            {
+                rows.WriteLine($"TARGET_GUID|{targetGuid}");
+            }
         }
         Console.WriteLine($"source_objects={string.Join(';', sourceObjects)}");
         Console.WriteLine($"bundle_bytes={outerBundle.Length}");

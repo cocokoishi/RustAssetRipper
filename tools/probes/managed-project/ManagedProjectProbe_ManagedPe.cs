@@ -354,6 +354,52 @@ ObjectData = audioBody,
         return file.ToByteArray();
     }
 
+    internal static byte[] BuildTargetBehaviourFileWithObjects(
+        string fileName,
+        params (long PathId, string Name, int Health)[] targets)
+    {
+        if (targets.Length == 0)
+        {
+            throw new ArgumentException("At least one target object is required", nameof(targets));
+        }
+
+        SerializedType monoBehaviourType = new() { RawTypeID = 114 };
+        AssignTree(monoBehaviourType, MonoBehaviourTargetTree());
+        SerializedFileBuilder builder = new()
+        {
+            Generation = FormatVersion.StoresTypeDependencies,
+            Version = UnityVersion.Parse("2019.4.40f1"),
+            Platform = (BuildTarget)19,
+            EndianType = EndianType.LittleEndian,
+            HasTypeTree = true,
+            Types = { monoBehaviourType },
+        };
+        foreach ((long pathId, string targetName, int targetHealth) in targets)
+        {
+            List<byte> payload = [];
+            WriteI32(payload, 0); // m_GameObject.m_FileID
+            WriteI64(payload, 0); // m_GameObject.m_PathID
+            payload.Add(1);       // m_Enabled
+            while (payload.Count % 4 != 0)
+            {
+                payload.Add(0);
+            }
+            WriteI32(payload, 0); // m_Script.m_FileID
+            WriteI64(payload, 0); // m_Script.m_PathID
+            WriteString(payload, targetName);
+            WriteI32(payload, targetHealth); // m_Health
+            builder.Objects.Add(new ObjectInfo(monoBehaviourType)
+            {
+                FileID = pathId,
+                TypeID = 114,
+                ObjectData = payload.ToArray(),
+            });
+        }
+        SerializedFile file = builder.Build();
+        file.FilePath = fileName;
+        return file.ToByteArray();
+    }
+
     internal static TypeTree MonoBehaviourTargetTree()
     {
         return MakeTree(
