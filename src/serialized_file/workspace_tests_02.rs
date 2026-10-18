@@ -754,9 +754,10 @@
                         "the fixture marks its trailing path space visibly"
                     ),
                     "patch_retry_light_failed" => {
-                        assert!(source_path.starts_with("\u{2420}"));
-                        assert!(source_path.contains("System.ArgumentOutOfRangeException"));
-                        assert!(source_path.contains("Parameter 'length'"));
+                        assert!(source_path.starts_with("  "));
+                        let source_exception = source_path.trim_start();
+                        assert!(source_exception.contains("System.ArgumentOutOfRangeException"));
+                        assert!(source_exception.contains("Parameter 'length'"));
                     }
                     _ => unreachable!("only malformed source rows carry Error logs"),
                 }
