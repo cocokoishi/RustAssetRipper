@@ -311,6 +311,30 @@ fn assert_case(case: &FixtureCase, layouts: &ReferenceClassLayouts) {
                 &SerializedValue::StringBytes(b"NavMeshData".to_vec())
             );
         }
+        "tpk_navmesh_2022_3" => {
+            assert_eq!(
+                file.metadata.prefix.unity_version_text.as_deref(),
+                Some("2022.3.22f1")
+            );
+            assert_eq!(
+                classify_type_tree_usability(file.metadata.types[0].type_tree.as_ref()),
+                TypeTreeUsability::Empty
+            );
+            assert_eq!(asset.kind, FactoryAssetKind::TypeTreeObject);
+            assert_eq!(asset.class_id, 194);
+            assert_eq!(asset.tail, Some(ObjectTailOutcome::Exact));
+            let payload = asset
+                .payload
+                .as_ref()
+                .expect("source TPK fallback payload");
+            assert_eq!(payload.type_name, "NavMeshObsolete");
+            assert_eq!(payload.consumed_bytes, 16);
+            assert!(payload.trailing_bytes.is_empty());
+            assert_eq!(
+                payload.root.unique_field("m_Name").unwrap().unwrap(),
+                &SerializedValue::StringBytes(b"NavMeshData".to_vec())
+            );
+        }
         "tpk_navmesh_editor" => {
             assert!(
                 !file
@@ -583,7 +607,7 @@ fn factory_differential_replays_every_reference_case() {
     let fixture = include_str!("../../asset_factory_fixture.txt");
     let layouts = reference_class_layouts();
     let cases = fixture_cases(fixture);
-    assert_eq!(cases.len(), 28, "all probe cases are replayed");
+    assert_eq!(cases.len(), 29, "all probe cases are replayed");
     for case in &cases {
         assert_case(case, layouts);
     }

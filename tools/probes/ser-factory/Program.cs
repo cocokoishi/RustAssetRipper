@@ -685,6 +685,7 @@ static void Author(string rowsPath)
 		"unknown_class",
 		"unknown_no_tree",
 		"tpk_navmesh",
+		"tpk_navmesh_2022_3",
 		"unreadable_version",
 		"unreadable_no_tree",
 		"engine_default_resources",
@@ -729,6 +730,7 @@ static void Author(string rowsPath)
 	{
 		WriteTpk(rows, classId, version);
 	}
+	WriteTpk(rows, 194, UnityVersion.Parse("2022.3.22f1"));
 	foreach (string name in cases)
 	{
 		(string fileName, SerializedFile file) = BuildCase(name);
@@ -785,6 +787,8 @@ static (string, SerializedFile) BuildCase(string name)
 			return ("unknown_no_tree.assets", BuildFile("unknown_no_tree.assets", "2019.4.40f1", 9999, null, [1, 2, 3, 4, 5, 6, 7, 8]));
 		case "tpk_navmesh":
 			return ("tpk_navmesh.assets", BuildFile("tpk_navmesh.assets", "2019.4.40f1", 194, null, StringPayload("NavMeshData")));
+		case "tpk_navmesh_2022_3":
+			return ("tpk_navmesh_2022_3.assets", BuildFile("tpk_navmesh_2022_3.assets", "2022.3.22f1", 194, null, StringPayload("NavMeshData")));
 		case "tpk_navmesh_editor":
 			return ("navmesh.unity", BuildNavMeshEditorFile());
 		case "unreadable_version":
