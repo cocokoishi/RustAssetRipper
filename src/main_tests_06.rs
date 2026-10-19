@@ -672,6 +672,101 @@
     }
 
     #[test]
+    fn export_project_maps_out_of_range_nested_file_id_to_source_missing_pointer() {
+        let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
+        let source_root_yaml = include_str!(
+            "export/managed_reference_project_fixture/source_nested_missing_external_reference.asset"
+        );
+        let fixtures: [(&str, i32, &[u8]); 2] = [
+            (
+                "nested_invalid_external_file_id_reference.bundle",
+                2,
+                include_bytes!("export/managed_reference_project_fixture/nested_invalid_external_file_id_reference.bundle")
+                    .as_slice(),
+            ),
+            (
+                "nested_negative_external_file_id_reference.bundle",
+                -1,
+                include_bytes!("export/managed_reference_project_fixture/nested_negative_external_file_id_reference.bundle")
+                    .as_slice(),
+            ),
+        ];
+
+        for (fixture_index, (fixture_name, file_id, bundled_fixture)) in
+            fixtures.into_iter().enumerate()
+        {
+            let directory = TestInputDirectory::new_root();
+            let bundle_path = directory.join("workspace.bundle");
+            fs::write(&bundle_path, bundled_fixture)
+                .expect("invalid external file ID UnityFS fixture");
+            let input = TestInputDirectory {
+                directory: directory.clone(),
+                files: vec![bundle_path.clone()],
+                subdirectories: Vec::new(),
+            };
+            let (mut filesystem, selected_paths, mut mount_report) =
+                super::mount_project_inputs(std::slice::from_ref(&bundle_path)).unwrap();
+            let mixed = super::MixedGameStructure::from_vfs_paths(
+                &filesystem,
+                &selected_paths,
+                super::MixedGameStructureLimits::default(),
+            )
+            .unwrap();
+            let (workspace, _) = super::load_workspace_with_mount_report(
+                &mut filesystem,
+                &mixed.serialized_file_inputs,
+                &mixed.registered_files,
+                &mixed.data_paths,
+                super::WorkspaceLoadLimits::default(),
+                &mut mount_report,
+            )
+            .unwrap();
+            let requester_file_index = workspace
+                .files()
+                .iter()
+                .position(|file| file.virtual_path.ends_with("source.bundle/managed.assets"))
+                .expect("requester remains nested under source.bundle");
+            let graph = workspace
+                .reference_graph(
+                    assetripper::serialized_file::reference_graph::MultiFileReferenceGraphLimits::default(),
+                )
+                .unwrap();
+            let root_pointer = graph
+                .references()
+                .iter()
+                .find(|reference| {
+                    reference.source_file_index == requester_file_index
+                        && reference.field_path == "references.RefIds[0].data.m_Asset"
+                })
+                .expect("managed root retains its invalid external PPtr");
+            assert_eq!(
+                root_pointer.resolution,
+                assetripper::serialized_file::reference_graph::MultiFilePPtrResolution::InvalidFileId {
+                    file_id,
+                    external_count: 1,
+                }
+            );
+
+            let output_root = directory.join(format!("project-invalid-file-id-{fixture_index}"));
+            super::export_project_to(
+                std::slice::from_ref(&bundle_path),
+                &output_root,
+                false,
+                &default_export_settings(),
+                &mut Vec::new(),
+            )
+            .expect("invalid external file ID exports as a source MissingReference pointer");
+            let root_path = output_root.join("Assets/MonoBehaviour/ManagedRoot.asset");
+            let root_yaml = fs::read_to_string(&root_path).expect("managed root YAML is exported");
+            assert_eq!(source_root_yaml.trim_end(), root_yaml.trim_end(), "{fixture_name}");
+            assert_eq!(fs::read(&bundle_path).unwrap(), bundled_fixture);
+
+            fs::remove_dir_all(&output_root).expect("remove invalid-file-ID project output");
+            drop(input);
+        }
+    }
+
+    #[test]
     fn export_project_preserves_nested_missing_array_pointers() {
         let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
         let source_fixture =

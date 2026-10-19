@@ -88,24 +88,24 @@ fn validate_workspace_project_export<'inputs, 'provider, 'graph>(
             })
             .take(8)
             .collect::<Vec<_>>();
-        // References into external files that were not supplied resolve as
-        // MissingDependency. The reference exporter tolerates them: it emits
-        // missing-reference pointers and continues, so the Rust gate does the
-        // same loudly instead of refusing the whole export. Every other
-        // unresolvable kind (local corruption, ambiguity, invalid file IDs)
-        // still fails closed.
-        let (missing_dependencies, fatal_references): (Vec<_>, Vec<_>) =
+        // The frozen exporter emits MissingReference pointers both when an
+        // external dependency is absent and when a PPtr's file ID is outside
+        // its external table. Keep the original invalid identity in the graph,
+        // but allow those two unresolved external cases through project export.
+        // Local corruption and ambiguous matches still fail closed.
+        let (missing_external_references, fatal_references): (Vec<_>, Vec<_>) =
             unresolved_references.into_iter().partition(|reference| {
                 matches!(
                     reference.resolution,
                     MultiFilePPtrResolution::MissingDependency { .. }
+                        | MultiFilePPtrResolution::InvalidFileId { .. }
                 )
             });
-        if !missing_dependencies.is_empty() {
+        if !missing_external_references.is_empty() {
             eprintln!(
-                "warning: project export continues with {} missing external dependenc(ies); the affected pointers export as missing references. Provide the external files as additional inputs to resolve them: [{}]",
-                missing_dependencies.len(),
-                missing_dependencies
+                "warning: project export continues with {} unresolved external PPtr(s); the affected pointers export as missing references: [{}]",
+                missing_external_references.len(),
+                missing_external_references
                     .iter()
                     .map(|reference| format!("{reference:?}"))
                     .collect::<Vec<_>>()

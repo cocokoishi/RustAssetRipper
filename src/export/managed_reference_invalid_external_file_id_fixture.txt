@@ -1,0 +1,9 @@
+# Frozen-source-generated public synthetic SerializedFile fixture for an invalid external PPtr index.
+FIXTURE|DIFF-OBJ-REF-INVALID-EXTERNAL-FILE-ID-001
+VERSION|2019.4.40f1|format=21|platform=StandaloneWin64Player
+INPUT|managed_reference_project_fixture/nested_invalid_external_file_id_reference.bundle|2465|0a9d6f4df41811bfd3b62e6b8aedda82518b9b1b1cbdf295ae18575612ddb5ed
+INPUT|managed_reference_project_fixture/nested_negative_external_file_id_reference.bundle|2465|beee3ce6200077d91e333ff7a28afe385577f83a3c9c2e747b5f1c8bd1a0afb1
+PPTR|references.RefIds[0].data.m_Asset|file_id=2|external_count=1|path_id=900
+PPTR|references.RefIds[0].data.m_Asset|file_id=-1|external_count=1|path_id=900
+SOURCE_POINTER|m_Asset: {fileID: 0, guid: 0000000deadbeef15deadf00d0000000, type: 2}
+SOURCE_YAML|managed_reference_project_fixture/source_nested_missing_external_reference.asset|704d810f3edcc68cc1822389bef2686802ab46dd9b4cbf1920e6995ae08a6b95
