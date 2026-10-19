@@ -7,7 +7,7 @@ through the baseline `AudioConverter.OggToWav` writer sequence:
 Run it with fresh output paths:
 
 ```powershell
-dotnet run --project tools/probes/ogg-wav-reference/Reference.csproj -- 松间弦音.ogg 山泉清音.wav
+dotnet run --project tools/probes/ogg-wav-reference/Reference.csproj -- input.ogg input.wav
 ```
 
 The project uses NAudio.Core 2.0.0 because NAudio.Vorbis 1.5.0 declares that dependency.

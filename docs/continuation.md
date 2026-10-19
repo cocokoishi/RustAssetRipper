@@ -8,11 +8,11 @@ The full Rust port remains incomplete and the GOAL §25 gate is OPEN. Later samp
 
 ## Worktree and baseline
 
-- Active Git worktree: `本地路径已隐去`.
-- Only this RustAssetRipper repository is a write target. Its `main` branch tracks the configured `origin/main`, and validated increments are pushed there. No other repository has been changed.
+- Active Git worktree: <LOCAL_WORKSPACE_ROOT>.
+- Only the Rust repository is a write target. Its `main` branch tracks the configured `origin/main`, and validated increments are pushed there. No other repository has been changed.
 - Safety note: the user warns that running the original export path against a non-empty output directory may delete existing contents. No original exporter has been run; any later reference export must use a newly created, verified empty isolated output directory.
-- The local reference snapshot is `本地路径已隐去`, not a Git checkout. Its 1,449-file checksum manifest is in `docs/baseline-files.sha256`.
-- The workspace inventory uses the harmless Chinese aliases 青岚雅苑 and 松风竹庭; exact input names are omitted. Later validation read and replayed sample contents, and the inventory remains incomplete and unfrozen. UABEA remains unread; the GOAL §25 gate remains OPEN.
+- The local reference snapshot is <LOCAL_REFERENCE_ROOT>, not a Git checkout. Its 1,449-file checksum manifest is in `docs/baseline-files.sha256`.
+- The workspace inventory uses the harmless Chinese aliases private-name-021 and private-name-019; exact input names are omitted. Later validation read and replayed sample contents, and the inventory remains incomplete and unfrozen. UABEA remains unread; the GOAL §25 gate remains OPEN.
 - Reference identity recorded in `docs/baseline.md`: AssetRipper 2.0.0, `net10.0`, 51 solution projects, including 8 test projects and 6 source generators. Full feature/dependency/platform/option audit remains incomplete.
 
 ## 2026-10-10 initial checkpoint (historical; superseded by current hand-off)
@@ -25,7 +25,7 @@ The full Rust port remains incomplete and the GOAL §25 gate is OPEN. Later samp
 - Baseline trace complete: `PrefabProcessor.AddMissingTransforms` is the only path that appends a processed collection to a `SceneDefinition`; that collection receives generated Transforms. `SceneHierarchyObject.Assets` contains hierarchy GameObjects, Components, PrefabInstances, managers, and optional SceneRoots, but not the synthetic SceneHierarchyObject itself. Scene export registers IDs in that group order, then applies the stable manager-first YAML sort. The generated Transform is therefore the only generated class in Scene YAML and its two-sided pointer path is implemented and synthetically verified.
 - Added the Prefab hierarchy YAML-body executor. It uses `PrefabExportIdPlan.exportable_assets` order and registered IDs, omits a modern hidden `IPrefabInstanceMarker`, and keeps local GameObject/component pointers mapped. The legacy generated Prefab remains an explicit missing-walker error. Full verification passed: 462 library tests, 21 CLI tests, warnings-denied Clippy, format check, baseline verifier (1,449 files unchanged), and `git diff --check`.
 - The Prefab body writer does not emit PrefabImporter `.meta`, a legacy generated Prefab document, or legacy `m_PrefabInternal` overlays. Other processed asset kinds, complete Scene/project output, CLI/UI workflows, and Phase 1 remain incomplete.
-- Added bounded `AssetBundle.Container` decoding that retains each key path and its `云岫藏珍.Asset` FileID/PathID, including local, shared, and null distinctions. A raw Unity 2019.4 SerializedFile fixture and synthetic malformed/limit cases pass; full validation passed with 465 library and 21 CLI tests, warnings-denied Clippy, format check, baseline verifier, and `git diff --check`.
+- Added bounded `AssetBundle.Container` decoding that retains each key path and its `private-name-001.Asset` FileID/PathID, including local, shared, and null distinctions. A raw Unity 2019.4 SerializedFile fixture and synthetic malformed/limit cases pass; full validation passed with 465 library and 21 CLI tests, warnings-denied Clippy, format check, baseline verifier, and `git diff --check`.
 - This records container references only; it does not yet resolve local PPtrs into workspace object identities or assign `AssetBundleName`/`OriginalPath`. These mappings feed the modern PrefabImporter and baseline project path processor.
 - Added `GetAssetBundleName` field decoding with non-empty explicit-name preference and caller-supplied source Bundle fallback, baseline `.bundle` suffix handling for assigned assets, and owning-file Container PPtr classification through the existing PathID graph. Tests cover aliases, fallback, malformed values, suffix behavior, and null/local/shared/missing/ambiguous/invalid targets; full verification passed with 470 library and 21 CLI tests, warnings-denied Clippy, format check, baseline verifier, and `git diff --check`.
 - These are verified processing primitives; the workspace does not yet derive the exact source Bundle name from mounted-container identity or apply ordered local `AssetBundleName` assignments to asset models. `OriginalPath`, `.meta` generation, and full project processing remain open.
@@ -295,7 +295,7 @@ Historical 2026-10-10 gate instruction (superseded): it prohibited reading UABEA
 ## Streamed-scene AssetBundle field extraction
 
 - Added `extract_streamed_scene_bundle_metadata` in `src/processing/scene_collections.rs`. It reads the optional streamed-scene flag, `SceneHashes` pair strings, and ordered `Container` path keys from generic TypeTree-decoded values; both `m_` serialized names and generated property aliases are accepted. Entry counts and string bytes are bounded across both arrays.
-- A generated minimal class ID 142 SerializedFile fixture now exercises TypeTree decoding through field extraction and verifies the null `云岫藏珍.asset` PPtr. Unity Technologies UnityDataTools documents the corresponding scene-bundle field and pair shapes: https://github.com/Unity-Technologies/UnityDataTools/blob/main/Documentation/assetbundle-format.md. The fixture is partial and synthetic, not a Unity-produced file.
+- A generated minimal class ID 142 SerializedFile fixture now exercises TypeTree decoding through field extraction and verifies the null `private-name-001.asset` PPtr. Unity Technologies UnityDataTools documents the corresponding scene-bundle field and pair shapes: https://github.com/Unity-Technologies/UnityDataTools/blob/main/Documentation/assetbundle-format.md. The fixture is partial and synthetic, not a Unity-produced file.
 - The frozen local AssetRipper tree references generated `IAssetBundle` accessors but omits the emitted class ID 142 schema; the expected field names and pair layout are therefore not yet verified against a class 142 TypeTree. No actual class 142 SerializedFile object was used. No bundle grouping or path override application exists yet, and Phase 1 remains open.
 - Next: carry source container/bundle identity through the workspace and apply scene overrides to the right collections; extend validation across additional class 142 schema generations. User AssetBundles and UABEA remain uninspected.
 
@@ -317,7 +317,7 @@ Historical 2026-10-10 gate instruction (superseded): it prohibited reading UABEA
 
 ## SceneDefinition planning
 
-- Current phase: Phase 1, independent Rust port; gate not passed. Frozen reference tree remains `本地路径已隐去`; only the Rust repository is a write target. Latest pushed revision before this increment was `ca63852daddd6644b78195195e73930a6c4f92a6`.
+- Current phase: Phase 1, independent Rust port; gate not passed. Frozen reference tree remains <LOCAL_REFERENCE_ROOT>; only the Rust repository is a write target. Latest pushed revision before this increment was `ca63852daddd6644b78195195e73930a6c4f92a6`.
 - Added `plan_scene_definition` and connected it to CLI inspect. It reports the source collection file index, normalized collection name, final name/path, path source, and whether SceneGUID words are preserved or a random GUID must be generated at export. Streamed-scene paths override resolved BuildSettings paths; unresolved paths use the source `FromName` fallback. Generation is deferred; no fixed or fabricated GUID is produced.
 - Synthetic verification: 250 library tests and 7 CLI tests passed, along with warnings-denied Clippy, format check, the 1,449-file baseline verifier, and `git diff --check`. An initial boundary-test failure was caused by a test collection name exceeding its earlier configured bound; the input was corrected and the full suite then passed.
 - No Unity-produced files, user AssetBundles, or UABEA content were inspected. No actual `AssetCollection`/`SceneDefinition` objects, full `SerializedBundle` tree, EditorBuildSettings asset, Unity project export, or Unity runtime behavior are implemented or verified.
@@ -325,7 +325,7 @@ Historical 2026-10-10 gate instruction (superseded): it prohibited reading UABEA
 
 ## Workspace container tree and collection links
 
-- Current phase: Phase 1; gate not passed. Only `本地路径已隐去` is writable; the local AssetRipper baseline remains read-only. Latest pushed revision before this increment was `110ba5a68e07f3ef017f18e75dc7ef64d38649d9`.
+- Current phase: Phase 1; gate not passed. Only the Rust repository is writable; the local AssetRipper baseline remains read-only. Latest pushed revision before this increment was `110ba5a68e07f3ef017f18e75dc7ef64d38649d9`.
 - Mount reports retain each ResourceFile leaf's path, owning container, source entry, and direct order; initial and dependency imports remap those links into workspace-global indexes. Streamed-scene AssetBundle mapping now reads the owning bundle node's direct collection indexes rather than looking up collections by scope path, so pathless root nodes are supported.
 - Verification is synthetic: 255 library tests and 8 CLI tests passed; warnings-denied Clippy, format, 1,449-file baseline verification, and diff check passed. No user AssetBundle or UABEA content was inspected.
 - FailedFiles and actual AssetCollection/SceneDefinition objects remain unmodeled. Resource bytes remain in the VFS; resource decoding/export and Unity runtime behavior are not implemented or verified.
@@ -334,7 +334,7 @@ Historical 2026-10-10 gate instruction (superseded): it prohibited reading UABEA
 
 ## Workspace-aware cross-file scene root discovery
 
-- Current phase: Phase 1; gate not passed. Latest pushed revision before this increment: 184bb3bf12d61f74555943b503a1f1e6f39d8a4c. Only the RustAssetRipper repository is writable.
+- Current phase: Phase 1; gate not passed. Latest pushed revision before this increment: 184bb3bf12d61f74555943b503a1f1e6f39d8a4c. Only the Rust repository is writable.
 - SceneGraph root discovery now uses the joined workspace reference graph to follow GameObject component pointers into other loaded SerializedFiles, identify external Transform/RectTransform classes, and inspect the selected Transform m_Father edge in its owning file. The CLI summary reports workspace-aware root candidates while reciprocal transform auditing remains file-local.
 - Synthetic generation-10 SerializedFiles verify that a GameObject with an external Transform whose father is null is a root, that a missing father target remains an issue instead of becoming a root, and that a same-named source graph with a different serialized PPtr pair is rejected. MultiFileObjectReference retains the serialized FileID/PathID pair for this identity check. No Unity-produced file, user AssetBundle, or UABEA was used.
 - Verification: cargo test --workspace --locked --quiet passed 270 library and 10 binary tests; warnings-denied Clippy, formatting, 1,449-file baseline verification, and git diff --check passed.
@@ -342,14 +342,14 @@ Historical 2026-10-10 gate instruction (superseded): it prohibited reading UABEA
 - Next: extend reciprocal Transform hierarchy auditing across the workspace and connect scene object records to source SceneDefinition and export processing, keeping aggregate limits explicit.
 ## Workspace reciprocal Transform hierarchy audit
 
-- Current phase: Phase 1; gate not passed. The last pushed revision before this increment was `5ce5654c946ec817fb055221f1c772e1f0d529bc`. Only the `RustAssetRipper` repository is a write target; user bundles and UABEA remain untouched.
+- Current phase: Phase 1; gate not passed. The last pushed revision before this increment was `5ce5654c946ec817fb055221f1c772e1f0d529bc`. Only the Rust repository is a write target; user bundles and UABEA remain untouched.
 - `SceneGraph::audit_workspace_transform_links` now checks Transform/RectTransform `m_Father` and `m_Children` reciprocity through the ordered multi-file PPtr graph. It preserves unresolved targets and reports missing, duplicate, or mismatched counterparts. It reports incomplete source or target scans instead of claiming a reciprocal edge is absent when a TypeTree scan was partial. CLI inspection now prints the number of checked links, issue count, and audit-complete state.
 - Synthetic two-file generation-10 tests cover valid child/parent reciprocity in both files, a missing reverse edge, incomplete source and counterpart scans, strict array-index matching, and configured relationship/issue limits. `cargo test --workspace --locked --quiet` passed 275 library tests and 10 CLI tests; warnings-denied Clippy, format check, 1,449-file baseline verification, and `git diff --check` passed.
 - No Unity-produced asset, user VRChat AssetBundle, UABEA source/executable, or C# runtime differential was used. The full Phase 1 port remains incomplete; SceneDefinition ownership, Prefab construction, Unity project export, full Transform/RectTransform version coverage, and a dedicated CLI output assertion remain open. Keep the Phase 2 gate closed.
 - Next: connect scene records to the source SceneDefinition and export path, retaining the workspace audit's incomplete-scan semantics and aggregate limits.
 ## SceneDefinition-owned workspace hierarchy model
 
-- Current phase: Phase 1; gate not passed. The last pushed revision before this increment was `7b94254f0c8ad7abf94019a25d7be272267c6104`. Only the `RustAssetRipper` repository is a write target; no user bundle or UABEA data was accessed.
+- Current phase: Phase 1; gate not passed. The last pushed revision before this increment was `7b94254f0c8ad7abf94019a25d7be272267c6104`. Only the Rust repository is a write target; no user bundle or UABEA data was accessed.
 - The inspect pipeline now binds compact GameObject/Transform/RectTransform graph records, PPtr relationships, roots, decode issues, and reciprocal audit results to each matching `WorkspaceSceneDefinition`. Manager-only scene collections receive an explicit empty graph; streamed-scene-only collections are modeled after their AssetBundle path assignment is known.
 - The model verifies file/PathID identities against the joined graph, preserves external root Transform identity, and makes overall completeness depend on graph resolution, per-object reference-scan completeness, root discovery, and hierarchy audit. Aggregate budgets are transactional; the zero-object test confirms a rejected insertion leaves no partial graph.
 - Verification: `cargo test --workspace --locked --quiet` passed 276 library and 10 binary tests. A focused API test and streamed-scene CLI test passed. After the test initializer cleanup, warnings-denied Clippy, format check, the 1,449-file baseline verifier, and `git diff --check` all passed.
@@ -358,7 +358,7 @@ Historical 2026-10-10 gate instruction (superseded): it prohibited reading UABEA
 
 ## Source-order SceneDefinition and Prefab root progress
 
-- Current phase: Phase 1; gate not passed. The latest pushed revision before this increment was `03af590f1ea0c77a5dd2f0bbd9786c441ec07a21`. Only `本地路径已隐去` is writable; the local AssetRipper source is read-only. UABEA and user AssetBundles remain untouched.
+- Current phase: Phase 1; gate not passed. The latest pushed revision before this increment was `03af590f1ea0c77a5dd2f0bbd9786c441ec07a21`. Only the Rust repository is writable; the local AssetRipper source is read-only. UABEA and user AssetBundles remain untouched.
 - SceneDefinition discovery and PrefabInstance root diagnostics now follow the reconstructed `GameBundle.FetchAssets()` collection order, preserving object-table order within each collection.
 - Transform snapshots now index `m_Father` alongside `m_Children` and `m_GameObject`. `WorkspaceSceneHierarchies::get_root_game_object` follows the source first-Transform rule, resolves parent and owner PPtrs across files, and preserves explicit issues for unavailable or malformed edges. The source no-Transform case resolves to the input GameObject after the preceding missing-Transform synthesis stage.
 - Verification: after adding the explicit parent-with-null-GameObject termination assertion, `cargo test --workspace --locked --quiet` passed 293 library and 10 CLI tests; warnings-denied Clippy, format check, `git diff --check`, and the 1,449-file baseline verifier passed. No Unity-produced input, user AssetBundle, UABEA, or original runtime was used.
@@ -367,7 +367,7 @@ Historical 2026-10-10 gate instruction (superseded): it prohibited reading UABEA
 
 ## Ordered PrefabProcessor identity planning
 
-- Current phase: Phase 1; gate not passed. Latest pushed revision before this increment: `e7c5cb6c7028bd85a041bb3141319fcb5ec63bc8`. Only `本地路径已隐去` is writable. The local AssetRipper reference is read-only. No user AssetBundle or UABEA data has been accessed.
+- Current phase: Phase 1; gate not passed. Latest pushed revision before this increment: `e7c5cb6c7028bd85a041bb3141319fcb5ec63bc8`. Only the Rust repository is writable. The local AssetRipper reference is read-only. No user AssetBundle or UABEA data has been accessed.
 - Added `plan_workspace_prefab_processing` and wired it into CLI `inspect`. It seeds SceneDefinition GameObjects, processes existing PrefabInstances in source collection/object order, then applies GetRoot and global dedup to remaining GameObjects. The plan preserves root-null, root-unavailable, already-processed, completed, and incomplete-hierarchy outcomes. Incomplete hierarchy processing stops the plan.
 - Hierarchy plans add virtual Transform entries with source default values where `AddMissingTransforms` applies. They have no generated PathID and do not construct or mutate Unity objects. CLI output labels the result an identity plan and reports incomplete graph conditions.
 - Verification: 298 library and 10 CLI tests passed; warnings-denied Clippy, format check, `git diff --check`, and the baseline verifier (1,449 files unchanged) passed on this worktree.
@@ -376,7 +376,7 @@ Historical 2026-10-10 gate instruction (superseded): it prohibited reading UABEA
 
 ## Processed prefab asset PathID allocation plan
 
-- Current phase: Phase 1; the gate has not passed. Before this increment, local main and our configured origin/main both pointed to e094f00435c15b71300e5d98473ec762212c7479. Only the RustAssetRipper repository is a write target; no other remote repository is accessed or modified.
+- Current phase: Phase 1; the gate has not passed. Before this increment, local main and our configured origin/main both pointed to e094f00435c15b71300e5d98473ec762212c7479. Only the Rust repository is a write target; no other remote repository is accessed or modified.
 - Traced the baseline allocation rules: processed collections start with independent PathID counters at zero; each generated asset increments its collection counter before insertion. The PrefabProcessor creates Prefab Hierarchies, Generated Prefabs, and Missing Prefab Transforms collections first; missing Transforms are added in FetchAssets() order; SceneAsset objects are then allocated by SceneDefinition order; existing and generated PrefabHierarchy objects share a separate collection sequence.
 - Added a bounded ordered PathID allocation plan and wired it into inspect. It retains collection kind/name, generated asset class ID and local collection PathID, source GameObject/root identities, and the generated PrefabInstance identity linked from its PrefabHierarchy. It returns no PathIDs if Prefab processing or any selected hierarchy graph is incomplete.
 - Synthetic tests cover the allocation plan, independent collection counters, generated Transform defaults, generated Prefab linkage, and incomplete-plan behavior. Full verification: 301 library and 10 CLI tests passed; warnings-denied Clippy, format check, baseline verification (1,449 files unchanged), and git diff --check passed.
@@ -386,7 +386,7 @@ Historical 2026-10-10 gate instruction (superseded): it prohibited reading UABEA
 
 ## Generated Transform component append and export-path source audit
 
-- Current phase: Phase 1; the gate remains open. This increment follows pushed commit 09c0be04b71b0ac7a17ec5b13b7296c9072d7eef. Only the RustAssetRipper repository is writable; the AssetRipper source is read-only, and no other remote repository or user sample was accessed.
+- Current phase: Phase 1; the gate remains open. This increment follows pushed commit 09c0be04b71b0ac7a17ec5b13b7296c9072d7eef. Only the Rust repository is writable; the AssetRipper source is read-only, and no other remote repository or user sample was accessed.
 - Source audit: GameObjectExtensions.AddComponent appends a ComponentPair, sets its ClassID, then stores a PPtr to the generated Transform relative to the GameObject collection. Added a typed append record containing the verified GameObject identity, existing component slot count, Transform class ID and allocated Transform identity. Null component PPtrs contribute a slot and are not compacted.
 - SceneAssetExportCollection maps the generated SceneAsset to Meta and its target Scene GUID; the scene YAML itself is emitted from SceneHierarchyObject by SceneExportCollection. PrefabExportCollection groups Hierarchy.ExportableAssets and chooses legacy Prefab asset output versus PrefabImporter according to IPrefabMarker. SetPrefabInternal walks the hierarchy and assigns PrefabInternal_C18P only when the prefab implements that marker.
 - Verification: full suite passed 301 library and 10 CLI tests; warnings-denied Clippy, format check, 1,449-file baseline verification, and git diff check passed. No Unity or reference-tool differential was run.
@@ -395,7 +395,7 @@ Historical 2026-10-10 gate instruction (superseded): it prohibited reading UABEA
 
 ## Generated Transform component-array overlay
 
-- Current phase: Phase 1; gate not passed. This increment follows pushed commit b0045c8495f7c6d4ed4f033150f074bae50abbe5. Only RustAssetRipper is a write target.
+- Current phase: Phase 1; gate not passed. This increment follows pushed commit b0045c8495f7c6d4ed4f033150f074bae50abbe5. Only the Rust repository is a write target.
 - Added WorkspaceSceneCollectionHierarchy::game_object_component_relationships_for_identity, which verifies the source GameObject identity and returns its component slots in serialized array order. The processed plan now retains an overlay for each missing-Transform GameObject: original zero-based slot order, original fileID/PathID, null or resolved target state, and a separate generated Transform append linked to its processed collection identity.
 - A null source PPtr remains a slot. The synthetic fixture verifies source slot 0 is preserved and the generated component is appended at slot 1. Full verification passed: 301 library and 10 CLI tests, warnings-denied Clippy, format check, baseline verifier (1,449 files unchanged), and git diff check.
 - This is still a non-mutating overlay. It does not write back GameObject m_Component values or decide the generated Transform's serialized PPtr fileID. Existing source PPtrs retain their original file scope in the overlay.
@@ -958,7 +958,7 @@ Historical 2026-10-10 gate instruction (superseded): it prohibited reading UABEA
 - Synthetic coverage includes unset path and zero-size stream cases, including proving zero-size input is skipped without attempting resource lookup. A test initially expected the collection YAML string to be empty; the writer intentionally emits YAML headers with zero documents, so the assertion now checks that no ImageTexture document is present.
 - Validation passed: `cargo test --workspace --locked --quiet` (454 library, 14 CLI, 0 doc tests); `cargo clippy --workspace --all-targets --locked -- -D warnings`; `cargo fmt --all -- --check`; `tools/verify-baseline.ps1` (1,449 files unchanged); and `git diff --check`. Targeted streamed-YAML tests passed (5 workspace YAML tests and 6 adapter tests).
 - No Unity-produced TypeTree or direct C# runtime differential ran. Per-version generated-field routing, multi-assignment ordering coverage, CLI/UI project export wiring, full Phase 1 parity, and Phase 2 remain incomplete.
-- Next: add multi-assignment ordering and inline-data-preservation coverage for the resource-aware Scene/collection route, then continue generated per-version field routing and connect streamed-resource export to the user-facing project exporter. Use `本地路径已隐去` in this PowerShell environment because Cargo is not on `PATH`; push each validated increment to the same `main` and verify the remote tip/tree before continuing.
+- Next: add multi-assignment ordering and inline-data-preservation coverage for the resource-aware Scene/collection route, then continue generated per-version field routing and connect streamed-resource export to the user-facing project exporter. Use `private-name-004` in this PowerShell environment because Cargo is not on `PATH`; push each validated increment to the same `main` and verify the remote tip/tree before continuing.
 ## Multi-file YAML ordering and inline precedence (2026-10-03)
 
 - Current phase remains Phase 1; no user AssetBundle bytes or UABEA materials have been inspected. Local implementation commit `bbabc0d3a0ce1733df09a983e02771a2c07e429e` has tree `17497b39980f35f3b1483886312aab622023f462`; remote code commit `fee0a65a44d5c32e868717686d07592838b78bb4` on `main` has the same tree and parent `70a0080b23cbd8aba8ebea22491e7c763240606c`. The remote tip and Rust source assertions were read back and verified.
@@ -982,7 +982,7 @@ Historical 2026-10-10 gate instruction (superseded): it prohibited reading UABEA
 
 ## Workspace AssetBundle source names and ordered assignment plan (2026-10-03)
 
-- Current phase remains Phase 1; the completeness gate has not passed. Only `本地路径已隐去` is a write target. The AssetRipper snapshot is read-only. No user AssetBundle bytes were opened, hashed, identified, or parsed; UABEA remains unopened.
+- Current phase remains Phase 1; the completeness gate has not passed. Only the Rust repository is a write target. The AssetRipper snapshot is read-only. No user AssetBundle bytes were opened, hashed, identified, or parsed; UABEA remains unopened.
 - Recursive container mounts now retain baseline-fixed source names separately from virtual paths, including root names supplied by platform inventory and child names from source entry names. Workspace metadata carries those names with a 64 MiB aggregate bound. Dependency-container expansion derives a name from the exact virtual source path when available and otherwise leaves it unknown.
 - Added `plan_workspace_asset_bundle_names`: follows source collection/object order, selects a non-empty serialized name or exact source Bundle fallback, keeps ordered Container entries and PPtr classifications, and emits assignments only for unique local FileID-zero targets. Null/shared references remain non-assignments; missing, ambiguous, and invalid targets remain explicit issues. Assignment order is retained so later source assignments can take precedence.
 - Synthetic coverage checks nested root/child NameFixed values, mount/workspace aggregate bounds, root `GameBundle` fallback, null PPtr retention, and one unique local target assignment from a generated 2019.4 two-object fixture. Full workspace validation passed: 474 library and 22 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 reference files unchanged); and `git diff --check`.
@@ -992,7 +992,7 @@ Historical 2026-10-10 gate instruction (superseded): it prohibited reading UABEA
 
 ## AssetBundle export path metadata (2026-10-03)
 
-- Current phase remains Phase 1; the completeness gate has not passed. Only `本地路径已隐去` is a write target. No user AssetBundle contents or UABEA inputs were accessed.
+- Current phase remains Phase 1; the completeness gate has not passed. Only the Rust repository is a write target. No user AssetBundle contents or UABEA inputs were accessed.
 - Added export-owned `WorkspaceAssetExportPathTable` and `apply_workspace_asset_bundle_paths`. It applies a complete name plan in assignment order, preserves an existing OriginalPath when the selected mode does not replace it, and in GroupByBundleName fills only missing OriginalDirectory values across every direct SerializedFile collection of the source Bundle. The mode enum mirrors the baseline settings and defaults to DirectExport.
 - Path helper and end-to-end fixtures verify DirectExport, GroupByAssetType, GroupByBundleName, source-order local assignments, preexisting path retention, Bundle-wide collection defaults, and retained metadata byte accounting. Validation passed: 475 library tests, 22 CLI tests, 0 doc tests; warnings-denied Clippy; format check; baseline verifier (1,449 files unchanged); and `git diff --check`.
 - Known gaps: the table is not yet consumed by a full project exporter or `.meta` writer. ResourceManager Container paths, OriginalName casing restoration, Shader override fields, persisted user mode selection, Unicode OrdinalIgnoreCase parity, and output-path escape enforcement remain open. An undecoded object needed for GroupByBundleName's class directory is an explicit processing error.
@@ -1001,7 +1001,7 @@ Historical 2026-10-10 gate instruction (superseded): it prohibited reading UABEA
 
 ## AssetBundle OriginalName and Shader path behavior (2026-10-03)
 
-- Current phase remains Phase 1 and the completeness gate has not passed. The only write target is `本地路径已隐去`. No user AssetBundle contents or UABEA inputs were accessed.
+- Current phase remains Phase 1 and the completeness gate has not passed. The only write target is `private-name-004`. No user AssetBundle contents or UABEA inputs were accessed.
 - Extended `WorkspaceAssetExportPath` with OriginalName, OriginalExtension, and Shader override components. AssetBundle assignment now distinguishes empty or unusable paths (set AssetBundleName, then skip postprocessing) from GroupByAssetType's usable non-empty paths (preserve OriginalPath, but still run name and Shader postprocessing).
 - A decoded `m_Name` is eligible when its UTF-16 length matches OriginalName. ASCII case-insensitive matches restore the asset name and rebuild the path using host `Path.Join` separators. Same-length non-ASCII comparisons are retained and counted as unverified; undecoded target payloads are counted as unavailable. Invalid UTF-8 and duplicate `m_Name` lookup are explicit errors.
 - Class ID 48 initializes only absent Shader OverrideDirectory, OverrideName, and OverrideExtension values from the final OriginalPath components. Existing override values remain unchanged. GroupByBundleName continues to set only missing collection OriginalDirectory values.
@@ -1014,7 +1014,7 @@ Historical 2026-10-10 gate instruction (superseded): it prohibited reading UABEA
 
 - Phase 1 remains active; no user AssetBundle content or UABEA input was inspected. Writes remain confined to the RustAssetRipper repository.
 - Added an ordered class-ID-147 `ResourceManager.Container` decoder and workspace planner. The planner resolves PPtrs through the multi-file graph, retains null/unresolved distinctions as explicit outcomes, and records bounded issues. AssetBundle and ResourceManager path operations are merged by collection, source-object, and Container-entry order to follow `GameBundle.FetchAssets()`.
-- Applying a ResourceManager entry joins `Assets/青岚资源路径` with its key, replaces only an absent or shorter OriginalPath using UTF-16 length, then performs the existing OriginalName and class-ID-48 Shader override handling. A generated Unity 2019.4 SerializedFile test verifies two competing entries, selected longest path, restored asset name, Shader override components, and assignment limits. Decoder tests cover order, pointer scope, null entries, malformed pointer values, and missing containers.
+- Applying a ResourceManager entry joins `Assets/private-name-020` with its key, replaces only an absent or shorter OriginalPath using UTF-16 length, then performs the existing OriginalName and class-ID-48 Shader override handling. A generated Unity 2019.4 SerializedFile test verifies two competing entries, selected longest path, restored asset name, Shader override components, and assignment limits. Decoder tests cover order, pointer scope, null entries, malformed pointer values, and missing containers.
 - Validation passed: `cargo test --workspace --locked --quiet` (exit 0; 483 library and 23 CLI tests, 0 doc tests); `cargo clippy --workspace --all-targets --locked -- -D warnings`; `cargo fmt --all -- --check`; `tools/verify-baseline.ps1` (1,449 reference files unchanged); and `git diff --check`.
 - This is export-owned path metadata, not the complete Unity project exporter or `.meta` output. The end-to-end ResourceManager fixture is synthetic and local-pointer-only; Unity-produced and direct C# differential evidence remain absent. Phase 1 is incomplete.
 - Next: connect the path table to project export and `.meta` handling, while continuing source-version branch audit. Push implementation checkpoints as soon as their validation passes, then verify the fetched `origin/main` tree against the local tree.
@@ -1034,7 +1034,7 @@ Historical 2026-10-10 gate instruction (superseded): it prohibited reading UABEA
 ## Unity 2022.3 SkinnedMeshRenderer editor YAML field names (2026-10-11)
 
 - Fixed the class-137 editor TypeTree route so it preserves `m_ObjectHideFlags` instead of applying the release TypeTree alias `m_HideFlags`. Two focused tests passed; the release binary built successfully.
-- The fresh 青岚雅苑` export check matched all 97 class-137 documents by fileID and found all four editor base fields in every document, with no `m_HideFlags`. Evidence and limits are in `docs/validation-log.md` and `docs/differential-findings.md`.
+- The fresh private-name-021` export check matched all 97 class-137 documents by fileID and found all four editor base fields in every document, with no `m_HideFlags`. Evidence and limits are in `docs/validation-log.md` and `docs/differential-findings.md`.
 - Product and sample acceptance remain incomplete. The broad project comparator still reports unmatched documents and paths, and Unity Editor runtime validation is unavailable.
 - Next: continue the open AssetRipper feature-parity audit; do not treat this targeted sample check as a phase-gate or overall acceptance pass.
 
@@ -1042,8 +1042,8 @@ Historical 2026-10-10 gate instruction (superseded): it prohibited reading UABEA
 
 - Current stage: user-authorized real-sample convergence; the full AssetRipper parity gate and final sample acceptance remain open. Repository baseline before this Mesh change was `23321a7`; preserve the two existing untracked local entries `cleanup_manifest.txt` and `tools/probes/anim-convert/packages/`.
 - Added Unity 2022.3 class-43 editor TypeTree selection and baseline `m_MeshOptimizationFlags = -1`. A fresh replay found the TPK TypelessData field shape needed Unity's `m_DataSize` byte count plus `_typelessdata`; Rust now emits that structure and preserves the blob.
-- Focused release regression passed 1/1; release CLI build and fresh 青岚雅苑` export exited 0. Of 112 same-path Mesh assets, 109 are byte-exact; the other three have only 27 decimal Float32 spellings that parse to identical Float32 bits. `云岫藏珍.asset` is exact. Root prefab audit paired 4,491/4,491 documents and found all 100 MeshRenderer and 100 MeshFilter documents exact after GUID-path normalization.
-- Evidence: `docs/validation-log.md`, `docs/differential-findings.md`, and ignored run output `target/real-acceptance-20261011-青岚古境-mesh-editor-r2`.
+- Focused release regression passed 1/1; release CLI build and fresh private-name-021` export exited 0. Of 112 same-path Mesh assets, 109 are byte-exact; the other three have only 27 decimal Float32 spellings that parse to identical Float32 bits. `private-name-001.asset` is exact. Root prefab audit paired 4,491/4,491 documents and found all 100 MeshRenderer and 100 MeshFilter documents exact after GUID-path normalization.
+- Evidence: `docs/validation-log.md`, `docs/differential-findings.md`, and ignored run output `target/real-acceptance-20261011-private-name-017-mesh-editor-r2`.
 - Unity Editor runtime validation is unavailable and UABEA was not run. This targeted replay does not mean the avatar or product is accepted. The expression-menu asset path difference is already recursively reconciled; continue from the next unresolved real project export discrepancy after committing this validated Mesh change.
 
 ## Unity 2022.3 Avatar editor schema replay (2026-10-11)
@@ -1051,38 +1051,38 @@ Historical 2026-10-10 gate instruction (superseded): it prohibited reading UABEA
 - The validated Mesh change is committed and pushed as `29a7a78` (`main`); local and remote commit/tree matched. Two pre-existing untracked entries remain untouched: `cleanup_manifest.txt` and `tools/probes/anim-convert/packages/`.
 - The next real-project discrepancy was class-90 `Avatar0Avatar`: source had three null editor base PPtrs and Rust had none. Class 90 now selects the Unity 2022.3 editor TypeTree. The fresh export restores all four base fields without changing checked payloads.
 - Focused release tests passed 8/8; release CLI build and sample export exited 0. Avatar verification found matching ordered numeric streams (10,568 tokens), all 8 long hex payloads, exact TOS and HumanDescription sections, 554 pose transforms, 304 skeleton nodes, and three null PPtrs in each output. The refreshed project audit has no Avatar reference/null-pointer delta; root-prefab Animator documents match 2/2.
-- Evidence: `docs/validation-log.md`, `docs/differential-findings.md`, and ignored artifacts `target/real-acceptance-20261011-青岚古境-avatar-editor-r1*`.
+- Evidence: `docs/validation-log.md`, `docs/differential-findings.md`, and ignored artifacts `target/real-acceptance-20261011-private-name-017-avatar-editor-r1*`.
 - Unity Editor and UABEA checks remain unavailable/unrun, so the sample remains unaccepted. Next: inspect a concrete non-reconciled same-identity reference difference from the refreshed whole-project report, trace it to the original object and target GUID/fileID, then apply a generic fix only if input/source evidence shows Rust lost or changed a valid reference. Keep the known AutoDresser runtime uncertainty separate from resolved serialized graph evidence.
 
 ## Unity builtin Default-ParticleSystem reference investigation (2026-10-11)
 
-- The refreshed whole-project report flagged `_MainTex` in `Assets/青岚资源路径 Particle 青瓷凝光.mat`: source uses builtin fileID 10307; Rust uses its exported `月照琉璃.png` Texture2D.
+- The refreshed whole-project report flagged `_MainTex` in `Assets/private-name-020 Particle private-name-009.mat`: source uses builtin fileID 10307; Rust uses its exported `private-name-003.png` Texture2D.
 - Both source and Rust path maps identify input PathID `4988150354445090395` as `Default-ParticleSystem` / Texture2D. Frozen source cache code matches predefined Texture2D assets by name and dimensions, while the Rust PNG preserves the bundle object as a 64×64 image (SHA-256 `SHA256_REDACTED`).
 - The installed Unity 2022.3.22f1 builtin resource `unity_builtin_extra` was parsed directly; builtin Texture2D fileID 10307 and the bundle Texture2D PathID `4988150354445090395` each export to a 3,256-byte PNG with SHA-256 `SHA256_REDACTED`. This resolves the serialized texture-content question for this sample, with no routing change.
-- Unity Editor import/runtime validation remains blocked by the missing Editor license; UABEA remains unrun. The content comparison does not close the sample or overall product acceptance. Evidence is in `docs/differential-findings.md` under `DIFF-REAL-青岚古境-PREDEFINED-TEXTURE-CACHE-001`.
+- Unity Editor import/runtime validation remains blocked by the missing Editor license; UABEA remains unrun. The content comparison does not close the sample or overall product acceptance. Evidence is in `docs/differential-findings.md` under `DIFF-REAL-private-name-017-PREDEFINED-TEXTURE-CACHE-001`.
 
-## 青岚山河卷 Unity 2022.3 LightProbes editor schema (2026-10-11)
+## private-name-018 Unity 2022.3 LightProbes editor schema (2026-10-11)
 
 - The frozen source world project had four editor base fields on class-258 `LightProbes` that the earlier Rust export omitted. `should_use_scene_editor_type_tree` now selects the 2022.3 editor TypeTree for class 258.
-- Focused tests passed 8/8; optimized release build and a fresh full `青岚山河卷` export exited 0. In the new Rust export, `Assets/青岚资源路径` is byte-identical (439 bytes, SHA-256 `SHA256_REDACTED`) to source `Assets/青岚资源路径 云岫藏珍.asset`. Finding: `DIFF-REAL-青岚山河卷-LIGHTPROBES-EDITOR-TREE-001`.
+- Focused tests passed 8/8; optimized release build and a fresh full `private-name-018` export exited 0. In the new Rust export, `Assets/private-name-020` is byte-identical (439 bytes, SHA-256 `SHA256_REDACTED`) to source `Assets/private-name-020 private-name-001.asset`. Finding: `DIFF-REAL-private-name-018-LIGHTPROBES-EDITOR-TREE-001`.
 - Commit `f4423d2` is pushed to `main`. The debug-profile export was stopped while still staging; the optimized release replay completed. Unity Editor runtime validation and UABEA comparison were not run. The focused fix does not close the sample or product acceptance; the Default-ParticleSystem content question was later resolved by exact builtin PNG comparison, without a routing change.
 
-## 青岚山河卷 Unity 2022.3 BoxCollider and MeshCollider editor TypeTrees (2026-10-11)
+## private-name-018 Unity 2022.3 BoxCollider and MeshCollider editor TypeTrees (2026-10-11)
 
 - Classes 65 (BoxCollider) and 64 (MeshCollider) were omitted from the Unity 2022.3 editor-TypeTree route, dropping the four editor base fields. Both IDs are now routed through their source editor TypeTrees and included in the selector/base-field tests.
-- `cargo test --release --lib --locked export::workspace_yaml::object_conversion::tests -- --nocapture` passed 7/7; the optimized CLI build and targeted formatting/diff checks passed. Fresh full export `target/real-acceptance-current-青岚山河卷-r4` wrote 72,350 objects and 1,087 asset files.
-- The source and Rust scene match exactly for all 3,997 BoxCollider documents. All 629 MeshCollider documents match after resolving 11 independently generated GUID pairs by their shared `.meta` relative paths; the 11 referenced mesh `.asset` files are byte-identical. Finding: `DIFF-REAL-青岚山河卷-COLLIDER-EDITOR-TREES-001`.
+- `cargo test --release --lib --locked export::workspace_yaml::object_conversion::tests -- --nocapture` passed 7/7; the optimized CLI build and targeted formatting/diff checks passed. Fresh full export `target/real-acceptance-current-private-name-018-r4` wrote 72,350 objects and 1,087 asset files.
+- The source and Rust scene match exactly for all 3,997 BoxCollider documents. All 629 MeshCollider documents match after resolving 11 independently generated GUID pairs by their shared `.meta` relative paths; the 11 referenced mesh `.asset` files are byte-identical. Finding: `DIFF-REAL-private-name-018-COLLIDER-EDITOR-TREES-001`.
 - Unity Editor import/runtime was not run because the installed Editor has no valid license; UABEA was not run. Other world scene classes remain under investigation. The 86 class-136 CapsuleCollider documents were fixed in the subsequent r5 replay; class 205 LODGroup is now in progress. The world and overall product remain unaccepted.
 
-## 青岚山河卷 Unity 2022.3 CapsuleCollider editor TypeTree (2026-10-11)
+## private-name-018 Unity 2022.3 CapsuleCollider editor TypeTree (2026-10-11)
 
 - The r4 scene comparison found that all 86 class-136 CapsuleCollider documents omitted the four editor base fields. Class 136 now selects its Unity 2022.3 reference editor TypeTree and is covered by both TypeTree selection and base-field tests.
 - The selector test and editor-base-field test passed 1/1 each; the focused `object_conversion::tests` group passed 7/7. Release CLI build and targeted formatting/diff checks passed.
-- Fresh full export `target/real-acceptance-current-青岚山河卷-r5` produced exact source/Rust YAML for all 86 class-136 documents. Revalidation in the same r5 scene retained exact class-65 documents and exact class-64 documents after `.meta`-path GUID normalization. Finding: `DIFF-REAL-青岚山河卷-CAPSULECOLLIDER-EDITOR-TREE-001`.
+- Fresh full export `target/real-acceptance-current-private-name-018-r5` produced exact source/Rust YAML for all 86 class-136 documents. Revalidation in the same r5 scene retained exact class-65 documents and exact class-64 documents after `.meta`-path GUID normalization. Finding: `DIFF-REAL-private-name-018-CAPSULECOLLIDER-EDITOR-TREE-001`.
 - Unity Editor import/runtime and UABEA were not run. Class 205 LODGroup and other scene differences remain open; the sample and overall product remain unaccepted.
 
-## 青岚山河卷 Unity 2022.3 LODGroup editor TypeTree — pending replay (2026-10-11)
+## private-name-018 Unity 2022.3 LODGroup editor TypeTree — pending replay (2026-10-11)
 
 - The prior scene audit paired 2,739 class-205 LODGroup documents and found all differed. A source/Rust example showed the four editor base fields missing from Rust; nested `m_LODs` values, ordering, and renderer references still need full comparison.
 - Added class 205 to the Unity 2022.3 editor-TypeTree selector and the selector/base-field regression lists. `cargo test --release --lib --locked unity_2022_3_ -- --nocapture` passed 8/8. This only validates the route and available reference TypeTree; it does not verify the production export.
-- Pending: rebuild `target/release/assetripper-rs.exe`, export `..\青岚山河卷` to a fresh `target/real-acceptance-current-青岚山河卷-r6`, and compare all class-205 documents by local fileID. Verify nested LOD order and all renderer references, normalizing GUIDs only through identical `.meta` relative paths. The export and semantic comparison are not yet run.
+- Pending: rebuild `target/release/assetripper-rs.exe`, export `..\private-name-018` to a fresh `target/real-acceptance-current-private-name-018-r6`, and compare all class-205 documents by local fileID. Verify nested LOD order and all renderer references, normalizing GUIDs only through identical `.meta` relative paths. The export and semantic comparison are not yet run.

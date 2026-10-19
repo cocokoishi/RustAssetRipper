@@ -2,7 +2,7 @@
 
 ## Identity
 
-- Reference path: `本地路径已隐去`.
+- Reference path: <LOCAL_REFERENCE_ROOT>.
 - The reference directory has no `.git` metadata. Commit, branch, tag, and submodule revisions therefore cannot be recovered from this copy.
 - `Source/Directory.Build.props` declares version prefix `2.0.0`, target framework `net10.0`, nullable analysis, latest C# language version, AOT compatibility, and checked integer arithmetic.
 - The upstream README claims Unity support from `3.5.0` through `6000.4.X`; it also cautions that support quality varies by version. This is a source claim, not independent compatibility evidence.
