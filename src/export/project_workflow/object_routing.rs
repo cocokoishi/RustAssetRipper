@@ -615,6 +615,14 @@ fn predefined_engine_game_object_key(root: &SerializedValue) -> Option<(String, 
     Some((name, *layer, components.len()))
 }
 
+fn predefined_engine_game_object_target(
+    root: &SerializedValue,
+    data: &EngineResourceData,
+) -> Option<PredefinedEngineAssetTarget> {
+    let (name, layer, component_count) = predefined_engine_game_object_key(root)?;
+    data.game_object_target(&name, layer, component_count)
+}
+
 fn predefined_engine_texture_dimensions(root: &SerializedValue) -> Option<(i32, i32)> {
     let width = root.unique_field_in_base_chain("m_Width").ok()??;
     let height = root.unique_field_in_base_chain("m_Height").ok()??;
@@ -1118,6 +1126,27 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
     for (file_index, file) in workspace.files().iter().enumerate() {
         for (object_index, object_info) in file.metadata.objects.iter().enumerate() {
             let source_key = source_object_key(file_index, object_index);
+            if prefab_member_keys.contains(&source_key)
+                && context.engine_asset_source == EngineAssetSource::StoredResourceData
+                && engine_resource_collection_guid(&file.file_name).is_none()
+            {
+                let object = objects.get(file_index, object_index).ok_or_else(|| {
+                    invalid_project(format!(
+                        "workspace object is missing at file {file_index}, object {object_index}"
+                    ))
+                })?;
+                if object.factory.class_id == 1 {
+                    if let (Some(payload), Some(data)) =
+                        (object.payload.as_ref().ok(), context.engine_resource_data)
+                    {
+                        if predefined_engine_game_object_target(&payload.root, data).is_some() {
+                            return Err(invalid_project(
+                                "stored GameObject cache redirect conflicts with existing Prefab collection membership",
+                            ));
+                        }
+                    }
+                }
+            }
             if scene_member_keys.contains(&source_key)
                 || prefab_member_keys.contains(&source_key)
                 || controller_collections
@@ -1469,13 +1498,11 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                 && source_engine_guid.is_none()
                 && class_id == 1
             {
-                payload
-                    .and_then(|payload| predefined_engine_game_object_key(&payload.root))
-                    .and_then(|(name, layer, component_count)| {
-                        context
-                            .engine_resource_data
-                            .and_then(|data| data.game_object_target(&name, layer, component_count))
+                payload.and_then(|payload| {
+                    context.engine_resource_data.and_then(|data| {
+                        predefined_engine_game_object_target(&payload.root, data)
                     })
+                })
             } else {
                 None
             };
