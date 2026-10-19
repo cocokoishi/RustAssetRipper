@@ -678,6 +678,7 @@ static void Author(string rowsPath)
 	string[] cases =
 	[
 		"textasset_notree",
+		"textasset_notree_2022_3",
 		"textasset_tree",
 		"textasset_padding",
 		"textasset_bad_tail",
@@ -770,6 +771,8 @@ static (string, SerializedFile) BuildCase(string name)
 	{
 		case "textasset_notree":
 			return ("textasset_notree.assets", BuildTextAssetFile("2019.4.40f1", "Hero", "print(1)", null, []));
+		case "textasset_notree_2022_3":
+			return ("textasset_notree_2022_3.assets", BuildTextAssetFile("2022.3.22f1", "Hero", "print(1)", null, []));
 		case "textasset_tree":
 			return ("textasset_tree.assets", BuildTextAssetFile("2019.4.40f1", "Hero", "print(1)", TextAssetReleaseTree(), []));
 		case "textasset_padding":

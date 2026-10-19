@@ -243,6 +243,29 @@ fn assert_case(case: &FixtureCase, layouts: &ReferenceClassLayouts) {
             assert_eq!(asset.tail, Some(ObjectTailOutcome::Exact));
             assert_eq!(asset.payload.unwrap().consumed_bytes, 20);
         }
+        "textasset_notree_2022_3" => {
+            assert_eq!(
+                classify_type_tree_usability(file.metadata.types[0].type_tree.as_ref()),
+                TypeTreeUsability::Empty
+            );
+            assert_eq!(
+                asset.kind,
+                FactoryAssetKind::Generated("TextAsset_2018_3".to_owned())
+            );
+            assert_eq!(asset.tail, Some(ObjectTailOutcome::Exact));
+            let payload = asset.payload.as_ref().expect("source TPK fallback payload");
+            assert_eq!(payload.type_name, "TextAsset");
+            assert_eq!(payload.consumed_bytes, 20);
+            assert!(payload.trailing_bytes.is_empty());
+            assert_eq!(
+                payload.root.unique_field_in_base_chain("m_Name").unwrap(),
+                Some(&SerializedValue::StringBytes(b"Hero".to_vec()))
+            );
+            assert_eq!(
+                payload.root.unique_field_in_base_chain("m_Script").unwrap(),
+                Some(&SerializedValue::StringBytes(b"print(1)".to_vec()))
+            );
+        }
         "textasset_tree" => {
             assert_eq!(
                 classify_type_tree_usability(file.metadata.types[0].type_tree.as_ref()),
@@ -560,7 +583,7 @@ fn factory_differential_replays_every_reference_case() {
     let fixture = include_str!("../../asset_factory_fixture.txt");
     let layouts = reference_class_layouts();
     let cases = fixture_cases(fixture);
-    assert_eq!(cases.len(), 27, "all probe cases are replayed");
+    assert_eq!(cases.len(), 28, "all probe cases are replayed");
     for case in &cases {
         assert_case(case, layouts);
     }
