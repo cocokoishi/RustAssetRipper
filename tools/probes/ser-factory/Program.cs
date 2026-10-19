@@ -686,6 +686,7 @@ static void Author(string rowsPath)
 		"unknown_no_tree",
 		"tpk_navmesh",
 		"tpk_navmesh_2022_3",
+		"player_settings_notree_2022_3",
 		"unreadable_version",
 		"unreadable_no_tree",
 		"engine_default_resources",
@@ -789,6 +790,8 @@ static (string, SerializedFile) BuildCase(string name)
 			return ("tpk_navmesh.assets", BuildFile("tpk_navmesh.assets", "2019.4.40f1", 194, null, StringPayload("NavMeshData")));
 		case "tpk_navmesh_2022_3":
 			return ("tpk_navmesh_2022_3.assets", BuildFile("tpk_navmesh_2022_3.assets", "2022.3.22f1", 194, null, StringPayload("NavMeshData")));
+		case "player_settings_notree_2022_3":
+			return ("player_settings_notree_2022_3.assets", BuildFile("player_settings_notree_2022_3.assets", "2022.3.22f1", 129, null, BuildDefaultTpkPayload(129, "2022.3.22f1")));
 		case "tpk_navmesh_editor":
 			return ("navmesh.unity", BuildNavMeshEditorFile());
 		case "unreadable_version":
@@ -962,6 +965,67 @@ static SerializedFile BuildFile(string fileName, string versionText, int classId
 	}.Build();
 	file.FilePath = fileName;
 	return file;
+}
+
+// Fixture-only writer for a zero-valued TPK object. Empty arrays/strings use a zero
+// count, primitives use their zero representation, and every TypeTree AlignBytes flag
+// is honored. This creates a complete source-readable PlayerSettings payload without
+// relying on private Unity project data.
+static byte[] BuildDefaultTpkPayload(int classId, string versionText)
+{
+	UnityVersion version = UnityVersion.Parse(versionText);
+	if (!TypeTreeNodeStruct.TryMakeFromTpk((ClassIDType)classId, version, out TypeTreeNodeStruct release, out _))
+	{
+		throw new InvalidOperationException($"No release TPK tree for class {classId} at {version}");
+	}
+	List<byte> bytes = [];
+	WriteDefaultTpkNode(release, bytes);
+	return bytes.ToArray();
+}
+
+static void WriteDefaultTpkNode(TypeTreeNodeStruct node, List<byte> bytes)
+{
+	if (node.IsArray || node.IsTypelessData || node.IsString || node.IsVector || node.IsNamedVector || node.IsMap)
+	{
+		WriteI32(bytes, 0);
+		if (node.AlignBytes || (node.SubNodes.Count > 0 && node[0].AlignBytes))
+		{
+			AlignDefaultTpkPayload(bytes);
+		}
+		return;
+	}
+	if (node.SubNodes.Count > 0)
+	{
+		foreach (TypeTreeNodeStruct child in node.SubNodes)
+		{
+			WriteDefaultTpkNode(child, bytes);
+		}
+	}
+	else
+	{
+		int size = node.TypeName switch
+		{
+			"bool" or "char" or "UInt8" or "SInt8" => 1,
+			"short" or "SInt16" or "ushort" or "UInt16" or "unsigned short" => 2,
+			"int" or "SInt32" or "Type*" or "uint" or "UInt32" or "unsigned int" or "float" => 4,
+			"SInt64" or "long long" or "UInt64" or "FileSize" or "unsigned long long" or "double" => 8,
+			"None" or "void" => 0,
+			_ => throw new InvalidOperationException($"No zero encoding for TPK leaf {node.TypeName}/{node.Name}"),
+		};
+		bytes.AddRange(new byte[size]);
+	}
+	if (node.AlignBytes)
+	{
+		AlignDefaultTpkPayload(bytes);
+	}
+}
+
+static void AlignDefaultTpkPayload(List<byte> bytes)
+{
+	while (bytes.Count % 4 != 0)
+	{
+		bytes.Add(0);
+	}
 }
 
 // The real TextAsset release tree at 2019.4.40f1 (probe `tpk 49 2019.4.40f1`).
