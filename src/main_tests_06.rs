@@ -672,27 +672,49 @@
     }
 
     #[test]
-    fn export_project_maps_out_of_range_nested_file_id_to_source_missing_pointer() {
+    fn export_project_maps_unresolved_external_pptrs_to_source_missing_pointer() {
         let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
         let source_root_yaml = include_str!(
             "export/managed_reference_project_fixture/source_nested_missing_external_reference.asset"
         );
-        let fixtures: [(&str, i32, &[u8]); 2] = [
+        let fixtures: [
+            (
+                &str,
+                assetripper::serialized_file::reference_graph::MultiFilePPtrResolution,
+                &[u8],
+            );
+            3
+        ] = [
             (
                 "nested_invalid_external_file_id_reference.bundle",
-                2,
+                assetripper::serialized_file::reference_graph::MultiFilePPtrResolution::InvalidFileId {
+                    file_id: 2,
+                    external_count: 1,
+                },
                 include_bytes!("export/managed_reference_project_fixture/nested_invalid_external_file_id_reference.bundle")
                     .as_slice(),
             ),
             (
                 "nested_negative_external_file_id_reference.bundle",
-                -1,
+                assetripper::serialized_file::reference_graph::MultiFilePPtrResolution::InvalidFileId {
+                    file_id: -1,
+                    external_count: 1,
+                },
                 include_bytes!("export/managed_reference_project_fixture/nested_negative_external_file_id_reference.bundle")
+                    .as_slice(),
+            ),
+            (
+                "nested_missing_external_object_reference.bundle",
+                assetripper::serialized_file::reference_graph::MultiFilePPtrResolution::MissingExternalObject {
+                    target_file_index: 1,
+                    path_id: 900,
+                },
+                include_bytes!("export/managed_reference_project_fixture/nested_missing_external_object_reference.bundle")
                     .as_slice(),
             ),
         ];
 
-        for (fixture_index, (fixture_name, file_id, bundled_fixture)) in
+        for (fixture_index, (fixture_name, expected_resolution, bundled_fixture)) in
             fixtures.into_iter().enumerate()
         {
             let directory = TestInputDirectory::new_root();
@@ -741,10 +763,8 @@
                 .expect("managed root retains its invalid external PPtr");
             assert_eq!(
                 root_pointer.resolution,
-                assetripper::serialized_file::reference_graph::MultiFilePPtrResolution::InvalidFileId {
-                    file_id,
-                    external_count: 1,
-                }
+                expected_resolution,
+                "{fixture_name}"
             );
 
             let output_root = directory.join(format!("project-invalid-file-id-{fixture_index}"));

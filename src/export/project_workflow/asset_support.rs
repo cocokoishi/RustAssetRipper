@@ -251,10 +251,12 @@ pub(super) fn validate_decoded_object(
             MultiFilePPtrResolution::Null
             | MultiFilePPtrResolution::Object { .. }
             | MultiFilePPtrResolution::PredefinedEngineAsset { .. } => {}
-            // Missing dependencies and out-of-range external file IDs export
-            // as missing-reference pointers (warned at the project gate);
-            // every other unresolvable kind still fails closed here.
+            // Missing external files, missing external objects, and invalid
+            // external file IDs export as missing-reference pointers (warned
+            // at the project gate); every other unresolvable kind still fails
+            // closed here.
             MultiFilePPtrResolution::MissingDependency { .. }
+            | MultiFilePPtrResolution::MissingExternalObject { .. }
             | MultiFilePPtrResolution::InvalidFileId { .. } => {}
             unresolved => {
                 return Err(invalid_project(format!(

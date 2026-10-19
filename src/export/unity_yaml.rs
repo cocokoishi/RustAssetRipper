@@ -472,12 +472,12 @@ pub fn meta_pointer_to_unity_yaml(
 
 /// Convert a resolved project pointer to YAML.
 ///
-/// References into absent external files and PPtrs with out-of-range external
-/// file IDs export as source-style missing-reference pointers. When the
-/// TypeTree identifies `PPtr<T>`, its class ID determines the missing pointer's
-/// main export ID; the original serialized PPtr remains available in the
-/// reference graph. Every other unresolvable input cause remains an explicit
-/// error.
+/// References into absent external files, absent external objects, and PPtrs
+/// with out-of-range external file IDs export as source-style missing-reference
+/// pointers. When the TypeTree identifies `PPtr<T>`, its class ID determines
+/// the missing pointer's main export ID; the original serialized PPtr remains
+/// available in the reference graph. Every other unresolvable input cause
+/// remains an explicit error.
 pub fn project_pointer_to_unity_yaml(
     resolution: &ProjectPointerResolution,
     export_version: SceneUnityVersion,
@@ -495,6 +495,7 @@ pub fn project_pointer_to_unity_yaml(
             if !matches!(
                 reference.resolution,
                 crate::serialized_file::reference_graph::MultiFilePPtrResolution::MissingDependency { .. }
+                    | crate::serialized_file::reference_graph::MultiFilePPtrResolution::MissingExternalObject { .. }
                     | crate::serialized_file::reference_graph::MultiFilePPtrResolution::InvalidFileId { .. }
             ) {
                 return Err(UnityYamlWriteError::UnresolvedInputReference(Box::new(

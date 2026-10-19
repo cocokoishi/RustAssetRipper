@@ -88,16 +88,17 @@ fn validate_workspace_project_export<'inputs, 'provider, 'graph>(
             })
             .take(8)
             .collect::<Vec<_>>();
-        // The frozen exporter emits MissingReference pointers both when an
-        // external dependency is absent and when a PPtr's file ID is outside
-        // its external table. Keep the original invalid identity in the graph,
-        // but allow those two unresolved external cases through project export.
-        // Local corruption and ambiguous matches still fail closed.
+        // The frozen exporter emits MissingReference pointers when the external
+        // file is absent, the target PathID is absent, or the PPtr's file ID is
+        // outside its external table. Keep each original resolution in the
+        // graph, but allow these unresolved external cases through project
+        // export. Local corruption and ambiguous matches still fail closed.
         let (missing_external_references, fatal_references): (Vec<_>, Vec<_>) =
             unresolved_references.into_iter().partition(|reference| {
                 matches!(
                     reference.resolution,
                     MultiFilePPtrResolution::MissingDependency { .. }
+                        | MultiFilePPtrResolution::MissingExternalObject { .. }
                         | MultiFilePPtrResolution::InvalidFileId { .. }
                 )
             });
