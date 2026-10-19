@@ -834,14 +834,12 @@ mod tests {
         assert_eq!(extra_target.guid[8..12], 15u32.to_le_bytes());
 
         assert!(data.game_object_target("Other", u32::MAX, 2).is_none());
-        assert!(
-            data.game_object_target("FixtureObject", u32::MAX - 1, 2)
-                .is_none()
-        );
-        assert!(
-            data.game_object_target("FixtureObject", u32::MAX, 1)
-                .is_none()
-        );
+        assert!(data
+            .game_object_target("FixtureObject", u32::MAX - 1, 2)
+            .is_none());
+        assert!(data
+            .game_object_target("FixtureObject", u32::MAX, 1)
+            .is_none());
     }
 
     #[test]
