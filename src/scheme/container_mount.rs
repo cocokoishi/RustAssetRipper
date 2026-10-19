@@ -2484,7 +2484,7 @@ fn checked_duplicate_unityfs_entry_path(
     }
 
     let file_exists = |path: &str| -> Result<bool, ContainerMountError> {
-        filesystem.file_exists(Some(path)).map_err(|source| {
+        let exists = filesystem.file_exists(Some(path)).map_err(|source| {
             ContainerMountError::new(
                 report.clone(),
                 ContainerMountErrorKind::FileSystem {
@@ -2494,7 +2494,7 @@ fn checked_duplicate_unityfs_entry_path(
                 },
             )
         })?;
-        Ok(file_exists)
+        Ok(exists)
     };
     let path_is_taken = |candidate: &str| -> Result<bool, ContainerMountError> {
         for (separator_index, _) in candidate.match_indices('/') {
