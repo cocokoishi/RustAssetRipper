@@ -762,8 +762,7 @@
                 })
                 .expect("managed root retains its invalid external PPtr");
             assert_eq!(
-                root_pointer.resolution,
-                expected_resolution,
+                root_pointer.resolution, expected_resolution,
                 "{fixture_name}"
             );
 
