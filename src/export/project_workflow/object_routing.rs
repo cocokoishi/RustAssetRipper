@@ -1499,9 +1499,9 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                 && class_id == 1
             {
                 payload.and_then(|payload| {
-                    context.engine_resource_data.and_then(|data| {
-                        predefined_engine_game_object_target(&payload.root, data)
-                    })
+                    context
+                        .engine_resource_data
+                        .and_then(|data| predefined_engine_game_object_target(&payload.root, data))
                 })
             } else {
                 None
