@@ -579,7 +579,7 @@ fn mount_unityraw_stream_tree_at(
         )
     })?;
     for (index, entry) in entries.iter().enumerate() {
-        let virtual_path = checked_container_entry_path(
+        let virtual_path = checked_container_entry_path_with_duplicates(
             state.filesystem,
             context.destination_root,
             &entry.path,
@@ -781,7 +781,7 @@ fn mount_unityweb_stream_tree_at(
         |state| {
             preflight_tree_entry_count(entries.len(), state)?;
             for (index, entry) in entries.iter().enumerate() {
-                let virtual_path = checked_container_entry_path(
+                let virtual_path = checked_container_entry_path_with_duplicates(
                     state.filesystem,
                     context.destination_root,
                     &entry.path,
@@ -1026,7 +1026,7 @@ fn mount_webdata_stream_tree_at(
         read_webdata_directory(source, context.source_name, scheme_limits, &state.report)?;
     preflight_tree_entry_count(directory.entries.len(), state)?;
     for (index, entry) in directory.entries.iter().enumerate() {
-        let virtual_path = checked_container_entry_path(
+        let virtual_path = checked_container_entry_path_with_duplicates(
             state.filesystem,
             context.destination_root,
             &entry.name,
@@ -1256,7 +1256,7 @@ fn mount_unityfs_stream_tree_at(
     })?;
     preflight_tree_entry_count(bundle.nodes.len(), state)?;
     for (index, node) in bundle.nodes.iter().enumerate() {
-        let virtual_path = checked_container_entry_path(
+        let virtual_path = checked_container_entry_path_with_duplicates(
             state.filesystem,
             context.destination_root,
             &node.path,
@@ -1844,7 +1844,7 @@ impl<'a> DispatchedFile<'a> {
                 preflight_entry_count(bundle.nodes.len(), limits, &report)?;
                 preflight_output_sizes(bundle.nodes.iter().map(|node| node.size), limits, &report)?;
                 for (index, node) in bundle.nodes.iter().enumerate() {
-                    let path = checked_container_entry_path(
+                    let path = checked_container_entry_path_with_duplicates(
                         filesystem,
                         destination_root,
                         node.path.as_str(),
@@ -2019,7 +2019,7 @@ impl<'a> DispatchedFile<'a> {
             ParsedFile::UnityFs(bundle) => {
                 preflight_tree_entry_count(bundle.nodes.len(), state)?;
                 for (index, node) in bundle.nodes.iter().enumerate() {
-                    let path = checked_container_entry_path(
+                    let path = checked_container_entry_path_with_duplicates(
                         state.filesystem,
                         destination_root,
                         node.path.as_str(),
@@ -2066,7 +2066,7 @@ impl<'a> DispatchedFile<'a> {
             ParsedFile::RawWeb(bundle) => {
                 preflight_tree_entry_count(bundle.entries.len(), state)?;
                 for (index, entry) in bundle.entries.iter().enumerate() {
-                    let path = checked_container_entry_path(
+                    let path = checked_container_entry_path_with_duplicates(
                         state.filesystem,
                         destination_root,
                         entry.path.as_str(),
@@ -2106,7 +2106,7 @@ impl<'a> DispatchedFile<'a> {
             ParsedFile::WebData(web_file) => {
                 preflight_tree_entry_count(web_file.entries.len(), state)?;
                 for (index, entry) in web_file.entries.iter().enumerate() {
-                    let path = checked_container_entry_path(
+                    let path = checked_container_entry_path_with_duplicates(
                         state.filesystem,
                         destination_root,
                         entry.name.as_str(),
@@ -2301,7 +2301,7 @@ fn mount_container_entry<'a>(
     limits: ContainerMountLimits,
     report: &mut ContainerMountReport,
 ) -> Result<(), ContainerMountError> {
-    let path = checked_container_entry_path(
+    let path = checked_container_entry_path_with_duplicates(
         filesystem,
         destination_root,
         entry_name,
@@ -2411,6 +2411,109 @@ pub(super) fn checked_container_entry_path(
         };
         ContainerMountError::new(report.clone(), kind)
     })
+}
+
+pub(super) fn checked_container_entry_path_with_duplicates(
+    filesystem: &VirtualFileSystem,
+    destination_root: Option<&str>,
+    entry_name: &str,
+    entry_index: usize,
+    report: &ContainerMountReport,
+) -> Result<String, ContainerMountError> {
+    let path = checked_container_entry_path(
+        filesystem,
+        destination_root,
+        entry_name,
+        entry_index,
+        report,
+    )?;
+    let path_is_taken = |candidate: &str| -> Result<bool, ContainerMountError> {
+        let file_exists = filesystem.file_exists(Some(candidate)).map_err(|source| {
+            ContainerMountError::new(
+                report.clone(),
+                ContainerMountErrorKind::FileSystem {
+                    entry_index,
+                    path: candidate.to_owned(),
+                    source,
+                },
+            )
+        })?;
+        if file_exists {
+            return Ok(true);
+        }
+        filesystem
+            .directory_exists(Some(candidate))
+            .map_err(|source| {
+                ContainerMountError::new(
+                    report.clone(),
+                    ContainerMountErrorKind::FileSystem {
+                        entry_index,
+                        path: candidate.to_owned(),
+                        source,
+                    },
+                )
+            })
+    };
+    if !path_is_taken(&path)? {
+        return Ok(path);
+    }
+
+    // A source container may legally expose multiple collections with the same name. Keep the
+    // source entry and collection order metadata, but give duplicate entries an internal VFS path
+    // so later entries do not overwrite or abort earlier collections.
+    let attempts = filesystem.count().checked_add(1).ok_or_else(|| {
+        ContainerMountError::new(report.clone(), ContainerMountErrorKind::EntryCountOverflow)
+    })?;
+    let entry_name = entry_name.trim_matches(|character| character == '/' || character == '\\');
+    for attempt in 0..attempts {
+        let marker = format!(".asset_ripper_entry_{entry_index}_{attempt}");
+        let requested = marker
+            .len()
+            .checked_add(1)
+            .and_then(|size| size.checked_add(entry_name.len()))
+            .ok_or_else(|| {
+                ContainerMountError::new(
+                    report.clone(),
+                    ContainerMountErrorKind::EntryPathAllocationFailed {
+                        entry_index,
+                        requested: usize::MAX,
+                    },
+                )
+            })?;
+        let mut disambiguated_name = String::new();
+        disambiguated_name
+            .try_reserve_exact(requested)
+            .map_err(|_| {
+                ContainerMountError::new(
+                    report.clone(),
+                    ContainerMountErrorKind::EntryPathAllocationFailed {
+                        entry_index,
+                        requested,
+                    },
+                )
+            })?;
+        disambiguated_name.push_str(&marker);
+        disambiguated_name.push('/');
+        disambiguated_name.push_str(entry_name);
+        let candidate = checked_container_entry_path(
+            filesystem,
+            destination_root,
+            &disambiguated_name,
+            entry_index,
+            report,
+        )?;
+        if !path_is_taken(&candidate)? {
+            return Ok(candidate);
+        }
+    }
+
+    Err(ContainerMountError::new(
+        report.clone(),
+        ContainerMountErrorKind::DuplicateEntryPathDisambiguationExhausted {
+            entry_index,
+            attempts,
+        },
+    ))
 }
 
 fn preflight_tree_entry_count(

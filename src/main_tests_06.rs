@@ -331,6 +331,203 @@
     }
 
     #[test]
+    fn export_project_preserves_first_duplicate_collection_in_same_bundle() {
+        let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
+        let source_fixture = include_str!("export/managed_reference_same_bundle_duplicate_fixture.txt");
+        assert!(source_fixture.contains(
+            "SELECTED|workspace.bundle/managed.assets|target.assets|FirstTarget"
+        ));
+        let source_bundle_hex = source_fixture
+            .lines()
+            .find_map(|line| line.strip_prefix("INPUT_HEX|workspace.bundle|"))
+            .expect("source fixture records the duplicate-entry UnityFS bytes");
+        let source_bundle_bytes = source_bundle_hex
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16)
+                    .expect("source bundle fixture contains valid hex")
+            })
+            .collect::<Vec<_>>();
+        let bundled_fixture = include_bytes!(
+            "export/managed_reference_project_fixture/same_bundle_duplicate_reference_order.bundle"
+        );
+        assert_eq!(bundled_fixture, source_bundle_bytes.as_slice());
+
+        let directory = TestInputDirectory::new_root();
+        let bundle_path = directory.join("workspace.bundle");
+        fs::write(&bundle_path, bundled_fixture).expect("source-runtime duplicate-entry fixture");
+        let input = TestInputDirectory {
+            directory: directory.clone(),
+            files: vec![bundle_path.clone()],
+            subdirectories: Vec::new(),
+        };
+        let (mut graph_filesystem, selected_paths, mut graph_mount_report) =
+            super::mount_project_inputs(std::slice::from_ref(&bundle_path)).unwrap();
+        let mixed = super::MixedGameStructure::from_vfs_paths(
+            &graph_filesystem,
+            &selected_paths,
+            super::MixedGameStructureLimits::default(),
+        )
+        .unwrap();
+        let (graph_workspace, _) = super::load_workspace_with_mount_report(
+            &mut graph_filesystem,
+            &mixed.serialized_file_inputs,
+            &mixed.registered_files,
+            &mixed.data_paths,
+            super::WorkspaceLoadLimits::default(),
+            &mut graph_mount_report,
+        )
+        .unwrap();
+        assert_eq!(graph_workspace.files().len(), 3);
+        let graph = graph_workspace
+            .reference_graph(
+                assetripper::serialized_file::reference_graph::MultiFileReferenceGraphLimits::default(),
+            )
+            .unwrap();
+        let root_file_index = graph_workspace
+            .files()
+            .iter()
+            .position(|file| file.file_name == "managed.assets")
+            .expect("the requester collection is loaded");
+        let root_pointer = graph
+            .references()
+            .iter()
+            .find(|reference| {
+                reference.source_file_index == root_file_index
+                    && reference.field_path == "references.RefIds[0].data.m_Asset"
+            })
+            .expect("the managed root exposes its external asset pointer");
+        let assetripper::serialized_file::reference_graph::MultiFilePPtrResolution::Object {
+            target_file_index,
+            target_object_index: 0,
+        } = root_pointer.resolution
+        else {
+            panic!("the duplicate-name PPtr must resolve to a target collection");
+        };
+        assert_ne!(target_file_index, root_file_index);
+        assert_eq!(graph_workspace.files()[target_file_index].file_name, "target.assets");
+        let selected_target_path = &graph_workspace.files()[target_file_index].virtual_path;
+        assert!(
+            selected_target_path.ends_with("/target.assets"),
+            "the first source entry keeps its unsuffixed logical path: {selected_target_path}"
+        );
+        let other_target_path = graph_workspace
+            .files()
+            .iter()
+            .enumerate()
+            .find(|(index, file)| {
+                *index != root_file_index
+                    && *index != target_file_index
+                    && file.file_name == "target.assets"
+            })
+            .map(|(_, file)| file.virtual_path.as_str())
+            .expect("the later duplicate target retains its own workspace identity");
+        assert_ne!(selected_target_path, other_target_path);
+
+        let output_root = directory.join("project-same-bundle-duplicate");
+        let mut status = Vec::new();
+        super::export_project_to(
+            std::slice::from_ref(&bundle_path),
+            &output_root,
+            false,
+            &default_export_settings(),
+            &mut status,
+        )
+        .expect("same-bundle duplicate collection references preserve source order");
+        let status = String::from_utf8(status).expect("export status is UTF-8");
+        assert!(status.contains("3 SerializedFiles"), "{status}");
+        assert!(status.contains("3 objects in 3 asset files"), "{status}");
+
+        let root_path = output_root.join("Assets/MonoBehaviour/ManagedRoot.asset");
+        let root_meta_path = output_root.join("Assets/MonoBehaviour/ManagedRoot.asset.meta");
+        let first_target_path = output_root.join("Assets/MonoBehaviour/FirstTarget.asset");
+        let first_target_meta_path =
+            output_root.join("Assets/MonoBehaviour/FirstTarget.asset.meta");
+        let second_target_path = output_root.join("Assets/MonoBehaviour/SecondTarget.asset");
+        let second_target_meta_path =
+            output_root.join("Assets/MonoBehaviour/SecondTarget.asset.meta");
+        let root_yaml = fs::read_to_string(&root_path).expect("root YAML is exported");
+        let first_target_yaml =
+            fs::read_to_string(&first_target_path).expect("first target YAML is exported");
+        let second_target_yaml =
+            fs::read_to_string(&second_target_path).expect("second target YAML is exported");
+        let first_target_guid = meta_guid(&first_target_meta_path);
+        let second_target_guid = meta_guid(&second_target_meta_path);
+        let source_root_yaml = include_str!(
+            "export/managed_reference_project_fixture/source_same_bundle_ManagedRoot.asset"
+        );
+        let normalized_rust_root = root_yaml
+            .replace(&first_target_guid, "<TARGET_GUID>")
+            .replace("\r\n", "\n");
+        assert_eq!(
+            source_root_yaml.trim_end(),
+            normalized_rust_root.trim_end(),
+            "the source and Rust root documents must map the duplicate-name PPtr identically"
+        );
+        assert!(root_yaml.contains(&format!(
+            "m_Asset: {{fileID: 11400000, guid: {first_target_guid}, type: 2}}"
+        )));
+        assert!(
+            !root_yaml.contains(&second_target_guid),
+            "the duplicate-name PPtr must not map to the later collection"
+        );
+        assert_eq!(
+            normalize_text_line_endings(include_bytes!(
+                "export/managed_reference_project_fixture/source_same_bundle_FirstTarget.asset"
+            )),
+            normalize_text_line_endings(first_target_yaml.as_bytes())
+        );
+        assert_eq!(
+            normalize_text_line_endings(include_bytes!(
+                "export/managed_reference_project_fixture/source_same_bundle_SecondTarget.asset"
+            )),
+            normalize_text_line_endings(second_target_yaml.as_bytes())
+        );
+        assert!(first_target_yaml.contains("m_Health: 789"));
+        assert!(second_target_yaml.contains("m_Health: 456"));
+
+        let normalize_meta = |path: &std::path::Path| {
+            let normalized = fs::read_to_string(path)
+                .expect("asset metadata is readable")
+                .lines()
+                .filter(|line| !line.starts_with("guid: ") && !line.starts_with("timeCreated: "))
+                .collect::<Vec<_>>()
+                .join("\n");
+            normalized.trim_end_matches(['\r', '\n']).to_owned() + "\n"
+        };
+        let expected_meta = include_str!(
+            "export/managed_reference_project_fixture/source_same_bundle_Meta.normalized"
+        );
+        assert_eq!(expected_meta, normalize_meta(&root_meta_path));
+        assert_eq!(expected_meta, normalize_meta(&first_target_meta_path));
+        assert_eq!(expected_meta, normalize_meta(&second_target_meta_path));
+
+        let source_path_id_map_hex = source_fixture
+            .lines()
+            .find_map(|line| line.strip_prefix("SOURCE_OUTPUT|AuxiliaryFiles/path_id_map.json|"))
+            .expect("source fixture records direct collection order in PathIdMap");
+        let source_path_id_map = source_path_id_map_hex
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16)
+                    .expect("source PathIdMap fixture contains valid hex")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            normalize_text_line_endings(&fs::read(output_root.join("AuxiliaryFiles/path_id_map.json"))
+                .expect("project export writes the PathIdMap post-export file")),
+            normalize_text_line_endings(&source_path_id_map),
+            "PathIdMap collection names/order differ for same-bundle duplicate files"
+        );
+        assert_eq!(fs::read(&bundle_path).unwrap(), bundled_fixture);
+
+        fs::remove_dir_all(&output_root).expect("remove same-bundle duplicate project output");
+        drop(input);
+    }
+
+    #[test]
     fn export_project_resolves_dependency_from_nested_bundle_scope_like_source() {
         let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
         let source_fixture =

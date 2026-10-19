@@ -185,6 +185,10 @@ pub enum ContainerMountErrorKind {
         entry_index: usize,
         path: String,
     },
+    DuplicateEntryPathDisambiguationExhausted {
+        entry_index: usize,
+        attempts: usize,
+    },
     EntryPathTooLong {
         entry_index: usize,
         path: String,
@@ -491,6 +495,13 @@ impl Display for ContainerMountErrorKind {
             } => write!(
                 formatter,
                 "entry {entry_index} path '{path}' is empty or contains a parent-directory component"
+            ),
+            Self::DuplicateEntryPathDisambiguationExhausted {
+                entry_index,
+                attempts,
+            } => write!(
+                formatter,
+                "could not assign a unique virtual path to duplicate entry {entry_index} after {attempts} candidates"
             ),
             Self::EntryPathTooLong {
                 entry_index,

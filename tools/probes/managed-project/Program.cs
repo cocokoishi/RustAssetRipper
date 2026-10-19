@@ -288,6 +288,16 @@ if (args.Length > 0 && args[0] == "export-nested-sibling-bundle-reference-order"
     return ExportNestedSiblingBundleReferenceOrder(args[1], args[2], args[3]);
 }
 
+if (args.Length > 0 && args[0] == "export-same-bundle-duplicate-reference-order")
+{
+    if (args.Length != 4)
+    {
+        Console.Error.WriteLine("usage: managed-project export-same-bundle-duplicate-reference-order <input-root> <output-root> <rows-file>");
+        return 2;
+    }
+    return ExportSameBundleDuplicateReferenceOrder(args[1], args[2], args[3]);
+}
+
 if (args.Length > 0 && args[0] == "export-nested-missing-dependency")
 {
     if (args.Length != 4)
