@@ -323,10 +323,7 @@ fn assert_case(case: &FixtureCase, layouts: &ReferenceClassLayouts) {
             assert_eq!(asset.kind, FactoryAssetKind::TypeTreeObject);
             assert_eq!(asset.class_id, 194);
             assert_eq!(asset.tail, Some(ObjectTailOutcome::Exact));
-            let payload = asset
-                .payload
-                .as_ref()
-                .expect("source TPK fallback payload");
+            let payload = asset.payload.as_ref().expect("source TPK fallback payload");
             assert_eq!(payload.type_name, "NavMeshObsolete");
             assert_eq!(payload.consumed_bytes, 16);
             assert!(payload.trailing_bytes.is_empty());
