@@ -758,7 +758,11 @@
             .expect("invalid external file ID exports as a source MissingReference pointer");
             let root_path = output_root.join("Assets/MonoBehaviour/ManagedRoot.asset");
             let root_yaml = fs::read_to_string(&root_path).expect("managed root YAML is exported");
-            assert_eq!(source_root_yaml.trim_end(), root_yaml.trim_end(), "{fixture_name}");
+            assert_eq!(
+                source_root_yaml.trim_end(),
+                root_yaml.trim_end(),
+                "{fixture_name}"
+            );
             assert_eq!(fs::read(&bundle_path).unwrap(), bundled_fixture);
 
             fs::remove_dir_all(&output_root).expect("remove invalid-file-ID project output");
