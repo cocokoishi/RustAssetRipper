@@ -9407,3 +9407,12 @@ These results do not pass the first-phase gate. The reference .NET solution buil
 - Comparison: source project export versus Rust project export; normalized root and target YAML, `.meta` semantics, and `AuxiliaryFiles/path_id_map.json` match. Only source-generated GUID and timestamp nondeterminism are normalized by the existing fixture comparison.
 - Regression tests: `export_project_preserves_first_duplicate_collection_in_same_bundle`; `single_unityfs_entry_keeps_strict_path_collision_behavior`.
 - Resolution commits: `a572d6a`, `87e92fe`. GitHub Actions run `39187105608` passed all jobs on Windows and Linux, including release-mode tests and artifacts.
+
+## 2026-10-18 - Unity 2022.3 no-TypeTree TextAsset factory fallback
+
+- Fixture: `fixture-asset-factory-textasset-notree-2022-001` (synthetic 120-byte SerializedFile; Unity 2022.3.22f1).
+- Reference: frozen AssetRipper 2.0.0 source baseline, probed through the source-factory probe; the supplied source copy has no recoverable Git commit metadata.
+- Source result: generated class `TextAsset_2018_3`, class name `TextAsset`, name `Hero`. Source release/editor TPK rows for class 49 at this version are committed with the fixture.
+- Rust result: exact generated class, 20-byte payload, no trailing bytes, `m_Name=Hero`, and `m_Script=print(1)`; the fixture-driven differential test passed locally.
+- Commit `87e02c8`; Actions run `39188787066` passed Windows/Linux workspace tests, release-mode tests, Clippy, builds/artifacts, formatting, ledger audit, and repository hygiene.
+- `SER-ASSET-FACTORY-001` remains implemented but not verified; this is one version-specific coverage case.

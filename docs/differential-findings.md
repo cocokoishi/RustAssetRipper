@@ -3656,3 +3656,12 @@ invisible until a real sample disagrees.
 - Resolution: commit `a572d6a` remaps only duplicate sibling paths inside UnityFS using deterministic internal paths; other container formats and nonduplicate UnityFS entries retain strict collision errors. Commit `87e92fe` fixes the ancestor-path collision check.
 - Evidence: `export_project_preserves_first_duplicate_collection_in_same_bundle` compares normalized root/target YAML, metadata, and PathIdMap with source goldens. `single_unityfs_entry_keeps_strict_path_collision_behavior` protects existing VFS collision behavior. GitHub Actions run `39187105608` passed Windows/Linux tests, clippy, release tests/builds, formatting, and public-repository hygiene.
 - `OBJ-REF-001` remains in progress; this closes one duplicate-path resolution case only.
+
+## DIFF-SER-FACTORY-NO-TT-TEXTASSET-2022-3-001 — Unity 2022.3 no-TypeTree TextAsset uses the source TPK fallback
+
+- Fixture: `fixture-asset-factory-textasset-notree-2022-001`, a source-authored 120-byte Unity 2022.3.22f1 SerializedFile with an empty file TypeTree.
+- Reference: frozen AssetRipper 2.0.0 source baseline; the supplied source copy has no recoverable Git commit metadata.
+- Source behavior: `GameAssetFactory` materializes `TextAsset_2018_3` / `TextAsset`, named `Hero`; the source TPK release/editor layouts for class 49 at 2022.3.22f1 are recorded in `src/processing/asset_factory_fixture.txt`.
+- Rust comparison: `factory_differential_replays_every_reference_case` verifies the selected generated class, exact 20-byte payload consumption, empty tail, and decoded `m_Name` / `m_Script` values against the source-authored input and source TPK rows.
+- Local targeted test passed. Actions run `39188787066` passed all jobs on Windows and Linux at commit `87e02c8`.
+- `SER-ASSET-FACTORY-001` remains implemented but not verified; this closes one no-TypeTree TextAsset version case only.
