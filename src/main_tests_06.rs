@@ -333,10 +333,10 @@
     #[test]
     fn export_project_preserves_first_duplicate_collection_in_same_bundle() {
         let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
-        let source_fixture = include_str!("export/managed_reference_same_bundle_duplicate_fixture.txt");
-        assert!(source_fixture.contains(
-            "SELECTED|workspace.bundle/managed.assets|target.assets|FirstTarget"
-        ));
+        let source_fixture =
+            include_str!("export/managed_reference_same_bundle_duplicate_fixture.txt");
+        assert!(source_fixture
+            .contains("SELECTED|workspace.bundle/managed.assets|target.assets|FirstTarget"));
         let source_bundle_hex = source_fixture
             .lines()
             .find_map(|line| line.strip_prefix("INPUT_HEX|workspace.bundle|"))
@@ -406,7 +406,10 @@
             panic!("the duplicate-name PPtr must resolve to a target collection");
         };
         assert_ne!(target_file_index, root_file_index);
-        assert_eq!(graph_workspace.files()[target_file_index].file_name, "target.assets");
+        assert_eq!(
+            graph_workspace.files()[target_file_index].file_name,
+            "target.assets"
+        );
         let selected_target_path = &graph_workspace.files()[target_file_index].virtual_path;
         assert!(
             selected_target_path.ends_with("/target.assets"),
@@ -516,8 +519,10 @@
             })
             .collect::<Vec<_>>();
         assert_eq!(
-            normalize_text_line_endings(&fs::read(output_root.join("AuxiliaryFiles/path_id_map.json"))
-                .expect("project export writes the PathIdMap post-export file")),
+            normalize_text_line_endings(
+                &fs::read(output_root.join("AuxiliaryFiles/path_id_map.json"))
+                    .expect("project export writes the PathIdMap post-export file")
+            ),
             normalize_text_line_endings(&source_path_id_map),
             "PathIdMap collection names/order differ for same-bundle duplicate files"
         );
