@@ -270,12 +270,20 @@ if (args.Length > 0 && args[0] == "export-engine-resource-pointer")
 
 if (args.Length > 0 && args[0] == "export-cached-gameobject")
 {
-    if (args.Length != 6)
+    if (args.Length is not (6 or 9))
     {
-        Console.Error.WriteLine("usage: managed-project export-cached-gameobject <fixture-file> <input-root> <output-root> <rows-file> <input-file-name>");
+        Console.Error.WriteLine("usage: managed-project export-cached-gameobject <fixture-file> <input-root> <output-root> <rows-file> <input-file-name> [cache-name cache-layer cache-component-count]");
         return 2;
     }
-    return ExportCachedGameObject(args[1], args[2], args[3], args[4], args[5]);
+    return ExportCachedGameObject(
+        args[1],
+        args[2],
+        args[3],
+        args[4],
+        args[5],
+        args.Length == 9 ? args[6] : "LegacyRoot",
+        args.Length == 9 ? uint.Parse(args[7], System.Globalization.CultureInfo.InvariantCulture) : 0,
+        args.Length == 9 ? int.Parse(args[8], System.Globalization.CultureInfo.InvariantCulture) : 1);
 }
 
 if (args.Length > 0 && args[0] == "export-sibling-bundle-reference-order")

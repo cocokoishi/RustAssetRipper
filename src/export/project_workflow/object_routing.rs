@@ -1126,23 +1126,31 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
     for (file_index, file) in workspace.files().iter().enumerate() {
         for (object_index, object_info) in file.metadata.objects.iter().enumerate() {
             let source_key = source_object_key(file_index, object_index);
-            if prefab_member_keys.contains(&source_key)
-                && context.engine_asset_source == EngineAssetSource::StoredResourceData
-                && engine_resource_collection_guid(&file.file_name).is_none()
-            {
-                let object = objects.get(file_index, object_index).ok_or_else(|| {
-                    invalid_project(format!(
-                        "workspace object is missing at file {file_index}, object {object_index}"
-                    ))
-                })?;
-                if object.factory.class_id == 1 {
-                    if let (Some(payload), Some(data)) =
-                        (object.payload.as_ref().ok(), context.engine_resource_data)
-                    {
-                        if predefined_engine_game_object_target(&payload.root, data).is_some() {
-                            return Err(invalid_project(
-                                "stored GameObject cache redirect conflicts with existing Prefab collection membership",
-                            ));
+            let processed_collection_membership = if scene_member_keys.contains(&source_key) {
+                Some("Scene")
+            } else if prefab_member_keys.contains(&source_key) {
+                Some("Prefab")
+            } else {
+                None
+            };
+            if let Some(membership) = processed_collection_membership {
+                if context.engine_asset_source == EngineAssetSource::StoredResourceData
+                    && engine_resource_collection_guid(&file.file_name).is_none()
+                {
+                    let object = objects.get(file_index, object_index).ok_or_else(|| {
+                        invalid_project(format!(
+                            "workspace object is missing at file {file_index}, object {object_index}"
+                        ))
+                    })?;
+                    if object.factory.class_id == 1 {
+                        if let (Some(payload), Some(data)) =
+                            (object.payload.as_ref().ok(), context.engine_resource_data)
+                        {
+                            if predefined_engine_game_object_target(&payload.root, data).is_some() {
+                                return Err(invalid_project(format!(
+                                    "stored GameObject cache redirect conflicts with existing {membership} collection membership"
+                                )));
+                            }
                         }
                     }
                 }

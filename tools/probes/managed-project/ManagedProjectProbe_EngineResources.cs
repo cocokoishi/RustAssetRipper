@@ -5,6 +5,7 @@ using AssetRipper.Export.UnityProjects;
 using AssetRipper.Import.Logging;
 using AssetRipper.IO.Files;
 using AssetRipper.Mining.PredefinedAssets;
+using AssetRipper.SourceGenerated.Classes.ClassID_1;
 
 internal static partial class ManagedProjectProbe
 {
@@ -13,7 +14,10 @@ internal static partial class ManagedProjectProbe
         string inputRootArgument,
         string outputRootArgument,
         string rowsArgument,
-        string inputFileName)
+        string inputFileName,
+        string cacheName,
+        uint cacheLayer,
+        int cacheComponentCount)
     {
         string fixturePath = Path.GetFullPath(fixturePathArgument);
         string inputRoot = Path.GetFullPath(inputRootArgument);
@@ -34,11 +38,17 @@ internal static partial class ManagedProjectProbe
         Directory.CreateDirectory(outputRoot);
         Directory.CreateDirectory(Path.GetDirectoryName(rowsPath)!);
 
-        byte[] inputBytes = File.ReadAllBytes(fixturePath);
+        byte[] inputBytes = ReadInputFixture(fixturePath);
         string inputPath = Path.Combine(inputRoot, inputFileName);
         File.WriteAllBytes(inputPath, inputBytes);
 
-        const string engineResourceJson = "{\"DefaultResources\":{\"900\":{\"$type\":\"GameObject\",\"Name\":\"LegacyRoot\",\"Components\":[4],\"Layer\":0}},\"ExtraResources\":{}}";
+        if (cacheComponentCount < 0 || cacheComponentCount > 32)
+        {
+            throw new ArgumentOutOfRangeException(nameof(cacheComponentCount));
+        }
+        string cacheNameJson = System.Text.Json.JsonSerializer.Serialize(cacheName);
+        string cacheComponentsJson = string.Join(",", Enumerable.Repeat("4", cacheComponentCount));
+        string engineResourceJson = $"{{\"DefaultResources\":{{\"900\":{{\"$type\":\"GameObject\",\"Name\":{cacheNameJson},\"Components\":[{cacheComponentsJson}],\"Layer\":{cacheLayer}}}}},\"ExtraResources\":{{}}}}";
         FullConfiguration settings = new();
         settings.SingletonData.SetStoredValue<EngineResourceData?>(
             nameof(EngineResourceData),
@@ -50,6 +60,7 @@ internal static partial class ManagedProjectProbe
         int gameObjectCount = gameData.GameBundle.FetchAssets().Count(asset => asset.ClassID == 1);
         int sceneCount = gameData.GameBundle.Scenes.Count();
         int prefabCount = gameData.GameBundle.FetchAssets().Count(asset => asset.ClassID == 1001);
+        IGameObject? sourceGameObject = gameData.GameBundle.FetchAssets().OfType<IGameObject>().SingleOrDefault();
 
         string? exportError = null;
         try
@@ -60,7 +71,7 @@ internal static partial class ManagedProjectProbe
             error.Message.Contains("already added by", StringComparison.Ordinal)
             || error.Message.Contains("same key", StringComparison.OrdinalIgnoreCase))
         {
-            exportError = error.GetType().Name;
+            exportError = $"{error.GetType().Name}|{error.Message.Replace('\r', ' ').Replace('\n', ' ')}";
         }
 
         using StreamWriter rows = new(rowsPath, false, new UTF8Encoding(false)) { NewLine = "\n" };
@@ -71,8 +82,12 @@ internal static partial class ManagedProjectProbe
 #endif
         rows.WriteLine("VERSION|2017.4.40f1|format=17|platform=NoTarget");
         rows.WriteLine($"INPUT|{inputFileName}|{Convert.ToHexString(SHA256.HashData(inputBytes))}");
-        rows.WriteLine("CACHE|DefaultResources|900|GameObject|LegacyRoot|Layer=0|ComponentCount=1");
+        rows.WriteLine($"CACHE|DefaultResources|900|GameObject|{cacheName}|Layer={cacheLayer}|ComponentCount={cacheComponentCount}");
         rows.WriteLine($"OBJECTS|gameObjects={gameObjectCount}|scenes={sceneCount}|prefabInstances={prefabCount}");
+        if (sourceGameObject is not null)
+        {
+            rows.WriteLine($"SOURCE_GAMEOBJECT|{sourceGameObject.Name}|Layer={sourceGameObject.Layer}|ComponentCount={sourceGameObject.Components.Count}");
+        }
         rows.WriteLine(exportError is null ? "EXPORT|success" : $"EXPORT|duplicate-membership|{exportError}");
 
         string projectAssets = Path.Combine(outputRoot, "ExportedProject", "Assets");
@@ -94,5 +109,20 @@ internal static partial class ManagedProjectProbe
         Console.WriteLine(exportError is null ? "export=success" : "export=duplicate-membership");
         Console.WriteLine($"project_asset_files={assetFiles.Length}");
         return 0;
+    }
+
+    private static byte[] ReadInputFixture(string fixturePath)
+    {
+        const string prefix = "INPUT_HEX|";
+        string? line = File.ReadLines(fixturePath)
+            .FirstOrDefault(candidate => candidate.StartsWith(prefix, StringComparison.Ordinal));
+        if (line is null)
+        {
+            return File.ReadAllBytes(fixturePath);
+        }
+
+        int separator = line.IndexOf('|', prefix.Length);
+        string hex = separator < 0 ? line[prefix.Length..] : line[(separator + 1)..];
+        return Convert.FromHexString(hex);
     }
 }

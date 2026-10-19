@@ -45,7 +45,7 @@ using System.Security.Cryptography;
 
 if (args.Length == 0)
 {
-	Console.Error.WriteLine("usage: tpk <version> <classId...> | naming <version> <name...> | process <rows> <file...> | blend-shape <rows> | notree-unresolved-component <input> <rows> | notree-unresolved-component-export <input> <rows> <output> | notree-loaded-component-export <input-dir> <rows> <output> | notree-scene-owned-missing-transform <input> <rows> <output> | legacy-export <input> <rows> <output> | raw-fallback-export <input> <rows> <output>");
+	Console.Error.WriteLine("usage: tpk <version> <classId...> | naming <version> <name...> | process <rows> <file...> | blend-shape <rows> | notree-unresolved-component <input> <rows> | notree-unresolved-component-export <input> <rows> <output> | notree-loaded-component-export <input-dir> <rows> <output> | notree-scene-owned-missing-transform <input> <rows> <output> | legacy-export <input> <rows> <output> | legacy-scene-cached-gameobject <rows> <output> | raw-fallback-export <input> <rows> <output>");
 	return 2;
 }
 
@@ -74,6 +74,11 @@ try
 	if (args[0] == "legacy-export" && args.Length == 4)
 	{
 		ExportLegacyPrefab(args[1], args[2], args[3]);
+		return 0;
+	}
+	if (args[0] == "legacy-scene-cached-gameobject" && args.Length == 3)
+	{
+		ExportLegacySceneCachedGameObject(args[1], args[2]);
 		return 0;
 	}
 	if (args[0] == "notree-prefab-export" && args.Length == 4)
@@ -106,7 +111,7 @@ try
 		ExportRawFallback(args[1], args[2], args[3]);
 		return 0;
 	}
-	Console.Error.WriteLine("usage: tpk <version> <classId...> | naming <version> <name...> | process <rows> <file...> | legacy-export <input> <rows> <output> | notree-prefab-export <input> <rows> <output> | notree-unresolved-component-export <input> <rows> <output> | notree-loaded-component-export <input-dir> <rows> <output> | notree-scene-owned-missing-transform <input> <rows> <output> | raw-fallback-export <input> <rows> <output>");
+	Console.Error.WriteLine("usage: tpk <version> <classId...> | naming <version> <name...> | process <rows> <file...> | legacy-export <input> <rows> <output> | legacy-scene-cached-gameobject <rows> <output> | notree-prefab-export <input> <rows> <output> | notree-unresolved-component-export <input> <rows> <output> | notree-loaded-component-export <input-dir> <rows> <output> | notree-scene-owned-missing-transform <input> <rows> <output> | raw-fallback-export <input> <rows> <output>");
 	return 2;
 }
 catch (Exception ex)
@@ -414,6 +419,80 @@ static void ExportLegacyPrefab(string inputPath, string rowsPath, string outputR
 		{
 			rows.WriteLine($"CONTENT|{relativePath}|{Convert.ToBase64String(content)}");
 		}
+	}
+}
+
+static void ExportLegacySceneCachedGameObject(string rowsPath, string outputRoot)
+{
+	string rowsFullPath = Path.GetFullPath(rowsPath);
+	string outputFullPath = Path.GetFullPath(outputRoot);
+	if (File.Exists(rowsFullPath) || Directory.Exists(rowsFullPath))
+	{
+		throw new IOException($"refusing to overwrite probe rows {rowsFullPath}");
+	}
+	if (Directory.Exists(outputFullPath) && Directory.EnumerateFileSystemEntries(outputFullPath).Any())
+	{
+		throw new IOException($"refusing to export into non-empty output {outputFullPath}");
+	}
+
+	Directory.CreateDirectory(Path.GetDirectoryName(rowsFullPath)!);
+	Directory.CreateDirectory(outputFullPath);
+	byte[] inputBytes = BuildLegacyRootSceneFile();
+	string inputFileName = "LegacyRootScene.unity";
+	string inputPath = Path.Combine(Path.GetDirectoryName(rowsFullPath)!, inputFileName);
+	if (File.Exists(inputPath) || Directory.Exists(inputPath))
+	{
+		throw new IOException($"refusing to overwrite probe input {inputPath}");
+	}
+	File.WriteAllBytes(inputPath, inputBytes);
+
+	const string engineResourceJson = "{\"DefaultResources\":{\"900\":{\"$type\":\"GameObject\",\"Name\":\"LegacyRoot\",\"Components\":[4],\"Layer\":0}},\"ExtraResources\":{}}";
+	FullConfiguration settings = new();
+	settings.SingletonData.SetStoredValue<AssetRipper.Mining.PredefinedAssets.EngineResourceData?>(
+		nameof(AssetRipper.Mining.PredefinedAssets.EngineResourceData),
+		AssetRipper.Mining.PredefinedAssets.EngineResourceData.FromJson(engineResourceJson));
+
+	Logger.Add(new ConsoleLogger());
+	ExportHandler handler = new(settings);
+	GameData gameData = handler.LoadAndProcess([inputPath], LocalFileSystem.Instance);
+	IGameObject sourceGameObject = gameData.GameBundle.FetchAssets().OfType<IGameObject>().Single();
+	string? exportError = null;
+	try
+	{
+		handler.Export(gameData, outputFullPath, LocalFileSystem.Instance);
+	}
+	catch (ArgumentException error) when (
+		error.Message.Contains("already added by", StringComparison.Ordinal)
+		|| error.Message.Contains("same key", StringComparison.OrdinalIgnoreCase))
+	{
+		exportError = $"{error.GetType().Name}|{error.Message.Replace('\r', ' ').Replace('\n', ' ')}";
+	}
+
+	using StreamWriter rows = new(rowsFullPath, false, new System.Text.UTF8Encoding(false)) { NewLine = "\n" };
+#if DEBUG
+	rows.WriteLine("BUILD|Debug");
+#else
+	rows.WriteLine("BUILD|Release");
+#endif
+	rows.WriteLine("VERSION|2017.4.40f1|format=17|platform=NoTarget");
+	rows.WriteLine($"INPUT|{inputFileName}|{Convert.ToHexString(SHA256.HashData(inputBytes))}");
+	rows.WriteLine($"INPUT_HEX|{Convert.ToHexString(inputBytes)}");
+	rows.WriteLine("CACHE|DefaultResources|900|GameObject|LegacyRoot|Layer=0|ComponentCount=1");
+	rows.WriteLine($"OBJECTS|gameObjects={gameData.GameBundle.FetchAssets().Count(asset => asset.ClassID == 1)}|scenes={gameData.GameBundle.Scenes.Count()}|prefabInstances={gameData.GameBundle.FetchAssets().Count(asset => asset.ClassID == 1001)}");
+	rows.WriteLine($"SOURCE_GAMEOBJECT|{sourceGameObject.Name}|Layer={sourceGameObject.Layer}|ComponentCount={sourceGameObject.Components.Count}");
+	rows.WriteLine(exportError is null ? "EXPORT|success" : $"EXPORT|duplicate-membership|{exportError}");
+	string[] sceneFiles = Directory.Exists(Path.Combine(outputFullPath, "ExportedProject", "Assets"))
+		? Directory.GetFiles(Path.Combine(outputFullPath, "ExportedProject", "Assets"), "*.unity", SearchOption.AllDirectories)
+			.Where(path => !path.EndsWith(".meta", StringComparison.OrdinalIgnoreCase))
+			.OrderBy(path => Path.GetRelativePath(outputFullPath, path), StringComparer.Ordinal)
+			.ToArray()
+		: [];
+	foreach (string file in sceneFiles)
+	{
+		string relativePath = Path.GetRelativePath(outputFullPath, file).Replace('\\', '/');
+		byte[] content = File.ReadAllBytes(file);
+		rows.WriteLine($"FILE|{relativePath}|{content.Length}|{Convert.ToHexString(SHA256.HashData(content))}");
+		rows.WriteLine($"CONTENT|{relativePath}|{Convert.ToBase64String(content)}");
 	}
 }
 
@@ -1164,6 +1243,59 @@ static byte[] BuildLegacyRootFile()
 		},
 	}.Build();
 	file.FilePath = "LegacyRoot.unity";
+	return file.ToByteArray();
+}
+
+static byte[] BuildLegacyRootSceneFile()
+{
+	UnityVersion version = UnityVersion.Parse("2017.4.40f1");
+	SerializedFile template = new SerializedFileBuilder
+	{
+		Generation = FormatVersion.Unknown_10,
+		Version = version,
+		Platform = BuildTarget.NoTarget,
+		EndianType = EndianType.LittleEndian,
+		HasTypeTree = false,
+	}.Build();
+	GameAssetFactory factory = new(new BaseManager(s => { }));
+	GameBundle bundle = new();
+	SerializedAssetCollection collection = bundle.AddCollectionFromSerializedFile(template, factory);
+	IUnityObjectBase gameObjectAsset = AssetFactory.CreateSerialized(new AssetInfo(collection, 10, 1), version)
+		?? throw new InvalidDataException("source factory did not create the scene GameObject");
+	IUnityObjectBase transformAsset = AssetFactory.CreateSerialized(new AssetInfo(collection, 11, 4), version)
+		?? throw new InvalidDataException("source factory did not create the scene Transform");
+	IUnityObjectBase managerAsset = AssetFactory.CreateSerialized(new AssetInfo(collection, 12, 29), version)
+		?? throw new InvalidDataException("source factory did not create the scene level manager");
+	if (gameObjectAsset is not IGameObject gameObject || transformAsset is not ITransform transform)
+	{
+		throw new InvalidDataException("source factory returned an unexpected Scene object type");
+	}
+	transform.InitializeDefault();
+	transform.GameObject_C4P = gameObject;
+	gameObject.AddComponent(ClassIDType.Transform, transform);
+	gameObject.Name = new Utf8String("LegacyRoot");
+	byte[] gameObjectPayload = WriteAsset(gameObjectAsset, true);
+	byte[] transformPayload = WriteAsset(transformAsset, true);
+	byte[] managerPayload = WriteAsset(managerAsset, true);
+	SerializedType gameObjectType = new() { RawTypeID = 1 };
+	SerializedType transformType = new() { RawTypeID = 4 };
+	SerializedType managerType = new() { RawTypeID = 29 };
+	SerializedFile file = new SerializedFileBuilder
+	{
+		Generation = FormatVersion.Unknown_10,
+		Version = version,
+		Platform = BuildTarget.NoTarget,
+		EndianType = EndianType.LittleEndian,
+		HasTypeTree = false,
+		Types = { gameObjectType, transformType, managerType },
+		Objects =
+		{
+			new ObjectInfo(gameObjectType) { FileID = 10, TypeID = 1, ObjectData = gameObjectPayload },
+			new ObjectInfo(transformType) { FileID = 11, TypeID = 4, ObjectData = transformPayload },
+			new ObjectInfo(managerType) { FileID = 12, TypeID = 29, ObjectData = managerPayload },
+		},
+	}.Build();
+	file.FilePath = "LegacyRootScene.unity";
 	return file.ToByteArray();
 }
 
