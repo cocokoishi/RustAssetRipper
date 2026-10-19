@@ -14,6 +14,7 @@ pub(super) struct EngineResourceData {
     texture_2d_assets: Vec<Texture2DEntry>,
     cubemap_assets: Vec<CubemapEntry>,
     audio_clip_assets: Vec<AudioClipEntry>,
+    game_object_assets: Vec<GameObjectEntry>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -78,6 +79,14 @@ struct AudioClipEntry {
     target: PredefinedEngineAssetTarget,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct GameObjectEntry {
+    name: String,
+    layer: u32,
+    component_count: usize,
+    target: PredefinedEngineAssetTarget,
+}
+
 #[derive(Default)]
 struct OrderedResourceMap(Vec<(i64, Value)>);
 
@@ -122,8 +131,8 @@ struct RawEngineResourceData {
 }
 
 impl EngineResourceData {
-    /// Parses the supported TextAsset, Mesh, Sprite, Material, Shader, Texture2D, Cubemap, and
-    /// AudioClip subsets of the Mining EngineResourceData model.
+    /// Parses the supported TextAsset, Mesh, Sprite, Material, Shader, Texture2D, Cubemap,
+    /// AudioClip, and GameObject subsets of the Mining EngineResourceData model.
     ///
     /// A missing, null, malformed, or otherwise non-deserializable nullable value means the
     /// frozen serializer produced `null` and the exporter falls back to embedded TPK data. A
@@ -146,6 +155,7 @@ impl EngineResourceData {
         let mut texture_2d_assets = Vec::new();
         let mut cubemap_assets = Vec::new();
         let mut audio_clip_assets = Vec::new();
+        let mut game_object_assets = Vec::new();
         for (resources, guid_words) in [
             (
                 raw.default_resources.unwrap_or_default(),
@@ -349,18 +359,44 @@ impl EngineResourceData {
                     });
                     continue;
                 }
+                if kind == "GameObject" {
+                    let Some(name) = object.get("Name").and_then(Value::as_str) else {
+                        return Ok(None);
+                    };
+                    let Some(layer) = object
+                        .get("Layer")
+                        .and_then(Value::as_u64)
+                        .and_then(|layer| u32::try_from(layer).ok())
+                    else {
+                        return Ok(None);
+                    };
+                    let Some(components) = object.get("Components").and_then(Value::as_array)
+                    else {
+                        return Ok(None);
+                    };
+                    if components.iter().any(|component| {
+                        component
+                            .as_i64()
+                            .and_then(|component| i32::try_from(component).ok())
+                            .is_none()
+                    }) {
+                        return Ok(None);
+                    }
+                    game_object_assets.push(GameObjectEntry {
+                        name: name.to_owned(),
+                        layer,
+                        component_count: components.len(),
+                        target: PredefinedEngineAssetTarget { file_id, guid },
+                    });
+                    continue;
+                }
                 if kind != "TextAsset" {
                     if matches!(
                         kind,
-                        "Behaviour"
-                            | "Component"
-                            | "GameObject"
-                            | "NamedObject"
-                            | "MonoBehaviour"
-                            | "MonoScript"
+                        "Behaviour" | "Component" | "NamedObject" | "MonoBehaviour" | "MonoScript"
                     ) {
                         return Err(super::invalid_project(format!(
-                            "stored EngineResourceData contains unsupported {kind} cache entries; only TextAsset, Mesh, Sprite, Material, Shader, Texture2D, Cubemap, and AudioClip matching is currently wired"
+                            "stored EngineResourceData contains unsupported {kind} cache entries; only TextAsset, Mesh, Sprite, Material, Shader, Texture2D, Cubemap, AudioClip, and GameObject matching is currently wired"
                         )));
                     }
                     return Ok(None);
@@ -399,6 +435,7 @@ impl EngineResourceData {
             texture_2d_assets,
             cubemap_assets,
             audio_clip_assets,
+            game_object_assets,
         }))
     }
 
@@ -527,6 +564,23 @@ impl EngineResourceData {
                     && entry.channels == channels
                     && entry.frequency == frequency
                     && f32::from_bits(entry.length_bits) == length
+            })
+            .map(|entry| entry.target)
+    }
+
+    /// The frozen cache keys GameObjects by name, layer, and component count.
+    pub(super) fn game_object_target(
+        &self,
+        name: &str,
+        layer: u32,
+        component_count: usize,
+    ) -> Option<PredefinedEngineAssetTarget> {
+        self.game_object_assets
+            .iter()
+            .find(|entry| {
+                entry.name == name
+                    && entry.layer == layer
+                    && entry.component_count == component_count
             })
             .map(|entry| entry.target)
     }
@@ -755,6 +809,42 @@ mod tests {
     }
 
     #[test]
+    fn engine_resource_data_gameobject_matches_name_layer_component_count_and_identity() {
+        // This JSON shape is emitted by the frozen EngineResourceDataContext serializer.
+        let data = EngineResourceData::parse(Some(
+            r#"{"DefaultResources":{"900":{"$type":"GameObject","Name":"FixtureObject","Components":[4,224],"Layer":4294967295}},"ExtraResources":{"901":{"$type":"GameObject","Name":"FixtureObject","Components":[4,224],"Layer":4294967295},"902":{"$type":"GameObject","Name":"ExtraFixtureObject","Components":[4],"Layer":3}}}"#,
+        ))
+        .expect("GameObject resource entries parse")
+        .expect("valid object selects a stored cache");
+
+        let default_target = data
+            .game_object_target("FixtureObject", u32::MAX, 2)
+            .expect("name, UInt32 layer, and component count identify the source GameObject");
+        assert_eq!(default_target.file_id, 900);
+        assert_eq!(default_target.guid[8..12], 14u32.to_le_bytes());
+        assert_eq!(
+            data.game_object_target("ExtraFixtureObject", 3, 1)
+                .expect("extra GameObjects retain their resource identity")
+                .file_id,
+            902
+        );
+        let extra_target = data
+            .game_object_target("ExtraFixtureObject", 3, 1)
+            .expect("matching extra GameObject");
+        assert_eq!(extra_target.guid[8..12], 15u32.to_le_bytes());
+
+        assert!(data.game_object_target("Other", u32::MAX, 2).is_none());
+        assert!(
+            data.game_object_target("FixtureObject", u32::MAX - 1, 2)
+                .is_none()
+        );
+        assert!(
+            data.game_object_target("FixtureObject", u32::MAX, 1)
+                .is_none()
+        );
+    }
+
+    #[test]
     fn valid_empty_engine_resource_data_selects_a_custom_empty_cache() {
         assert!(EngineResourceData::parse(Some("{}"))
             .expect("valid empty object parses")
@@ -809,7 +899,7 @@ mod tests {
         ))
         .expect_err("unsupported typed resources must not be silently discarded");
         assert!(error.to_string().contains(
-            "only TextAsset, Mesh, Sprite, Material, Shader, Texture2D, Cubemap, and AudioClip matching is currently wired"
+            "only TextAsset, Mesh, Sprite, Material, Shader, Texture2D, Cubemap, AudioClip, and GameObject matching is currently wired"
         ));
     }
 }

@@ -601,6 +601,20 @@ fn predefined_engine_object_name(root: &SerializedValue) -> Option<String> {
     }
 }
 
+/// Reads the fields used by the frozen predefined GameObject cache key.
+fn predefined_engine_game_object_key(root: &SerializedValue) -> Option<(String, u32, usize)> {
+    let name = predefined_engine_object_name(root)?;
+    let layer = root.unique_field_in_base_chain("m_Layer").ok()??;
+    let SerializedValue::U32(layer) = layer else {
+        return None;
+    };
+    let components = root.unique_field_in_base_chain("m_Component").ok()??;
+    let SerializedValue::Array(components) = components else {
+        return None;
+    };
+    Some((name, *layer, components.len()))
+}
+
 fn predefined_engine_texture_dimensions(root: &SerializedValue) -> Option<(i32, i32)> {
     let width = root.unique_field_in_base_chain("m_Width").ok()??;
     let height = root.unique_field_in_base_chain("m_Height").ok()??;
@@ -1450,6 +1464,21 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
             } else {
                 None
             };
+            let predefined_stored_engine_game_object = if context.engine_asset_source
+                == EngineAssetSource::StoredResourceData
+                && source_engine_guid.is_none()
+                && class_id == 1
+            {
+                payload
+                    .and_then(|payload| predefined_engine_game_object_key(&payload.root))
+                    .and_then(|(name, layer, component_count)| {
+                        context
+                            .engine_resource_data
+                            .and_then(|data| data.game_object_target(&name, layer, component_count))
+                    })
+            } else {
+                None
+            };
             let predefined_engine_target = predefined_engine_shader
                 .or(predefined_stored_engine_shader)
                 .or(predefined_engine_material)
@@ -1459,7 +1488,8 @@ pub(super) fn route_project_objects<'context, 'provider, 'graph>(
                 .or(predefined_engine_texture)
                 .or(predefined_stored_engine_mesh)
                 .or(predefined_engine_mesh)
-                .or(predefined_engine_text_asset);
+                .or(predefined_engine_text_asset)
+                .or(predefined_stored_engine_game_object);
             let engine_guid =
                 source_engine_guid.or_else(|| predefined_engine_target.map(|target| target.guid));
             let sprite_subasset = if class_id == crate::resources::sprite::SPRITE_CLASS_ID
@@ -2586,16 +2616,18 @@ fn font_collection_subasset<'object>(
 #[cfg(test)]
 mod tests {
     use super::{
-        predefined_engine_material_rows, predefined_engine_material_target,
-        predefined_engine_mesh_rows, predefined_engine_mesh_target,
-        predefined_engine_shader_target, predefined_engine_sprite_rows,
-        predefined_engine_sprite_target, predefined_engine_texture_rows,
-        predefined_engine_texture_target, project_object_name, select_engine_assets_band,
-        should_report_unported_texture_route, texture_array_project_route_supported,
+        predefined_engine_game_object_key, predefined_engine_material_rows,
+        predefined_engine_material_target, predefined_engine_mesh_rows,
+        predefined_engine_mesh_target, predefined_engine_shader_target,
+        predefined_engine_sprite_rows, predefined_engine_sprite_target,
+        predefined_engine_texture_rows, predefined_engine_texture_target, project_object_name,
+        select_engine_assets_band, should_report_unported_texture_route,
+        texture_array_project_route_supported,
     };
     use crate::export::project_workflow::SHADER_CLASS_ID;
     use crate::processing::scene_naming::SceneUnityVersion;
     use crate::resources::shader::{ParsedShaderForm, ParsedShaderProperty, ShaderView};
+    use crate::serialized_file::object::{SerializedFieldValue, SerializedValue};
 
     #[test]
     fn default_yaml_lightmaps_do_not_report_an_unported_image_route() {
@@ -2603,6 +2635,32 @@ mod tests {
         assert!(should_report_unported_texture_route(true, false, false));
         assert!(!should_report_unported_texture_route(true, true, false));
         assert!(!should_report_unported_texture_route(false, false, false));
+    }
+
+    #[test]
+    fn stored_gameobject_key_uses_name_uint32_layer_and_component_array_length() {
+        let root = SerializedValue::Struct(vec![
+            SerializedFieldValue {
+                name: "m_Name".to_owned(),
+                value: SerializedValue::StringBytes(b"FixtureObject".to_vec()),
+            },
+            SerializedFieldValue {
+                name: "m_Layer".to_owned(),
+                value: SerializedValue::U32(u32::MAX),
+            },
+            SerializedFieldValue {
+                name: "m_Component".to_owned(),
+                value: SerializedValue::Array(vec![
+                    SerializedValue::Struct(Vec::new()),
+                    SerializedValue::Struct(Vec::new()),
+                ]),
+            },
+        ]);
+
+        assert_eq!(
+            predefined_engine_game_object_key(&root),
+            Some(("FixtureObject".to_owned(), u32::MAX, 2))
+        );
     }
 
     #[test]
