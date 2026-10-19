@@ -9398,3 +9398,12 @@ These results do not pass the first-phase gate. The reference .NET solution buil
 - Regression `src/main_tests_06.rs::export_project_maps_unresolved_external_pptrs_to_source_missing_pointer` checks each distinct `MultiFilePPtrResolution`, all three complete exported YAML documents, and unchanged input bytes. The public bundle fixtures and source facts are recorded in `src/export/managed_reference_invalid_external_file_id_fixture.txt`.
 - Actions run [39183782973](https://github.com/cocokoishi/RustAssetRipper/actions/runs/39183782973) passed all eight jobs at product-code commit `160121b1f46d64504f20b0051f160972f9fa3004`: Windows/Linux tests and release builds, Ubuntu release-mode tests, Clippy on both platforms, changed-Rust formatting, ledger audit, and public repository hygiene.
 - No private inputs or outputs were used. This closes only the three unresolved external PPtr cases; `OBJ-REF-001` remains in progress.
+
+## 2026-10-18 - Same-bundle UnityFS duplicate paths
+
+- Fixture: `fixture-managed-reference-same-bundle-duplicate-001` (synthetic; Unity 2019.4.40f1).
+- Reference: frozen AssetRipper 2.0.0 source baseline; source copy has no recoverable Git commit metadata.
+- Behavior checked: duplicate UnityFS entry paths retain collection order and name-based resolution selects the first target collection. Nonduplicate UnityFS paths and other container formats still fail on collisions with pre-existing VFS files.
+- Comparison: source project export versus Rust project export; normalized root and target YAML, `.meta` semantics, and `AuxiliaryFiles/path_id_map.json` match. Only source-generated GUID and timestamp nondeterminism are normalized by the existing fixture comparison.
+- Regression tests: `export_project_preserves_first_duplicate_collection_in_same_bundle`; `single_unityfs_entry_keeps_strict_path_collision_behavior`.
+- Resolution commits: `a572d6a`, `87e92fe`. GitHub Actions run `39187105608` passed all jobs on Windows and Linux, including release-mode tests and artifacts.
