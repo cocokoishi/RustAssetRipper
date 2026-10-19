@@ -612,7 +612,7 @@ The frozen `EngineAssetsExporter.TryCreateCollection` does not export every Mate
 
 Fixed in animator_controller.rs and planning.rs: after the release collection is assembled, walk its emitted Unity YAML graph in source hierarchy order, assign the source pseudo-random IDs to non-root documents, remap local PPtrs/anchors, and reorder the documents. Unreachable child documents and ID collisions return errors. Rebuild/drop ordering and non-release output remain unchanged. Regression release_controller_documents_follow_source_hierarchy_ids_and_order pins the exact TriggerHoldDetect IDs, order, and local references.
 
-Fresh exports and the independent exact-decimal/BigInt static structure comparator cover 玉京烟霞 (8 controllers, 197 documents), 云栖仙府 (9 controllers), 松月竹庭 (9), 烟雨长亭 (9), private-world-002 (9), and private-world-004 (1). All compared controller documents map with no unmapped records or semantic differences. The full project audits still fail for separately recorded Avatar/material/opaque/reference-completeness differences; this finding closes only the controller sub-document defect. Unity import/runtime and UABEA were not run.
+Fresh exports and the independent exact-decimal/BigInt static structure comparator cover 玉京烟霞 (8 controllers, 197 documents), 云栖仙府 (9 controllers), private-world-002 (9), private-world-001 (9), private-world-002 (9), and private-world-004 (1). All compared controller documents map with no unmapped records or semantic differences. The full project audits still fail for separately recorded Avatar/material/opaque/reference-completeness differences; this finding closes only the controller sub-document defect. Unity import/runtime and UABEA were not run.
 
 ## DIFF-SPRITE-IMPORTER-FACTS-001 — sprite facts wired (fixed)
 
@@ -620,31 +620,31 @@ Fresh exports and the independent exact-decimal/BigInt static structure comparat
 
 ## DIFF-PATH-ID-MAP-FILE-ORDER-001 — multi-CAB file order fixed via source collection order
 
-玉京烟霞 (2 SerializedFiles) `AuxiliaryFiles/path_id_map.json`: per-file asset sets and within-file PathID sequences matched, but file order differed (source lists `sharedassets` first; Rust listed the main file first). UnityFS directory order (`unityfs_inventory`: sharedassets index 0, main index 1) is the source rule, and the workspace already tracks it as `source_collection_file_indices` (used by scene/prefab processing). `build_path_id_map` now iterates that canonical order instead of workspace insertion order. 玉京烟霞 r10 map is byte-exact (66,977/66,977); 松月竹庭 r17 zero-diff regression; full suite green. Single-file samples are unaffected by construction.
+玉京烟霞 (2 SerializedFiles) `AuxiliaryFiles/path_id_map.json`: per-file asset sets and within-file PathID sequences matched, but file order differed (source lists `sharedassets` first; Rust listed the main file first). UnityFS directory order (`unityfs_inventory`: sharedassets index 0, main index 1) is the source rule, and the workspace already tracks it as `source_collection_file_indices` (used by scene/prefab processing). `build_path_id_map` now iterates that canonical order instead of workspace insertion order. 玉京烟霞 r10 map is byte-exact (66,977/66,977); private-world-002 r17 zero-diff regression; full suite green. Single-file samples are unaffected by construction.
 
 ## DIFF-EDITOR-RESOURCE-86-121-001 — editor layout omitted
 
-New frozen Web outputs show 烟雨长亭 CustomRenderTexture(class86) missing four editor base fields and m_ImageContentsHash, and 玉京烟霞 Flare(class121) missing four editor base fields. Release bytes decode using the release TPK; export was retaining that layout instead of the frozen editor projection. Generic2022.3 class selection now includes86/121, with frozen-layout/export-Hash128 regressions. Full lib1701pass/1ignored,Clippy/release0. Final 烟雨长亭 r5 CustomRenderTexture is whole-file byte-exact with frozen source. First 玉京烟霞 three-way audit (r8) pairs class121 and matches class124 exactly; corrections committed as `ff865c2` with full monotonicity replays.
+New frozen Web outputs show private-world-001 CustomRenderTexture(class86) missing four editor base fields and m_ImageContentsHash, and 玉京烟霞 Flare(class121) missing four editor base fields. Release bytes decode using the release TPK; export was retaining that layout instead of the frozen editor projection. Generic2022.3 class selection now includes86/121, with frozen-layout/export-Hash128 regressions. Full lib1701pass/1ignored,Clippy/release0. Final private-world-001 r5 CustomRenderTexture is whole-file byte-exact with frozen source. First 玉京烟霞 three-way audit (r8) pairs class121 and matches class124 exactly; corrections committed as `ff865c2` with full monotonicity replays.
 
 ## DIFF-NATIVE-YAML-CLASS-NAME-001 — shared abstract root mislabeled
 
 玉京烟霞 FlareLayer(class124) release/editor TypeTrees root at Behaviour, whereas source generated asset.ClassName is FlareLayer. HaloLayer125 has the same rule at3.5/2022.3. Source TypeTreeObject deliberately derives its name from editor schema; a global class-ID relabel would violate that fallback. New optional native_class_name hint is supplied only for Generated objects and only substitutes abstract roots in project mode. Regression47/47 focused passes include known-ID fallback, unknown/script/explicit/importer preservation. Corrected 玉京烟霞 r8 verified (class124 exact). No comparator exclusions added.
 
-## DIFF-烟雨长亭-SOFT-PREDEFINED-CACHE-001 — pixel equality with sampler differences
+## DIFF-private-world-001-SOFT-PREDEFINED-CACHE-001 — pixel equality with sampler differences
 
-All 44 烟雨长亭 final-r5 materials were compared with exact parsed fields and GUID owners: 6 equivalent; 38 differ only at `_IgnoreCookieTexture`, frozen source builtin 10001 versus Rust's emitted `月照琉璃.png`. The actual Unity 2022.3.22f1 builtin PNG is byte/pixel-equal with Rust; bundle Texture2D PathID 1213616326460374869 Alpha8 base 16,384 bytes equals the builtin base mip. Input mipCount/colorSpace/streaming/filter/aniso are 1/0/1/2/1 versus builtin 8/1/0/1/0. Frozen cache matches `(name,width,height)` and ignores those settings; Rust preserves bundle/importer settings. This is a Rust-faithful representation difference, not proof of identical builtin binding or Unity runtime. Fresh 2026-10-13 source-Web/Rust r1 comparison again shows 38 class-21 differences; `月照琉璃.png` SHA-256 is still `SHA256_REDACTED`. Current project report and pixel/packet evidence are in `docs/validation-log.md`. Prior detailed reports: `target/completion-audit-烟雨长亭-r5-material-before.json`, `target/completion-audit-烟雨长亭-soft-fidelity-r5.json`; no product patch.
+All 44 private-world-001 final-r5 materials were compared with exact parsed fields and GUID owners: 6 equivalent; 38 differ only at `_IgnoreCookieTexture`, frozen source builtin 10001 versus Rust's emitted `月照琉璃.png`. The actual Unity 2022.3.22f1 builtin PNG is byte/pixel-equal with Rust; bundle Texture2D PathID 1213616326460374869 Alpha8 base 16,384 bytes equals the builtin base mip. Input mipCount/colorSpace/streaming/filter/aniso are 1/0/1/2/1 versus builtin 8/1/0/1/0. Frozen cache matches `(name,width,height)` and ignores those settings; Rust preserves bundle/importer settings. This is a Rust-faithful representation difference, not proof of identical builtin binding or Unity runtime. Fresh 2026-10-13 source-Web/Rust r1 comparison again shows 38 class-21 differences; `月照琉璃.png` SHA-256 is still `SHA256_REDACTED`. Current project report and pixel/packet evidence are in `docs/validation-log.md`. Prior detailed reports: `target/completion-audit-private-world-001-r5-material-before.json`, `target/completion-audit-private-world-001-soft-fidelity-r5.json`; no product patch.
 
 ## DIFF-PREFAB-IMPORTER-VERSION-BUNDLE-001 — required metadata defect, fixed
 
-Expanded 烟雨长亭 finalr5 whole-project audit reveals source PrefabImporter variantParentGUID0 plus actual root assetBundleName; Rust instead hardcodes unableToImportOnPreviousDomainReload0, omits variantParentGUID, and emits empty assetBundleName. Source PrefabExportCollection.CreateImporter selects the full export-version class and copies RootGameObject.AssetBundleName. Frozen TPK class468431735 at2022.3.22f1 has m_VariantParentGUID, confirmed by source runtime dump. Fixed in `dc959fe`: version-gated fields (`unableToImport` only <2020.1, `variantParentGUID` only >=2022.2, TPK-surveyed) plus Container-stamp bundle-name mirror (oracle PRE-empty/POST-stamped proof; 142 resolved via decoded workspace). 烟雨长亭 r7 + 松月竹庭 r16 prefab metas match source; all prefab-bearing samples replayed monotonically. Packages manifest is byte-exact since the CRLF fix; auxiliary path-map mismatch remains open separately.
+Expanded private-world-001 finalr5 whole-project audit reveals source PrefabImporter variantParentGUID0 plus actual root assetBundleName; Rust instead hardcodes unableToImportOnPreviousDomainReload0, omits variantParentGUID, and emits empty assetBundleName. Source PrefabExportCollection.CreateImporter selects the full export-version class and copies RootGameObject.AssetBundleName. Frozen TPK class468431735 at2022.3.22f1 has m_VariantParentGUID, confirmed by source runtime dump. Fixed in `dc959fe`: version-gated fields (`unableToImport` only <2020.1, `variantParentGUID` only >=2022.2, TPK-surveyed) plus Container-stamp bundle-name mirror (oracle PRE-empty/POST-stamped proof; 142 resolved via decoded workspace). private-world-001 r7 + private-world-002 r16 prefab metas match source; all prefab-bearing samples replayed monotonically. Packages manifest is byte-exact since the CRLF fix; auxiliary path-map mismatch remains open separately.
 
 ## DIFF-REFERENCE-WEB-EXPORT-001 — missing CLI locally bypassed
 
-Frozen GUI.Web Commands routes accept `/LoadFile` and `/Export/UnityProject` forms. The existing isolated GUI.Free build produced fresh 玉京烟霞/烟雨长亭 projects via loopback without changing the baseline. `tools/export-reference-web.ps1` captures hashes/settings/logs, refuses existing destinations and stops its own server. Both exit0; comparison reveals new class86/121/124 gaps. “No CLI, blocked” is superseded. See newest validation-log evidence.
+Frozen GUI.Web Commands routes accept `/LoadFile` and `/Export/UnityProject` forms. The existing isolated GUI.Free build produced fresh 玉京烟霞/private-world-001 projects via loopback without changing the baseline. `tools/export-reference-web.ps1` captures hashes/settings/logs, refuses existing destinations and stops its own server. Both exit0; comparison reveals new class86/121/124 gaps. “No CLI, blocked” is superseded. See newest validation-log evidence.
 
 ## DIFF-VALIDATION-REFERENCE-SCOPE-001 — local IDs and failure exits
 
-Old checker matched only full GUID PPtrs. Missing local777 falsely reported zero dangling; dangling GUIDs still exited0. New checker validates local scope, YAML IDs, duplicates, owner existence and malformed syntax; JSON preserves issues. Thirteen contracts pass. Builtins/imported IDs remain PARTIAL; `-RequireComplete` exits2. Actual 烟雨长亭/云栖仙府/玉京烟霞 existence results have zero issues, with all incomplete target categories retained. No complete reference acceptance inferred.
+Old checker matched only full GUID PPtrs. Missing local777 falsely reported zero dangling; dangling GUIDs still exited0. New checker validates local scope, YAML IDs, duplicates, owner existence and malformed syntax; JSON preserves issues. Thirteen contracts pass. Builtins/imported IDs remain PARTIAL; `-RequireComplete` exits2. Actual private-world-001/云栖仙府/玉京烟霞 existence results have zero issues, with all incomplete target categories retained. No complete reference acceptance inferred.
 
 ## DIFF-VALIDATION-PROJECT-SCOPE-001 — importer/project omission
 
@@ -2846,7 +2846,7 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Frozen source | `EngineAssetsExporter.TryCreateCollection` first checks engine collection names, then calls `PredefinedAssetCache.Contains(asset)`. For `IMaterial`, the cache key is the exact material name and resolved shader name; `TryAdd(Material)` stores the engine TPK PathID/GUID. The source `EngineAssetsTpk` entry `2022.3.11f1` has `ExtraResources[10303] = Material("Default-Material", "Standard")`, with FGUID. |
 | Input and before-fix evidence | private-world-001` (SHA-256 `SHA256_REDACTED`) contains a class-21 `Default-Material` whose `m_Shader` resolves to `Standard`. The first Rust project export wrote a standalone `Assets/private-world-003`; the generated Cube MeshRenderer pointed to its generated GUID/fileID. The frozen source project omitted that asset and pointed to builtin-extra PathID 10303. |
 | Rust change | `predefined_materials_2022_3_11.tsv` stores the Material identity keys and resource targets. `object_routing.rs` resolves `m_Shader` through the multi-file reference graph and redirects only an exact `(name, shader name)` match for Unity 2022.3 patch 11 or later. The redirect retains the TPK PathID and EGUID/FGUID; no sample path, hash, or object PathID is used to select the rule. |
-| Verification | The focused catalog test passes. A fresh Rust export of the unchanged 松月竹庭 input omits `青瓷凝光.mat`; the Cube renderer PPtr is exactly `{fileID: 10303, guid: GUID_REDACTED, type: 0}`, matching frozen source. Whole-project replay reports 114/114 matching input object rows and 1788/1788 YAML documents. The dedicated BlendTree comparison reports 3/3 documents, 37/37 children, and zero differences. |
+| Verification | The focused catalog test passes. A fresh Rust export of the unchanged private-world-002 input omits `青瓷凝光.mat`; the Cube renderer PPtr is exactly `{fileID: 10303, guid: GUID_REDACTED, type: 0}`, matching frozen source. Whole-project replay reports 114/114 matching input object rows and 1788/1788 YAML documents. The dedicated BlendTree comparison reports 3/3 documents, 37/37 children, and zero differences. |
 | Remaining scope | This verifies only the 15 Material identity rows in the source 2022.3.11f1 table. Other TPK versions and other predefined asset classes remain open. The whole-project report still has 4/5 path-count differences and caps both reference-difference lists at 100 entries; Unity Editor import/runtime checks are unavailable. The separate unnamed AutoDresser AnimatorController runtime blocker remains unresolved, so the sample and overall product are not accepted. No UABEA inspection was run. |
 
 ## DIFF-REAL-private-world-002-SCENE-EDITOR-FORMAT-001 — Unity 2022.3 prefab scene-object YAML
@@ -3036,14 +3036,14 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Verification | r3 audit: 54/84/153 exact, 96 semGUID; 231/231 PNGs pixel-identical; zero rust-only files; `export::` 513/513. |
 | Limits | Controller placement families, 246 source-only files, 243 opaque files stay open. Unity Editor import/runtime and UABEA were not run. |
 
-## DIFF-玉京烟霞-BREADTH-001 - First 玉京烟霞/烟雨长亭 replays with renderer and Flare routes
+## DIFF-玉京烟霞-BREADTH-001 - First 玉京烟霞/private-world-001 replays with renderer and Flare routes
 
 | Field | Finding |
 |---|---|
 | Input and reference | `松月云庭图` (2022.3.22f1, 34,150 objects), private-world-001` (5,829 objects); TPK editor-base probes for 120/212/123/124. No frozen source exports exist (no CLI path — blocked lane). |
 | Before-fix difference | 120/212/123/124 exported release-shaped (missing base; zeroed renderer defaults on 120/212). |
 | Rust change | 120/212 join the editor selector, both regression lists, scene-object dispatch, and renderer arm; 123/124 join the selector and both lists. |
-| Verification | r3 docs carry base fields + Unity defaults; `export::` 514/514; 烟雨长亭 census clean (159 = EditorSettings). |
+| Verification | r3 docs carry base fields + Unity defaults; `export::` 514/514; private-world-001 census clean (159 = EditorSettings). |
 | Limits | Differential vs source blocked on frozen exports. Unity Editor import/runtime and UABEA were not run. |
 
 ## DIFF-YAML-RENDERER-RULE-001 - Universal IRenderer editor defaults
@@ -3054,7 +3054,7 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Before-fix difference | Rust scoped the overwrite to 23/137/199; every other renderer kept zeros. |
 | Rust change | 96 joins the renderer arm and scene-object dispatch; direct test pins all six defaults. |
 | Verification | 96 at semGUID in r3; 120/212/123/124 structurally verified in 玉京烟霞 r3; unit test green; full suite green. |
-| Limits | Frozen 玉京烟霞/烟雨长亭 source exports blocked (no CLI path in frozen app). Unity Editor import/runtime and UABEA were not run. |
+| Limits | Frozen 玉京烟霞/private-world-001 source exports blocked (no CLI path in frozen app). Unity Editor import/runtime and UABEA were not run. |
 
 ## DIFF-private-world-002-MATERIAL-BUILTIN-001 - Bundle texture preserved vs builtin remap
 
@@ -3073,7 +3073,7 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Input and reference | Latest exports of all six samples; `.meta` guid maps; frozen scene-ID convention. |
 | Before-fix difference | No product change — new verification lane. |
 | Rust change | Committed `tools/check-project-references.ps1`. |
-| Verification | 61,223 PPtrs resolve with zero dangling across private-world-004/private-world-002/云栖仙府/玉京烟霞/烟雨长亭/松月竹庭. |
+| Verification | 61,223 PPtrs resolve with zero dangling across private-world-004/private-world-002/云栖仙府/玉京烟霞/private-world-001/private-world-002. |
 | Limits | Static evidence only; Unity import behavior unobserved. Unity Editor import/runtime and UABEA were not run. |
 
 ## DIFF-private-world-002-CONTROLLER-001 - AnimatorController shared-asset claiming and cloning
@@ -3093,7 +3093,7 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Input and reference | 20 private-world-004 dummy shaders (ASE/poiyomi/Hidden); TypeTree probes (5.6/2019.4/2022.3) all showing `float m_DefValue[0..3]`; frozen dummy property rendering. |
 | Before-fix difference | Rust read fictional `m_DefValue_0_` fields, kept zeros, and rendered `Range(0, 0) = 0`. |
 | Rust change | Read the literal bracket names; documented the serialization-vs-generated sanitization rule; new `_Wind` regression test. |
-| Verification | `AE_Leaves.shader` SHA-256-identical; all 20 shaders byte-identical in r23; all 8 松月竹庭 lilToon shaders byte-identical in r12; `resources::shader` 16/16; `export::` 514/514. |
+| Verification | `AE_Leaves.shader` SHA-256-identical; all 20 shaders byte-identical in r23; all 8 private-world-002 lilToon shaders byte-identical in r12; `resources::shader` 16/16; `export::` 514/514. |
 | Limits | None known. Unity Editor import/runtime and UABEA were not run. |
 
 ## DIFF-OPAQUE-OGG-FRAMING-001 - Ogg page framing with identical packet streams
@@ -3136,14 +3136,14 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Verification | Bit-exact regression test on Cookie vectors; private-world-004 r21 class 213 at 10 semGUID with zero diffs; `export::` 512/512; Clippy clean. A casing bug (`TextureRect` vs real `textureRect`) failed the first replay loudly and was fixed with real node names in both code and fixture. |
 | Limits | Atlas-packed sprites (non-null atlas) are an explicit error, unvalidated. Unity Editor import/runtime and UABEA were not run. |
 
-## DIFF-松月竹庭-PATHS-001 - Export ClassName overrides and bundle-container original directories
+## DIFF-private-world-002-PATHS-001 - Export ClassName overrides and bundle-container original directories
 
 | Field | Finding |
 |---|---|
 | Input and reference | private-world-001` (Unity 2022.3.11f1); frozen `Pass110` overrides, `IUnityObjectBase.GetBestDirectory`, `OriginalPathProcessor`, `CreatePrefabForRoot`, `PrefabExportCollection`; isolated reflection probe. |
 | Differences | `AvatarMask_319/` vs `AvatarMask/` (enum spelling vs `OriginalName`); root prefab under `GameObject/` vs `Assets/` root (unwired container mapping). |
 | Rust change | `class_original_name` override table (238/258/319/329, reflection ground truth); `bundle_container_original_directories` (DirectExport `FileID == 0` container mapping, source processor order) wired into routing and prefab planning. |
-| Verification | Unit tests for both rules; 松月竹庭 r9 replay (all 356 files pair, zero path residuals); private-world-004 r14+ scene parity held; full suite green. |
+| Verification | Unit tests for both rules; private-world-002 r9 replay (all 356 files pair, zero path residuals); private-world-004 r14+ scene parity held; full suite green. |
 | Limits | ResourceManager-container mapping, GroupByBundleName mode, shader override paths, lowercasing restoration, and original name/extension plumbing stay open. Unity Editor import/runtime and UABEA were not run. |
 
 ## DIFF-YAML-FLOAT-TIE-002 - Exact decimal tie-break for shortest-float printing
@@ -3153,7 +3153,7 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Input and reference | Frozen `.NET Single.ToString` shortest-repr tie-to-even rule; `Face (merged)云岫藏珍.asset` mesh vertices (`2^-12` printing `...463` instead of `...462`). |
 | Before-fix difference | Round-10 fix compared neighbors by `f64` distance, whose rounding noise flips exact ties. |
 | Rust change | Exact comparison of `2*value` against the neighbor digit sum as terminating decimals (bounded string arithmetic, no bigints); off-by-one caught by the existing probe fixture during development. |
-| Verification | 28-row fixture, both tie tests, new power-of-two vectors; `export::` 511/511; private-world-004 r20 mesh 93/93 exact; 松月竹庭 r11 monotonicity. |
+| Verification | 28-row fixture, both tie tests, new power-of-two vectors; `export::` 511/511; private-world-004 r20 mesh 93/93 exact; private-world-002 r11 monotonicity. |
 | Limits | `f64` tie behavior remains unprobed. Unity Editor import/runtime and UABEA were not run. |
 
 ## DIFF-YAML-POINTER-TYPE-001 - Binary-exporter pointer type for shader references
@@ -3186,7 +3186,7 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Verification | New conversion test; full suite green; private-world-004 r20 sprite family halved (10 diff → 5 semGUID + 5 diff). |
 | Limits | Unity Editor import/runtime and UABEA were not run. |
 
-## DIFF-松月竹庭-BREADTH-001 - Stable-identity breadth audit: export-ID family, avatar style proof, path and opaque triage
+## DIFF-private-world-002-BREADTH-001 - Stable-identity breadth audit: export-ID family, avatar style proof, path and opaque triage
 
 | Field | Finding |
 |---|---|
@@ -3205,7 +3205,7 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Input and reference | `private-world-004` (Unity 2022.3.6f1), `Assets/private-world-003 REDACTED_AUDIO.playable` child documents; frozen `AssetsExportCollection.GenerateExportID` (`AssetRipper.Export.UnityProjects/Project/AssetsExportCollection.cs` line 53-56) and `ExportIdHandler.GetPseudoRandomExportId` (class-114 prefix plus `XxHash64(seed) mod 10^15`, seed = `m_exportIDs.Count`). |
 | Before-fix difference | Source timeline children carry `114709254077376921`, `114730242686860875`, ... while Rust planned sequential `11400001`, `11400002`, ... via `get_main_export_id(114, n+1)`. Scene binding keys/values/order/targets otherwise matched, so only the key fileIDs (and the playable asset's own document IDs) diverged. |
 | Rust change | `prepare_scriptable_object_groups` plans each child with `get_pseudo_random_export_id(114, zero_based_insertion_seed, child_collection_version)`, threading the workspace through the export context with explicit version errors. Covers TimelineAsset and PostProcessProfile groups generically. |
-| Verification | Scratch reproduction of the first four frozen IDs from the repo's own hash routine before editing; new 4-vector contract test; `export::ids::` 5/5; `export::` 505/505; warnings-denied Clippy; release build; r13 replay (timeline IDs exact, timeline file GUID-normalized identical, scene 49,862 exact + 21,375 semGUID with zero residuals) and the 松月竹庭 r8 regression replay (identical to r7 on every headline metric), all recorded in the validation-log entry above. |
+| Verification | Scratch reproduction of the first four frozen IDs from the repo's own hash routine before editing; new 4-vector contract test; `export::ids::` 5/5; `export::` 505/505; warnings-denied Clippy; release build; r13 replay (timeline IDs exact, timeline file GUID-normalized identical, scene 49,862 exact + 21,375 semGUID with zero residuals) and the private-world-002 r8 regression replay (identical to r7 on every headline metric), all recorded in the validation-log entry above. |
 | Limits | Unity Editor import/runtime and UABEA were not run. The world scene surface is at parity; product acceptance remains open. |
 
 ## DIFF-REAL-private-world-004-LIGHTING-001 - LightingSettings editor defaults and scene-subfolder paths
@@ -3236,7 +3236,7 @@ The format reference is [RFC 7932 §9.2](https://www.rfc-editor.org/rfc/rfc7932.
 | Before-fix difference | Rust r8 exported a stray `青瓷凝光.mat` and pointed one class-23 and one class-114 document at it (fileID 2100000, generated GUID, type 2); the frozen source points both at builtin-extra fileID 10303/FGUID and emits no such asset. Cause: `predefined_engine_material_target` applied its table only for `2022.3 patch >= 11`, while the shader table applied unconditionally to every version. |
 | Source behavior (probed) | The embedded blob carries 114 ordered band keys. `bandjson 2022.3.6f1` selects `2022.2.15f1`; `bandjson 2022.3.22f1` selects `2022.3.11f1` — the same nearest-key-at-or-below rule as the frozen selector, verified live. Projecting both bands to the committed TSV row format reproduces the committed material rows exactly from the 2022.2.15f1 band (15/15) and the committed shader rows exactly from the 2022.3.11f1 band (202/202). The two bands' material rows are mutually byte-identical; shader rows differ in 7 instances (fileID 111 properties; fileIDs 112/114/15313/15314/15315 only in 2022.3.11f1). DefaultResources pathID-to-type rows are identical, so the class-ID validation table needs no band split. |
 | Rust change | `select_engine_assets_band` ports the exact source band selection over embedded `engine_asset_bands.tsv` (ordered with `FactoryUnityVersion::source_order_bits`, the frozen `GetBits` order). Material/Shader lookups read band-keyed tables and return `None` for unprobed bands. Old version-named TSVs are replaced by band-keyed fixtures; the probe project is committed (its `bin`/`obj` outputs stay ignored). The shader reverse-name path stays band-independent with justification. |
-| Verification | Routing tests, `export::` suite, warnings-denied Clippy, release build, and the r9 replay with per-class byte-exact and GUID-normalized audits are recorded in the validation-log entry above, together with the 松月竹庭 r7 regression replay (Cube pointer preserved, 纹理资源 byte-identical, source-vs-r7 comparison identical-or-better than r6 on every metric). |
+| Verification | Routing tests, `export::` suite, warnings-denied Clippy, release build, and the r9 replay with per-class byte-exact and GUID-normalized audits are recorded in the validation-log entry above, together with the private-world-002 r7 regression replay (Cube pointer preserved, 纹理资源 byte-identical, source-vs-r7 comparison identical-or-better than r6 on every metric). |
 | Limits | Only the 2022.2.15f1 and 2022.3.11f1 bands have embedded tables; versions selecting other bands get no predefined redirect (documented debt, fail-open to normal export). Non-null `m_NavMeshData`, float last-digit prints, the lighting path, and PlayableDirector bindings remain open. Unity Editor import/runtime and UABEA were not run. |
 
 
@@ -3628,3 +3628,11 @@ invisible until a real sample disagrees.
 | Regression | `src/main_tests_06.rs::export_project_resolves_nested_array_pointers_to_separate_target_files` checks requester and target file identities, TypeTree and registry identity, both dependency outcomes, ordered graph paths and object identities, exported references, all three YAML documents, distinct target GUIDs, and unchanged input bytes. |
 | CI and artifact replay | Actions run [`39170870140`](https://github.com/cocokoishi/RustAssetRipper/actions/runs/39170870140) passed all eight jobs at product-code revision `4dd889f0b67793e78c2037752c3929af53390990`; the Windows workspace log confirms the regression passed. Its Windows release artifact ran `export-project` on the committed fixture and loaded three SerializedFiles / three objects. The 900-byte root YAML matched the source golden after replacing only the two generated target GUIDs and normalizing line endings and trailing whitespace. Each distinct GUID appeared once in the root. Target YAMLs matched their source goldens at 362 and 371 bytes after line-ending and trailing-whitespace normalization. The input remained unchanged. |
 | Scope | This verifies array entries using different external-table indices to target objects in different nested SerializedFiles. Other dependency outcomes, version branches, injected engine-resource cache behavior, remaining object export mappings, and the rest of `OBJ-REF-001` remain open. No private input or output was used. |
+
+
+## DIFF-ENGINE-PREDEFINED-GAMEOBJECT-PREFAB-CONFLICT-001 - cached GameObject collides with processed Prefab membership
+
+- **Fixture and reference:** The tracked synthetic Unity 2017.4 input `src/export/legacy_prefab_2017_4_input.unity` loads a GameObject named `LegacyRoot` with layer 0 and one Transform component. Frozen AssetRipper exports its Prefab when no matching `EngineResourceData` entry is present.
+- **First semantic divergence:** Adding a source-shaped `DefaultResources` GameObject entry keyed by the same name, layer, and component count makes frozen AssetRipper fail while `ProjectAssetContainer` registers collection membership: the GameObject is already in the processed Prefab collection and the same key is added again. This is a duplicate-collection failure, not a failed key lookup.
+- **Rust behavior:** `route_project_objects` checks a cached GameObject match before skipping Prefab members and returns a project-export error for this collision. `web_project_export_reports_cached_gameobject_prefab_collection_conflict` exercises the production WebState export with the same public fixture and source-shaped setting. The regression passed in Actions run `39181385497` on commit `096f1a4`.
+- **Scope:** The comparison establishes the matching key and this Prefab-overlap failure category only. It does not establish exact .NET exception text/stack, Scene membership behavior, unmatched entries, or a successful cached GameObject redirect.
