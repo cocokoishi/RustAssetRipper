@@ -9423,3 +9423,11 @@ These results do not pass the first-phase gate. The reference .NET solution buil
 - Frozen AssetRipper 2.0.0 source probe produced the committed fallback rows. NavMesh resolves to NavMeshObsolete, with the 16-byte body fully consumed. PlayerSettings resolves to 165 fields over 636 bytes; selected boolean, string, PPtr, and array defaults match.
 - Rust regression factory_differential_replays_every_reference_case passed locally and on Actions. Commit 24e8f29; run [39191177807](https://github.com/cocokoishi/RustAssetRipper/actions/runs/39191177807) passed all eight jobs.
 - The bounded 2022.3 TPK sweep through class ID 10,000 found no other missing-generated entries. SER-TT-ABSENT-001 remains in progress; no feature status is promoted by these two cases.
+
+## 2026-10-18 — cached GameObject collision in a recognized Scene
+
+- Fixture: `engine_resource_gameobject_scene_2017_4_fixture.txt`, synthetic Unity 2017.4.40f1 format 17; one GameObject + valid Transform + level manager. The matching stored cache key is name/layer/component count.
+- Frozen AssetRipper 2.0.0 source probe: Debug and Release both recognize one Scene and zero PrefabInstances, then fail project collection registration with duplicate-membership `ArgumentException` (source-specific text is recorded in the fixture).
+- Rust change: check matching stored GameObject cache keys for Scene membership as well as Prefab membership before the normal Scene-member skip.
+- Regression: the Scene, Prefab, and non-Scene `.assets` cached-GameObject Web tests pass locally (3/3). Rust formatting and `git diff --check` pass. Actions run [`39195134998`](https://github.com/cocokoishi/RustAssetRipper/actions/runs/39195134998) passed all eight jobs at code commit `256205b`, including Windows/Linux tests and release builds, Ubuntu release-mode tests, Clippy on both platforms, formatting, ledger, and repository hygiene.
+- Python is unavailable in the local Windows image; the PowerShell equivalent of the public repository metadata check passed after the commit (13,320 Git object entries, no private paths or oversized blobs). No private sample data was used.

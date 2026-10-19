@@ -3672,3 +3672,12 @@ invisible until a real sample disagrees.
 - Frozen source result: class 194 materializes as NavMeshObsolete, consumes its exact 16-byte payload, and retains m_Name=NavMeshData. Class 129 materializes as PlayerSettings; the source TPK fallback contains 165 fields and consumes all 636 bytes. The probe confirmed AndroidProfiler=false, empty company/product names, a null default-cursor PPtr, and an empty splash-logo array.
 - Rust result: factory_differential_replays_every_reference_case checks the no-TypeTree classification, class IDs, fallback names, exact consumed lengths, empty tails, and the selected PlayerSettings values against the committed source-authored fixture rows. The focused test passed locally; Actions run 39191177807 passed all eight jobs.
 - A frozen TPK sweep through class ID 10,000 found these two missing-generated classes in the 2022.3 band; both now have regression coverage. This closes no ledger row: SER-TT-ABSENT-001 remains in progress for other unknown, unreadable, and type-recovery behaviors.
+
+## DIFF-ENGINE-PREDEFINED-GAMEOBJECT-SCENE-CONFLICT-001 — matching cache entries collide with Scene membership
+
+- Fixture: `engine_resource_gameobject_scene_2017_4_fixture.txt`, a source-authored synthetic Unity 2017.4.40f1 SerializedFile (format 17) with one GameObject, one valid Transform, and one level manager. Its matching `EngineResourceData.DefaultResources` key is `LegacyRoot`, layer 0, one component.
+- Frozen source: `SceneDefinitionProcessor` recognizes one Scene; `PrefabProcessor` assigns the GameObject to that Scene hierarchy and creates no PrefabInstance. The final EngineAssets cache route also creates a `SingleRedirectExportCollection` for the matching key.
+- Debug result: `ArgumentException`, `Asset LegacyRoot is already added by SingleRedirectExportCollection` during project collection registration.
+- Release result: `ArgumentException`, `An item with the same key has already been added. Key: LegacyRoot` during registration.
+- Rust: `route_project_objects` checks matching stored GameObject cache keys before skipping Scene members and reports the Scene collection conflict. `web_project_export_reports_cached_gameobject_scene_collection_conflict` joins this fixture with existing Prefab and non-Scene `.assets` regressions; all three passed locally.
+- Scope: Unity 2017.4.40f1 stored-cache collision routing only. Other versions, cache misses, successful redirects, and exact exception details remain open. No private input or output was used.
