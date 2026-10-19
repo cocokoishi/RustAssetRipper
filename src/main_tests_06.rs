@@ -145,9 +145,14 @@
     #[test]
     fn export_project_resolves_tpk_injected_builtin_extra_pointer() {
         let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
-        let fixture = include_str!("export/managed_reference_builtin_extra_tpk_injection_fixture.txt");
-        assert!(fixture.contains("TPK_BAND|2019.3.0b9|ExtraResources|10303|Material|Default-Material"));
-        assert!(fixture.contains("INJECTED_COLLECTION|unity_builtin_extra|InjectedEngineCollection"));
+        let fixture =
+            include_str!("export/managed_reference_builtin_extra_tpk_injection_fixture.txt");
+        assert!(
+            fixture.contains("TPK_BAND|2019.3.0b9|ExtraResources|10303|Material|Default-Material")
+        );
+        assert!(
+            fixture.contains("INJECTED_COLLECTION|unity_builtin_extra|InjectedEngineCollection")
+        );
         assert!(fixture.contains("TARGET|Material|10303|Default-Material"));
         let input_hex = fixture
             .lines()
@@ -195,9 +200,8 @@
             "source and Rust root YAML match exactly"
         );
         let yaml = String::from_utf8(rust_yaml).expect("root YAML is UTF-8");
-        assert!(
-            yaml.contains("m_Asset: {fileID: 10303, guid: 0000000000000000f000000000000000, type: 0}")
-        );
+        assert!(yaml
+            .contains("m_Asset: {fileID: 10303, guid: 0000000000000000f000000000000000, type: 0}"));
         assert!(
             !output_root
                 .join("Assets/Material/Default-Material.mat")
