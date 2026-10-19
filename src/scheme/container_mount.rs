@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::io::{BufReader, Seek, SeekFrom, Write};
 use std::path::Path;
 
@@ -579,7 +580,7 @@ fn mount_unityraw_stream_tree_at(
         )
     })?;
     for (index, entry) in entries.iter().enumerate() {
-        let virtual_path = checked_container_entry_path_with_duplicates(
+        let virtual_path = checked_container_entry_path(
             state.filesystem,
             context.destination_root,
             &entry.path,
@@ -781,7 +782,7 @@ fn mount_unityweb_stream_tree_at(
         |state| {
             preflight_tree_entry_count(entries.len(), state)?;
             for (index, entry) in entries.iter().enumerate() {
-                let virtual_path = checked_container_entry_path_with_duplicates(
+                let virtual_path = checked_container_entry_path(
                     state.filesystem,
                     context.destination_root,
                     &entry.path,
@@ -1026,7 +1027,7 @@ fn mount_webdata_stream_tree_at(
         read_webdata_directory(source, context.source_name, scheme_limits, &state.report)?;
     preflight_tree_entry_count(directory.entries.len(), state)?;
     for (index, entry) in directory.entries.iter().enumerate() {
-        let virtual_path = checked_container_entry_path_with_duplicates(
+        let virtual_path = checked_container_entry_path(
             state.filesystem,
             context.destination_root,
             &entry.name,
@@ -1255,12 +1256,18 @@ fn mount_unityfs_stream_tree_at(
         )
     })?;
     preflight_tree_entry_count(bundle.nodes.len(), state)?;
+    let duplicate_path_counts = unityfs_entry_path_counts(
+        bundle.nodes.iter().map(|node| node.path.as_str()),
+        &state.report,
+    )?;
     for (index, node) in bundle.nodes.iter().enumerate() {
-        let virtual_path = checked_container_entry_path_with_duplicates(
+        let is_duplicate = duplicate_path_counts[node.path.as_str()] > 1;
+        let virtual_path = checked_duplicate_unityfs_entry_path(
             state.filesystem,
             context.destination_root,
             &node.path,
             index,
+            is_duplicate,
             &state.report,
         )?;
         let (entry_stream, source_backed) = match bundle.read_entry_with_source_backing(index) {
@@ -1843,12 +1850,18 @@ impl<'a> DispatchedFile<'a> {
             ParsedFile::UnityFs(bundle) => {
                 preflight_entry_count(bundle.nodes.len(), limits, &report)?;
                 preflight_output_sizes(bundle.nodes.iter().map(|node| node.size), limits, &report)?;
+                let duplicate_path_counts = unityfs_entry_path_counts(
+                    bundle.nodes.iter().map(|node| node.path.as_str()),
+                    &report,
+                )?;
                 for (index, node) in bundle.nodes.iter().enumerate() {
-                    let path = checked_container_entry_path_with_duplicates(
+                    let is_duplicate = duplicate_path_counts[node.path.as_str()] > 1;
+                    let path = checked_duplicate_unityfs_entry_path(
                         filesystem,
                         destination_root,
                         node.path.as_str(),
                         index,
+                        is_duplicate,
                         &report,
                     )?;
                     let bytes = match bundle.read_entry(index) {
@@ -2018,12 +2031,18 @@ impl<'a> DispatchedFile<'a> {
         match parsed {
             ParsedFile::UnityFs(bundle) => {
                 preflight_tree_entry_count(bundle.nodes.len(), state)?;
+                let duplicate_path_counts = unityfs_entry_path_counts(
+                    bundle.nodes.iter().map(|node| node.path.as_str()),
+                    &state.report,
+                )?;
                 for (index, node) in bundle.nodes.iter().enumerate() {
-                    let path = checked_container_entry_path_with_duplicates(
+                    let is_duplicate = duplicate_path_counts[node.path.as_str()] > 1;
+                    let path = checked_duplicate_unityfs_entry_path(
                         state.filesystem,
                         destination_root,
                         node.path.as_str(),
                         index,
+                        is_duplicate,
                         &state.report,
                     )?;
                     let bytes = match bundle.read_entry(index) {
@@ -2066,7 +2085,7 @@ impl<'a> DispatchedFile<'a> {
             ParsedFile::RawWeb(bundle) => {
                 preflight_tree_entry_count(bundle.entries.len(), state)?;
                 for (index, entry) in bundle.entries.iter().enumerate() {
-                    let path = checked_container_entry_path_with_duplicates(
+                    let path = checked_container_entry_path(
                         state.filesystem,
                         destination_root,
                         entry.path.as_str(),
@@ -2106,7 +2125,7 @@ impl<'a> DispatchedFile<'a> {
             ParsedFile::WebData(web_file) => {
                 preflight_tree_entry_count(web_file.entries.len(), state)?;
                 for (index, entry) in web_file.entries.iter().enumerate() {
-                    let path = checked_container_entry_path_with_duplicates(
+                    let path = checked_container_entry_path(
                         state.filesystem,
                         destination_root,
                         entry.name.as_str(),
@@ -2301,7 +2320,7 @@ fn mount_container_entry<'a>(
     limits: ContainerMountLimits,
     report: &mut ContainerMountReport,
 ) -> Result<(), ContainerMountError> {
-    let path = checked_container_entry_path_with_duplicates(
+    let path = checked_container_entry_path(
         filesystem,
         destination_root,
         entry_name,
@@ -2413,11 +2432,44 @@ pub(super) fn checked_container_entry_path(
     })
 }
 
-pub(super) fn checked_container_entry_path_with_duplicates(
+fn unityfs_entry_path_counts<'a>(
+    paths: impl Iterator<Item = &'a str>,
+    report: &ContainerMountReport,
+) -> Result<HashMap<&'a str, usize>, ContainerMountError> {
+    let mut counts: HashMap<&'a str, usize> = HashMap::new();
+    for path in paths {
+        if let Some(count) = counts.get_mut(path) {
+            *count = count.checked_add(1).ok_or_else(|| {
+                ContainerMountError::new(
+                    report.clone(),
+                    ContainerMountErrorKind::EntryCountOverflow,
+                )
+            })?;
+        } else {
+            let requested = counts.len().checked_add(1).ok_or_else(|| {
+                ContainerMountError::new(
+                    report.clone(),
+                    ContainerMountErrorKind::EntryCountOverflow,
+                )
+            })?;
+            counts.try_reserve(1).map_err(|_| {
+                ContainerMountError::new(
+                    report.clone(),
+                    ContainerMountErrorKind::DuplicateEntryPathCountAllocationFailed { requested },
+                )
+            })?;
+            counts.insert(path, 1);
+        }
+    }
+    Ok(counts)
+}
+
+fn checked_duplicate_unityfs_entry_path(
     filesystem: &VirtualFileSystem,
     destination_root: Option<&str>,
     entry_name: &str,
     entry_index: usize,
+    is_duplicate: bool,
     report: &ContainerMountReport,
 ) -> Result<String, ContainerMountError> {
     let path = checked_container_entry_path(
@@ -2427,18 +2479,30 @@ pub(super) fn checked_container_entry_path_with_duplicates(
         entry_index,
         report,
     )?;
-    let path_is_taken = |candidate: &str| -> Result<bool, ContainerMountError> {
-        let file_exists = filesystem.file_exists(Some(candidate)).map_err(|source| {
+    if !is_duplicate {
+        return Ok(path);
+    }
+
+    let file_exists = |path: &str| -> Result<bool, ContainerMountError> {
+        filesystem.file_exists(Some(path)).map_err(|source| {
             ContainerMountError::new(
                 report.clone(),
                 ContainerMountErrorKind::FileSystem {
                     entry_index,
-                    path: candidate.to_owned(),
+                    path: path.to_owned(),
                     source,
                 },
             )
         })?;
-        if file_exists {
+        Ok(file_exists)
+    };
+    let path_is_taken = |candidate: &str| -> Result<bool, ContainerMountError> {
+        for (separator_index, _) in candidate.match_indices('/') {
+            if separator_index > 0 && file_exists(&candidate[..separator_index])? {
+                return Ok(true);
+            }
+        }
+        if file_exists(candidate)? {
             return Ok(true);
         }
         filesystem
@@ -2454,13 +2518,8 @@ pub(super) fn checked_container_entry_path_with_duplicates(
                 )
             })
     };
-    if !path_is_taken(&path)? {
-        return Ok(path);
-    }
-
-    // A source container may legally expose multiple collections with the same name. Keep the
-    // source entry and collection order metadata, but give duplicate entries an internal VFS path
-    // so later entries do not overwrite or abort earlier collections.
+    // UnityFS can expose multiple collections with the same path. Keep each entry's collection
+    // order and source identity while giving every member of a duplicate group its own VFS path.
     let attempts = filesystem.count().checked_add(1).ok_or_else(|| {
         ContainerMountError::new(report.clone(), ContainerMountErrorKind::EntryCountOverflow)
     })?;

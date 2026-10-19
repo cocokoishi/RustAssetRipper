@@ -735,6 +735,42 @@
     }
 
     #[test]
+    fn single_unityfs_entry_keeps_strict_path_collision_behavior() {
+        let input = make_bundle(b"incoming", 0, false, 0);
+        let dispatched = SchemeReader::read(&input).unwrap();
+        let mut filesystem = VirtualFileSystem::new();
+        filesystem
+            .create_directory(Some("/bundles/unityfs"))
+            .unwrap();
+        filesystem
+            .create_directory(Some("/bundles/unityfs/data"))
+            .unwrap();
+        filesystem
+            .write_all_bytes("/bundles/unityfs/data/file.bin", b"original")
+            .unwrap();
+
+        let error = dispatched
+            .mount_container_entries(
+                &mut filesystem,
+                Some("/bundles/unityfs"),
+                ContainerMountLimits::default(),
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            error.kind,
+            ContainerMountErrorKind::FileSystem { entry_index: 0, .. }
+        ));
+        assert_eq!(error.partial_report.mounted_entries, 0);
+        assert_eq!(
+            filesystem
+                .read_all_bytes("/bundles/unityfs/data/file.bin", 32)
+                .unwrap(),
+            b"original"
+        );
+    }
+
+    #[test]
     fn recursively_mounts_nested_unityfs_entries() {
         let inner = make_bundle(b"nested UnityFS leaf", 0, false, 0);
         let outer = make_bundle(&inner, 0, false, 0);

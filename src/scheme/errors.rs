@@ -189,6 +189,9 @@ pub enum ContainerMountErrorKind {
         entry_index: usize,
         attempts: usize,
     },
+    DuplicateEntryPathCountAllocationFailed {
+        requested: usize,
+    },
     EntryPathTooLong {
         entry_index: usize,
         path: String,
@@ -502,6 +505,10 @@ impl Display for ContainerMountErrorKind {
             } => write!(
                 formatter,
                 "could not assign a unique virtual path to duplicate entry {entry_index} after {attempts} candidates"
+            ),
+            Self::DuplicateEntryPathCountAllocationFailed { requested } => write!(
+                formatter,
+                "could not allocate an index for {requested} distinct UnityFS entry paths"
             ),
             Self::EntryPathTooLong {
                 entry_index,

@@ -412,8 +412,8 @@
         );
         let selected_target_path = &graph_workspace.files()[target_file_index].virtual_path;
         assert!(
-            selected_target_path.ends_with("/target.assets"),
-            "the first source entry keeps its unsuffixed logical path: {selected_target_path}"
+            selected_target_path.ends_with("/.asset_ripper_entry_1_0/target.assets"),
+            "the first duplicate retains its source order in a unique internal path: {selected_target_path}"
         );
         let other_target_path = graph_workspace
             .files()
