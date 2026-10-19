@@ -1,0 +1,13 @@
+# Frozen AssetRipper 2.0.0 project-export probes; the synthetic input bytes use a non-Scene filename.
+BUILD|Debug
+VERSION|2017.4.40f1|format=17|platform=NoTarget
+INPUT|LooseRoot.assets|5AE9CF939995BDE16A4933207C8EA02B66D7B40602820B0014E1ABF892E58F01
+CACHE|DefaultResources|900|GameObject|LegacyRoot|Layer=0|ComponentCount=1
+OBJECTS|gameObjects=1|scenes=0|prefabInstances=2
+EXPORT|duplicate-membership|ArgumentException
+BUILD|Release
+VERSION|2017.4.40f1|format=17|platform=NoTarget
+INPUT|LooseRoot.assets|5AE9CF939995BDE16A4933207C8EA02B66D7B40602820B0014E1ABF892E58F01
+CACHE|DefaultResources|900|GameObject|LegacyRoot|Layer=0|ComponentCount=1
+OBJECTS|gameObjects=1|scenes=0|prefabInstances=2
+EXPORT|duplicate-membership|ArgumentException

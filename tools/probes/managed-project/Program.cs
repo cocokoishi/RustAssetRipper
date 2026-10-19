@@ -268,6 +268,16 @@ if (args.Length > 0 && args[0] == "export-engine-resource-pointer")
         args.Length == 5 ? args[4] : "unity default resources");
 }
 
+if (args.Length > 0 && args[0] == "export-cached-gameobject")
+{
+    if (args.Length != 6)
+    {
+        Console.Error.WriteLine("usage: managed-project export-cached-gameobject <fixture-file> <input-root> <output-root> <rows-file> <input-file-name>");
+        return 2;
+    }
+    return ExportCachedGameObject(args[1], args[2], args[3], args[4], args[5]);
+}
+
 if (args.Length > 0 && args[0] == "export-sibling-bundle-reference-order")
 {
     if (args.Length != 4)

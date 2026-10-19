@@ -1448,6 +1448,46 @@ mod tests {
     }
 
     #[test]
+    fn web_project_export_reports_cached_gameobject_conflict_for_non_scene_assets_file() {
+        let _source_layouts = crate::SourceFactoryLayoutGuard::use_source_factory();
+        let source_bytes = include_bytes!("../export/legacy_prefab_2017_4_input.unity");
+        let source_evidence =
+            include_str!("../export/engine_resource_gameobject_non_scene_2017_4_fixture.txt");
+        assert!(source_evidence.contains("BUILD|Debug"));
+        assert!(source_evidence.contains("BUILD|Release"));
+        assert!(source_evidence.contains("VERSION|2017.4.40f1|format=17|platform=NoTarget"));
+        assert!(source_evidence.contains("INPUT|LooseRoot.assets|"));
+        assert!(source_evidence
+            .contains("CACHE|DefaultResources|900|GameObject|LegacyRoot|Layer=0|ComponentCount=1"));
+        assert!(source_evidence.contains("OBJECTS|gameObjects=1|scenes=0|prefabInstances=2"));
+        assert!(source_evidence.contains("EXPORT|duplicate-membership|ArgumentException"));
+        let directory = test_directory("engine-resource-gameobject-assets-prefab-conflict");
+        let source_path = directory.join("LooseRoot.assets");
+        std::fs::write(&source_path, source_bytes).expect("write public synthetic fixture");
+
+        let mut state = state(true);
+        state
+            .load(&[source_path.to_string_lossy().into_owned()])
+            .expect("load the synthetic GameObject from a non-Scene SerializedFile");
+        state
+            .set_singleton_data(
+                "EngineResourceData",
+                r#"{"DefaultResources":{"900":{"$type":"GameObject","Name":"LegacyRoot","Components":[4],"Layer":0}},"ExtraResources":{}}"#,
+            )
+            .expect("store a source-shaped GameObject cache entry");
+
+        let output_root = directory.join("project-custom");
+        let output_root_text = output_root.to_string_lossy().into_owned();
+        let error = state
+            .export_unity_project(&output_root_text, false)
+            .expect_err("the non-Scene GameObject is still claimed by a generated Prefab");
+        assert!(error.to_string().contains(
+            "stored GameObject cache redirect conflicts with existing Prefab collection membership"
+        ));
+        assert_eq!(std::fs::read(&source_path).unwrap(), source_bytes);
+    }
+
+    #[test]
     fn web_project_export_redirects_stored_texture2d_engine_resource_data() {
         let _source_layouts = crate::SourceFactoryLayoutGuard::use_source_factory();
         let fixture = include_str!("../export/texture_project_source_2022_3_fixture.txt");
