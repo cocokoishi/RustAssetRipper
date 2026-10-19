@@ -473,6 +473,9 @@ impl ProjectExportPointerMap {
                     PredefinedEngineResourceKind::DefaultResources => {
                         super::guid_policy::ENGINE_DEFAULT_RESOURCES_GUID_WORDS
                     }
+                    PredefinedEngineResourceKind::BuiltinExtra => {
+                        super::guid_policy::ENGINE_BUILTIN_EXTRA_GUID_WORDS
+                    }
                 };
                 let mut guid = [0; 16];
                 for (index, word) in words.iter().enumerate() {

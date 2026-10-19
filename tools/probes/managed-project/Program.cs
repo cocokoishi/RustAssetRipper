@@ -268,6 +268,21 @@ if (args.Length > 0 && args[0] == "export-engine-resource-pointer")
         args.Length == 5 ? args[4] : "unity default resources");
 }
 
+if (args.Length > 0 && args[0] == "export-injected-engine-resource-pointer")
+{
+    if (args.Length != 6)
+    {
+        Console.Error.WriteLine("usage: managed-project export-injected-engine-resource-pointer <input-root> <output-root> <rows-file> <engine-file-name> <target-path-id>");
+        return 2;
+    }
+    return ExportInjectedEngineResourcePointer(
+        args[1],
+        args[2],
+        args[3],
+        args[4],
+        long.Parse(args[5], System.Globalization.CultureInfo.InvariantCulture));
+}
+
 if (args.Length > 0 && args[0] == "export-cached-gameobject")
 {
     if (args.Length is not (6 or 9))

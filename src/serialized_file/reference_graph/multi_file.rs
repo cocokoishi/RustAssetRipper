@@ -42,6 +42,7 @@ pub(super) fn engine_resource_alias(normalized_name: &str) -> Option<&'static st
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PredefinedEngineResourceKind {
     DefaultResources,
+    BuiltinExtra,
 }
 
 fn predefined_engine_asset_resolution(
@@ -51,23 +52,29 @@ fn predefined_engine_asset_resolution(
     path_id: i64,
 ) -> Option<MultiFilePPtrResolution> {
     let dependency_name = identifier.fixed_path_name();
-    if !crate::io::special_names::is_default_resource(&dependency_name) {
+    let resource = if crate::io::special_names::is_default_resource(&dependency_name) {
+        PredefinedEngineResourceKind::DefaultResources
+    } else if crate::io::special_names::is_builtin_extra(&dependency_name) {
+        PredefinedEngineResourceKind::BuiltinExtra
+    } else {
         return None;
-    }
+    };
     let version = source_metadata.prefix.unity_version_text.as_deref()?;
     // Path-to-class tables exist only for selected versions. Engine-asset
     // export pointers carry no class (fileID keeps the PathID, GUID names
     // the engine file, type is Internal), so table-less versions still
     // resolve with an unknown class (0). The only class consumer (sprite
     // atlas validation) then fails closed loudly instead of guessing.
-    let class_id = if uses_engine_resources_2022_3(version) {
+    let class_id = if resource == PredefinedEngineResourceKind::DefaultResources
+        && uses_engine_resources_2022_3(version)
+    {
         default_resource_class_id(path_id, version)?
     } else {
         0
     };
     Some(MultiFilePPtrResolution::PredefinedEngineAsset {
         external_index,
-        resource: PredefinedEngineResourceKind::DefaultResources,
+        resource,
         path_id,
         class_id,
     })

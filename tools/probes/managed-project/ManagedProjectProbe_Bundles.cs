@@ -6,6 +6,7 @@ using System.Reflection.Metadata;
 using System.Reflection.PortableExecutable;
 using System.Text;
 using System.Text.RegularExpressions;
+using AssetRipper.Assets;
 using AssetRipper.Assets.Bundles;
 using AssetRipper.Assets.Collections;
 using AssetRipper.Assets.IO.Writing;
@@ -230,6 +231,103 @@ internal static partial class ManagedProjectProbe
         Console.WriteLine($"source_objects={string.Join(';', sourceObjects)}");
         Console.WriteLine($"project_asset_files={assetFiles.Length}");
         Console.WriteLine($"engine_pointer={expectedGuid}:900:0");
+        return 0;
+    }
+
+    internal static int ExportInjectedEngineResourcePointer(
+        string inputRootArgument,
+        string outputRootArgument,
+        string rowsArgument,
+        string engineFileName,
+        long targetPathId)
+    {
+        string inputRoot = Path.GetFullPath(inputRootArgument);
+        string outputRoot = Path.GetFullPath(outputRootArgument);
+        string rowsPath = Path.GetFullPath(rowsArgument);
+        EnsureEmptyOrMissingDirectory(inputRoot, "input");
+        EnsureEmptyOrMissingDirectory(outputRoot, "output");
+        if (File.Exists(rowsPath) || Directory.Exists(rowsPath))
+        {
+            throw new IOException($"refusing to overwrite probe rows {rowsPath}");
+        }
+        if (Path.GetFileName(engineFileName) != engineFileName || string.IsNullOrWhiteSpace(engineFileName))
+        {
+            throw new ArgumentException("engine file name must be one safe relative component", nameof(engineFileName));
+        }
+
+        Directory.CreateDirectory(inputRoot);
+        Directory.CreateDirectory(outputRoot);
+        Directory.CreateDirectory(Path.GetDirectoryName(rowsPath)!);
+
+        byte[] managedFile = BuildManagedRootFile(engineFileName, assetPointerPathId: targetPathId);
+        string managedPath = Path.Combine(inputRoot, "managed.assets");
+        File.WriteAllBytes(managedPath, managedFile);
+
+        Logger.Add(new ConsoleLogger());
+        ExportHandler handler = new(new FullConfiguration());
+        var gameData = handler.LoadAndProcess([inputRoot], LocalFileSystem.Instance);
+        AssetCollection? injectedCollection = gameData.GameBundle.ResolveCollection(engineFileName);
+        if (injectedCollection is null)
+        {
+            throw new InvalidDataException("frozen source did not inject the missing engine-resource collection");
+        }
+        IUnityObjectBase target = injectedCollection.OfType<IUnityObjectBase>().SingleOrDefault(asset => asset.PathID == targetPathId)
+            ?? throw new InvalidDataException($"injected collection has no asset at PathID {targetPathId}");
+        string targetName = target is INamed named ? named.Name.ToString() : "<unnamed>";
+
+        handler.Export(gameData, outputRoot, LocalFileSystem.Instance);
+        string projectAssets = Path.Combine(outputRoot, "ExportedProject", "Assets");
+        string[] assetFiles = Directory.Exists(projectAssets)
+            ? Directory.GetFiles(projectAssets, "*", SearchOption.AllDirectories)
+                .Where(path => new[] { ".asset", ".meta" }.Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase))
+                .OrderBy(path => Path.GetRelativePath(outputRoot, path), StringComparer.Ordinal)
+                .ToArray()
+            : [];
+        string? rootYamlPath = assetFiles.FirstOrDefault(path =>
+            string.Equals(Path.GetExtension(path), ".asset", StringComparison.OrdinalIgnoreCase)
+            && File.ReadAllText(path).Contains("m_Name: ManagedRoot", StringComparison.Ordinal));
+        if (rootYamlPath is null)
+        {
+            throw new InvalidDataException("injected engine-resource export omitted the managed root asset");
+        }
+        string rootYaml = File.ReadAllText(rootYamlPath);
+        const string expectedGuid = "0000000000000000f000000000000000";
+        if (!rootYaml.Contains($"guid: {expectedGuid}, type: 0", StringComparison.Ordinal)
+            || !rootYaml.Contains($"fileID: {targetPathId}", StringComparison.Ordinal))
+        {
+            throw new InvalidDataException("export did not preserve the injected builtin-extra internal pointer");
+        }
+
+        using StreamWriter rows = new(rowsPath, false, new UTF8Encoding(false)) { NewLine = "\n" };
+        rows.WriteLine("# Frozen source project export after injecting an absent builtin-extra collection from EngineAssetsTpk.");
+        rows.WriteLine("VERSION|2019.4.40f1|format=21|platform=StandaloneWin64Player");
+        rows.WriteLine($"INJECTED_COLLECTION|{injectedCollection.Name}|{injectedCollection.GetType().Name}");
+        rows.WriteLine($"TARGET|{target.ClassName}|{target.PathID}|{targetName}");
+        rows.WriteLine($"INPUT|managed.assets|{managedFile.Length}|{Convert.ToHexString(SHA256.HashData(managedFile))}");
+        rows.WriteLine($"INPUT_HEX|managed.assets|{Convert.ToHexString(managedFile)}");
+        foreach (string file in assetFiles)
+        {
+            string relative = Path.GetRelativePath(outputRoot, file).Replace('\\', '/');
+            byte[] bytes = File.ReadAllBytes(file);
+            byte[] stableBytes = bytes;
+            if (string.Equals(Path.GetExtension(file), ".meta", StringComparison.OrdinalIgnoreCase))
+            {
+                string normalized = string.Join(
+                    "\n",
+                    Encoding.UTF8.GetString(bytes)
+                        .Split('\n')
+                        .Where(line => !line.StartsWith("guid: ", StringComparison.Ordinal)
+                            && !line.StartsWith("timeCreated: ", StringComparison.Ordinal)))
+                    .TrimEnd('\r', '\n') + "\n";
+                stableBytes = Encoding.UTF8.GetBytes(normalized);
+            }
+            rows.WriteLine($"FILE|{relative}|{stableBytes.Length}|{Convert.ToHexString(SHA256.HashData(stableBytes))}");
+            rows.WriteLine($"CONTENT|{relative}|{Convert.ToBase64String(stableBytes)}");
+        }
+        Console.WriteLine($"injected_collection={injectedCollection.Name}");
+        Console.WriteLine($"target={target.ClassName}|{target.PathID}|{targetName}");
+        Console.WriteLine($"engine_pointer={expectedGuid}:{targetPathId}:0");
+        Console.WriteLine($"project_asset_files={assetFiles.Length}");
         return 0;
     }
 

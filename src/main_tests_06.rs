@@ -143,6 +143,74 @@
     }
 
     #[test]
+    fn export_project_resolves_tpk_injected_builtin_extra_pointer() {
+        let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
+        let fixture = include_str!("export/managed_reference_builtin_extra_tpk_injection_fixture.txt");
+        assert!(fixture.contains("TPK_BAND|2019.3.0b9|ExtraResources|10303|Material|Default-Material"));
+        assert!(fixture.contains("INJECTED_COLLECTION|unity_builtin_extra|InjectedEngineCollection"));
+        assert!(fixture.contains("TARGET|Material|10303|Default-Material"));
+        let input_hex = fixture
+            .lines()
+            .find_map(|line| line.strip_prefix("INPUT_HEX|managed.assets|"))
+            .expect("source fixture contains the root SerializedFile bytes");
+        assert!(
+            input_hex.len().is_multiple_of(2),
+            "fixture hex has even length"
+        );
+        let input_bytes = input_hex
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16)
+                    .expect("source fixture contains valid hexadecimal bytes")
+            })
+            .collect::<Vec<_>>();
+
+        let directory = TestInputDirectory::new_root();
+        let input_path = directory.join("managed.assets");
+        fs::write(&input_path, &input_bytes).expect("write the one-file source fixture");
+        let input = TestInputDirectory {
+            directory: directory.clone(),
+            files: vec![input_path.clone()],
+            subdirectories: Vec::new(),
+        };
+        let output_root = directory.join("project-injected-builtin-extra");
+        let mut status = Vec::new();
+        super::export_project_to(
+            std::slice::from_ref(&directory),
+            &output_root,
+            false,
+            &default_export_settings(),
+            &mut status,
+        )
+        .expect("the injected TPK resource should resolve as an engine pointer");
+
+        let source_yaml =
+            include_bytes!("export/managed_reference_builtin_extra_tpk_injection_source.asset");
+        let rust_yaml = fs::read(output_root.join("Assets/MonoBehaviour/ManagedRoot.asset"))
+            .expect("the managed-reference root asset is exported");
+        assert_eq!(
+            source_yaml.as_slice(),
+            rust_yaml,
+            "source and Rust root YAML match exactly"
+        );
+        let yaml = String::from_utf8(rust_yaml).expect("root YAML is UTF-8");
+        assert!(
+            yaml.contains("m_Asset: {fileID: 10303, guid: 0000000000000000f000000000000000, type: 0}")
+        );
+        assert!(
+            !output_root
+                .join("Assets/Material/Default-Material.mat")
+                .exists(),
+            "the injected built-in Material is referenced by FGUID and is not exported standalone"
+        );
+        assert_eq!(fs::read(&input_path).unwrap(), input_bytes);
+
+        fs::remove_dir_all(&output_root).expect("remove injected builtin-extra export");
+        drop(input);
+    }
+
+    #[test]
     fn export_project_uses_source_entry_order_for_duplicate_nested_bundle_dependencies() {
         let _source_layouts = super::SourceFactoryLayoutGuard::use_source_factory();
         let source_fixture = include_str!("export/managed_reference_sibling_bundle_fixture.txt");

@@ -233,7 +233,8 @@ ObjectData = audioBody,
         string targetFileName = "target.assets",
         bool arrayAssetPointer = false,
         bool repeatedResolvedArrayPointer = false,
-        string? secondTargetFileName = null)
+        string? secondTargetFileName = null,
+        long assetPointerPathId = 900)
     {
         const string versionText = "2019.4.40f1";
         List<byte> payload = [];
@@ -259,14 +260,14 @@ ObjectData = audioBody,
         {
             WriteI32(payload, 2); // NodeA.m_Assets array size
             WriteI32(payload, 1); // NodeA.m_Assets[0].m_FileID -> targetFileName
-            WriteI64(payload, 900); // NodeA.m_Assets[0].m_PathID
+            WriteI64(payload, assetPointerPathId); // NodeA.m_Assets[0].m_PathID
             WriteI32(payload, secondTargetFileName is null ? 1 : 2); // NodeA.m_Assets[1].m_FileID
             WriteI64(payload, repeatedResolvedArrayPointer ? 900 : 901); // second array target
         }
         else
         {
             WriteI32(payload, 1);   // NodeA.m_Asset.m_FileID -> targetFileName
-            WriteI64(payload, 900); // NodeA.m_Asset.m_PathID
+            WriteI64(payload, assetPointerPathId); // NodeA.m_Asset.m_PathID
         }
         WriteI64(payload, 200);
         WriteManagedType(payload, "NodeB");

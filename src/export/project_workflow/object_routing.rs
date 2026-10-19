@@ -789,6 +789,7 @@ fn predefined_engine_shader_name(
         crate::serialized_file::reference_graph::PredefinedEngineResourceKind::DefaultResources => {
             "D"
         }
+        crate::serialized_file::reference_graph::PredefinedEngineResourceKind::BuiltinExtra => "F",
     };
     // Default-resource shader rows are probe-verified identical across the embedded bands,
     // so the reverse name lookup is band-independent.

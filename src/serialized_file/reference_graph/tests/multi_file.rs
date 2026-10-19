@@ -690,6 +690,31 @@ fn default_resources_resolve_engine_assets_with_tpk_or_unknown_class() {
 }
 
 #[test]
+fn missing_builtin_extra_collection_resolves_as_injected_engine_resource() {
+    let source_graph = graph_with_reference(&[11], 11, 1, 10_303);
+    for dependency_name in [
+        "Library/unity builtin extra",
+        "resources/unity_builtin_extra",
+    ] {
+        let mut source_metadata = metadata_with_external(&[11], dependency_name);
+        source_metadata.prefix.unity_version_text = Some("2019.4.40f1".to_owned());
+        let files = [named_file("main.assets", &source_metadata, &source_graph)];
+        let graph = MultiFileReferenceGraph::build(&files).unwrap();
+        assert_eq!(
+            graph.references()[0].resolution,
+            MultiFilePPtrResolution::PredefinedEngineAsset {
+                external_index: 0,
+                resource: PredefinedEngineResourceKind::BuiltinExtra,
+                path_id: 10_303,
+                class_id: 0,
+            },
+            "missing {dependency_name} is supplied from EngineAssetsTpk"
+        );
+        assert!(graph.is_complete());
+    }
+}
+
+#[test]
 fn cross_file_graph_distinguishes_missing_target_objects_and_limits() {
     let source_metadata = metadata(&[11]);
     let source_graph = graph_with_reference(&[11], 11, 1, 404);
